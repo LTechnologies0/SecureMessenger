@@ -51,6 +51,13 @@ jobs:
           TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
           TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
 
+      # The Maven fallback (ca.denisab85:tdlib, 2022) is API-incompatible with
+      # protocol/telegram — fetch the prebuilt AAR instead. See docs/tdlib-build.md.
+      - name: Fetch prebuilt TDLib AAR
+        run: |
+          chmod +x scripts/fetch-tdlib-prebuilt.sh
+          ./scripts/fetch-tdlib-prebuilt.sh
+
       - name: Unit tests
         run: ./gradlew test --stacktrace --no-daemon
 
@@ -114,6 +121,11 @@ jobs:
 
       - name: Create local.properties
         run: echo "sdk.dir=${ANDROID_SDK_ROOT}" >> local.properties
+
+      - name: Fetch prebuilt TDLib AAR
+        run: |
+          chmod +x scripts/fetch-tdlib-prebuilt.sh
+          ./scripts/fetch-tdlib-prebuilt.sh
 
       - name: Generate KDoc (Dokka HTML)
         run: ./gradlew dokkaGenerate --stacktrace --no-daemon
