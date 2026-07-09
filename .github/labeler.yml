@@ -1,0 +1,68 @@
+android:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "app/**"
+          - "core/**"
+          - "data/**"
+          - "protocol/**"
+          - "**/*.kt"
+          - "**/AndroidManifest.xml"
+
+documentation:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "**/*.md"
+          - "docs/**"
+
+dependencies:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "**/build.gradle.kts"
+          - "gradle/**"
+          - ".github/dependabot.yml"
+
+ci/cd:
+  - changed-files:
+      - any-glob-to-any-file:
+          - ".github/workflows/**"
+          - ".github/dependabot.yml"
+
+security:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "SECURITY.md"
+          - "gradle/privacy-logging.pro"
+          - "gradle/release-signing.gradle"
+          - "core/network/**"
+          - "core/security/**"
+
+networking:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "core/proxy/**"
+          - "core/network/**"
+
+matrix:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "protocol/matrix/**"
+
+xmpp:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "protocol/xmpp/**"
+
+telegram:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "protocol/telegram/**"
+
+discord:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "protocol/discord/**"
+
+signal:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "protocol/signal/**"

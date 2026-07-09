@@ -1,0 +1,19 @@
+sdk.dir=/path/to/Android/Sdk
+ndk.dir=/path/to/Android/Sdk/ndk/26.1.10909125
+
+# ── Telegram (UNE FOIS, avant de compiler l'APK) ──────────────────────────
+# L'utilisateur final ne voit JAMAIS ces lignes — seulement téléphone + code SMS.
+# L'app Telegram officielle fait pareil : BuildVars.java contient APP_ID=4 et APP_HASH
+# en dur dans le code, compilé dans l'APK.
+#
+# Pour SecureMessenger, vous devez créer VOS identifiants (gratuit, 2 minutes) :
+#   1. Ouvrir https://my.telegram.org dans un navigateur
+#   2. Se connecter avec VOTRE numéro Telegram
+#   3. Menu « API development tools »
+#   4. Créer une application (nom quelconque, ex. OnionPhone)
+#   5. Copier api_id (nombre) et api_hash (texte) ci-dessous
+#   6. Recompiler : ./gradlew :app:assembleDebug
+#
+# Ou lancer : ./scripts/setup-telegram-api.sh
+telegram.api.id=0
+telegram.api.hash=

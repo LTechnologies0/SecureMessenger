@@ -1,0 +1,28 @@
+/build
+**/build
+/.gradle
+/local.properties
+*.iml
+.idea/
+.DS_Store
+/captures
+.externalNativeBuild
+.cxx
+.kotlin/
+protocol/telegram/libs/*.aar
+*.apk
+*.aab
+*.dex
+*.log
+*.hprof
+
+# Release signing — never commit
+keystore.properties
+release.keystore
+*.jks
+**/ci-release.keystore
+
+# Local dev artifacts
+dist/
+.tdlib-inspect/
+.vscode/
