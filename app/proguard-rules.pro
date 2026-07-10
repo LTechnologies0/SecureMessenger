@@ -26,5 +26,7 @@
 -keepnames class net.folivo.trixnity.**$$serializer { *; }
 -dontwarn net.folivo.trixnity.**
 
-# TDLib JNI (when present)
--keep class org.drinkless.td.** { *; }
+# TDLib JNI — package is org.drinkless.tdlib (not org.drinkless.td)
+-keep class org.drinkless.tdlib.** { *; }
+-keepclassmembers class org.drinkless.tdlib.** { *; }
+-keepclasseswithmembernames class * { native <methods>; }

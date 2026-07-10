@@ -72,6 +72,21 @@ jobs:
           done
           exit "$missing"
 
+      - name: Verify Telegram API secrets
+        run: |
+          if [ -z "${TELEGRAM_API_ID}" ] || [ "${TELEGRAM_API_ID}" = "0" ]; then
+            echo "::error::TELEGRAM_API_ID secret is missing or 0 — Telegram will be disabled in the release APK."
+            echo "Add repository secrets TELEGRAM_API_ID and TELEGRAM_API_HASH (see local.properties.example)."
+            exit 1
+          fi
+          if [ -z "${TELEGRAM_API_HASH}" ]; then
+            echo "::error::TELEGRAM_API_HASH secret is empty — Telegram will be disabled in the release APK."
+            exit 1
+          fi
+        env:
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+
       - name: Resolve release tag
         id: meta
         run: |
