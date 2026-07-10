@@ -175,7 +175,7 @@ fun AccountsScreen(
                 ProtocolId.MATRIX -> {
                     OutlinedTextField(field1, { field1 = it }, label = { Text("Homeserver (ex. matrix.org)") }, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(field2, { field2 = it }, label = { Text("User ID (@user:server)") }, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(field3, { field3 = it }, label = { Text("Password") }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(field3, { field3 = it }, label = { Text("Password or access token") }, modifier = Modifier.fillMaxWidth())
                 }
                 ProtocolId.TELEGRAM -> {
                     Text("Utilisez l'écran Telegram dédié depuis « Ajouter un compte ».")
@@ -192,11 +192,18 @@ fun AccountsScreen(
                             "password" to field2,
                             "server" to field3,
                         )
-                        ProtocolId.MATRIX -> mapOf(
-                            "homeserver" to field1.trim(),
-                            "userId" to field2.trim(),
-                            "password" to field3,
-                        )
+                        ProtocolId.MATRIX -> {
+                            val secret = field3.trim()
+                            buildMap {
+                                put("homeserver", field1.trim())
+                                put("userId", field2.trim())
+                                if (secret.startsWith("syt_")) {
+                                    put("accessToken", secret)
+                                } else {
+                                    put("password", field3)
+                                }
+                            }
+                        }
                         ProtocolId.TELEGRAM -> emptyMap()
                         else -> emptyMap()
                     }

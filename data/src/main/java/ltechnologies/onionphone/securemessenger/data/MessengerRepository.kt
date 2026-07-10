@@ -30,6 +30,9 @@ class MessengerRepository @Inject constructor(
     fun observeConversations(): Flow<List<Conversation>> =
         conversationDao.observeAll().map { list -> list.map { it.toDomain() } }
 
+    suspend fun listConversationsForAccount(accountId: String): List<Conversation> =
+        conversationDao.listForAccount(accountId).map { it.toDomain() }
+
     fun observeMessages(conversationId: String): Flow<List<Message>> =
         messageDao.observeForConversation(conversationId).map { list -> list.map { it.toDomain() } }
 

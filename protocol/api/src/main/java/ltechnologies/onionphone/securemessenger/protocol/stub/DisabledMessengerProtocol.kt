@@ -32,10 +32,10 @@ abstract class DisabledMessengerProtocol(
 
     override fun observeMessages(conversationId: String): Flow<List<Message>> = flowOf(emptyList())
 
-    override suspend fun sendMessage(conversationId: String, body: SanitizedText): SendResult =
+    override suspend fun sendMessage(conversationId: String, body: SanitizedText, accountId: String?): SendResult =
         SendResult.Failure(ProtocolNotEnabledException(id).message ?: "Not enabled")
 
-    override suspend fun disconnect() {
+    override suspend fun disconnect(accountId: String?) {
         _connectionState.value = ConnectionState.DISCONNECTED
     }
 }

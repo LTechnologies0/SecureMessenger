@@ -61,12 +61,23 @@ class XmppProtocol @Inject constructor(
     override val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val smack = SmackClientFacade(context)
     private val registration = XmppRegistration(context)
-    private var accountId: String? = null
 
-    /** Exposes underlying Smack managers for advanced features (OMEMO, file transfer, etc.). */
-    fun smackFacade(): SmackClientFacade = smack
+    /**
+     * Each connected XMPP account gets its own [SmackClientFacade] (and therefore its own
+     * [org.jivesoftware.smack.tcp.XMPPTCPConnection]). Keying by accountId lets two or more XMPP
+     * accounts stay connected simultaneously — connecting account B must never tear down account
+     * A's live connection, which was the root cause of "Bob's inbox shows Bob talking to
+     * himself" style bugs when only a single shared connection field existed.
+     */
+    private val sessions = java.util.concurrent.ConcurrentHashMap<String, SmackClientFacade>()
+
+    /** Exposes the underlying Smack facade for [accountId] (or the sole connected one if omitted). */
+    fun smackFacade(accountId: String? = null): SmackClientFacade? =
+        accountId?.let { sessions[it] } ?: sessions.values.singleOrNull()
+
+    override fun isAccountConnected(accountId: String): Boolean =
+        sessions[accountId]?.isConnected() == true
 
     override val canRegister: Boolean = true
 
@@ -139,22 +150,27 @@ class XmppProtocol @Inject constructor(
                     ?: return@withContext ConnectionResult.Failure("Missing password")
                 val server = account.secrets["server"]
 
-                accountId = account.accountId
+                // Reconnecting the SAME account: tear down its old session only, leaving any
+                // other simultaneously-connected accounts of this protocol untouched.
+                sessions.remove(account.accountId)?.disconnect()
+
+                val smack = SmackClientFacade(context)
                 smack.connect(jid, password, server, proxy)
+                sessions[account.accountId] = smack
 
                 smack.chatManager?.addIncomingListener { from, message, _ ->
                     scope.launch {
-                        handleIncoming(account.accountId, from.toString(), message)
+                        handleIncoming(account.accountId, smack, from.toString(), message)
                     }
                 }
 
                 smack.roster?.addRosterListener(object : RosterListener {
                     override fun entriesAdded(addresses: MutableCollection<Jid>?) {
-                        scope.launch { syncRoster(account.accountId) }
+                        scope.launch { syncRoster(account.accountId, smack) }
                     }
 
                     override fun entriesUpdated(addresses: MutableCollection<Jid>?) {
-                        scope.launch { syncRoster(account.accountId) }
+                        scope.launch { syncRoster(account.accountId, smack) }
                     }
 
                     override fun entriesDeleted(addresses: MutableCollection<Jid>?) = Unit
@@ -162,7 +178,7 @@ class XmppProtocol @Inject constructor(
                     override fun presenceChanged(presence: Presence?) = Unit
                 })
 
-                syncRoster(account.accountId)
+                syncRoster(account.accountId, smack)
 
                 scope.launch {
                     smack.rosterEntries().forEach { entry ->
@@ -188,7 +204,7 @@ class XmppProtocol @Inject constructor(
             }
         }
 
-    private suspend fun syncRoster(accId: String) {
+    private suspend fun syncRoster(accId: String, smack: SmackClientFacade) {
         val entries = smack.rosterEntries()
         val conversations = entries.map { entry ->
             val remote = SmackClientFacade.rosterJidString(entry)
@@ -206,7 +222,12 @@ class XmppProtocol @Inject constructor(
         repository.upsertConversations(conversations)
     }
 
-    private suspend fun handleIncoming(accId: String, remoteJid: String, smackMessage: SmackMessage) {
+    private suspend fun handleIncoming(
+        accId: String,
+        smack: SmackClientFacade,
+        remoteJid: String,
+        smackMessage: SmackMessage,
+    ) {
         val omemoBody = smack.omemoHelper?.tryDecrypt(remoteJid, smackMessage)
         val body = omemoBody ?: smackMessage.body ?: return
         val convId = conversationId(accId, remoteJid)
@@ -244,9 +265,14 @@ class XmppProtocol @Inject constructor(
     override fun observeMessages(conversationId: String): Flow<List<Message>> =
         repository.observeMessages(conversationId)
 
-    override suspend fun startConversation(remoteId: String, initialMessage: SanitizedText?): SendResult =
+    override suspend fun startConversation(
+        remoteId: String,
+        initialMessage: SanitizedText?,
+        accountId: String?,
+    ): SendResult =
         withContext(Dispatchers.IO) {
-            val accId = accountId ?: return@withContext SendResult.Failure("Not connected")
+            val accId = accountId ?: sessions.keys.singleOrNull()
+                ?: return@withContext SendResult.Failure("Not connected")
             val convId = conversationId(accId, remoteId)
             repository.upsertConversation(
                 Conversation(
@@ -258,16 +284,19 @@ class XmppProtocol @Inject constructor(
                 ),
             )
             if (initialMessage != null) {
-                sendMessage(convId, initialMessage)
+                sendMessage(convId, initialMessage, accId)
             } else {
                 SendResult.Success(convId)
             }
         }
 
-    override suspend fun sendMessage(conversationId: String, body: SanitizedText): SendResult =
+    override suspend fun sendMessage(conversationId: String, body: SanitizedText, accountId: String?): SendResult =
         withContext(Dispatchers.IO) {
             try {
                 networkGuard.assertNetworkAllowed()
+                val accId = accountId ?: conversationId.substringBefore('_', missingDelimiterValue = conversationId)
+                val smack = sessions[accId]
+                    ?: return@withContext SendResult.Failure("Account not connected")
                 val remoteJid = conversationId.substringAfter('_', missingDelimiterValue = conversationId)
                 smack.sendChatMessage(remoteJid, body.value)
 
@@ -289,10 +318,17 @@ class XmppProtocol @Inject constructor(
             }
         }
 
-    override suspend fun disconnect() {
+    override suspend fun disconnect(accountId: String?) {
         withContext(Dispatchers.IO) {
-            smack.disconnect()
-            accountId?.let { id ->
+            val toClose = if (accountId != null) {
+                sessions.remove(accountId)?.let { listOf(accountId to it) } ?: emptyList()
+            } else {
+                val all = sessions.entries.map { it.key to it.value }
+                sessions.clear()
+                all
+            }
+            toClose.forEach { (id, facade) ->
+                facade.disconnect()
                 repository.upsertAccount(
                     ltechnologies.onionphone.securemessenger.core.model.Account(
                         id = id,
@@ -302,7 +338,9 @@ class XmppProtocol @Inject constructor(
                     ),
                 )
             }
-            _connectionState.value = ConnectionState.DISCONNECTED
+            if (sessions.isEmpty()) {
+                _connectionState.value = ConnectionState.DISCONNECTED
+            }
         }
     }
 

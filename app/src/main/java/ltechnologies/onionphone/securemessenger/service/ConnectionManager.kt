@@ -206,6 +206,18 @@ class ConnectionManager @Inject constructor(
                     continue
                 }
 
+                // restorePersistedAccounts() runs on every "proxy became healthy" transition, not
+                // just app cold-start. A live, already-CONNECTED session shouldn't be torn down
+                // and rebuilt just because a routine proxy health probe blipped — XmppProtocol and
+                // MatrixProtocol both disconnect the old session before reconnecting, so churning
+                // an already-good connection here was silently dropping in-flight messages on
+                // every health-check flap. Only (re)connect accounts that actually need it.
+                if (existing?.connectionState == ConnectionState.CONNECTED &&
+                    protocolRegistry.get(protocolId)?.isAccountConnected(accountId) == true
+                ) {
+                    continue
+                }
+
                 val secrets = credentialStore.getAllForAccount(accountId)
                     .filterKeys { !it.startsWith("__") }
                 if (secrets.isEmpty()) continue
@@ -235,13 +247,36 @@ class ConnectionManager @Inject constructor(
     suspend fun disconnectAccount(accountId: String) {
         val protocolName = credentialStore.getProtocol(accountId)
         val protocolId = protocolName?.let { runCatching { ProtocolId.valueOf(it) }.getOrNull() }
-        protocolId?.let { protocolRegistry.get(it)?.disconnect() }
+        // Pass the accountId through so protocols managing multiple simultaneous accounts of the
+        // same type (XMPP, Matrix) only tear down this one session, not every connected account.
+        protocolId?.let { protocolRegistry.get(it)?.disconnect(accountId) }
         credentialStore.removeAccount(accountId)
         repository.deleteAccount(accountId)
     }
 
     suspend fun disconnect(protocolId: ProtocolId) {
         protocolRegistry.get(protocolId)?.disconnect()
+    }
+
+    /**
+     * Confirms a proxy-unhealthy reading before tearing down every live session.
+     *
+     * A single failed SOCKS+remote-DNS health probe (over Tor, on Waydroid) can be a transient
+     * blip rather than Tor actually going down — but blindly calling [disconnectAll] on every
+     * such blip was killing perfectly healthy XMPP/Matrix sessions and dropping in-flight
+     * messages. Re-checking after a short delay keeps the kill switch (Tor-only enforcement)
+     * intact for genuine outages while filtering out single-probe noise.
+     */
+    private suspend fun disconnectIfStillUnhealthy() {
+        kotlinx.coroutines.delay(3_000)
+        proxyManager.refreshStatusAndWait()
+        if (!proxyManager.isNetworkAllowed()) {
+            _killswitchActive.value = true
+            disconnectAll()
+        } else {
+            _killswitchActive.value = false
+            lastProxyHealthy = true
+        }
     }
 
     suspend fun disconnectAll() {
@@ -265,15 +300,41 @@ class ConnectionManager @Inject constructor(
         _killswitchActive.value = !healthy
 
         when {
-            !healthy -> disconnectAll()
+            !healthy -> disconnectIfStillUnhealthy()
             wasHealthy == false && healthy -> restorePersistedAccounts()
-            previousConfig != null && previousConfig != config -> {
+            previousConfig != null && isMeaningfulConfigChange(previousConfig, config) -> {
                 Timber.i("Proxy config changed — reconnecting through ${config.host}:${config.port}")
                 disconnectAll()
                 reapplyTelegramProxy(config)
                 restorePersistedAccounts()
             }
         }
+    }
+
+    /**
+     * True only when a setting that actually requires tearing down live connections changed.
+     *
+     * [ProxyManager] rewrites [ProxyConfig.host] on every health check to whichever bridge
+     * candidate ([SocksEndpointResolver]) answered a TCP probe fastest — that pick can legitimately
+     * flip between equally-valid loopback bridges (e.g. "127.0.0.1" vs "192.168.240.1" on Waydroid)
+     * from one check to the next without Tor itself changing at all. Reconnecting every account
+     * whenever that happens caused a disconnect/reconnect storm approximately every health-check
+     * cycle, dropping in-flight XMPP/Matrix messages. Only react when the port, credentials, or
+     * provider changed, or when the host changed to something that isn't just another
+     * host-bridge candidate for the same target (i.e. a genuine reconfiguration).
+     */
+    private fun isMeaningfulConfigChange(previous: ProxyConfig, current: ProxyConfig): Boolean {
+        if (previous.port != current.port ||
+            previous.torProvider != current.torProvider ||
+            previous.username != current.username ||
+            previous.password != current.password
+        ) {
+            return true
+        }
+        if (previous.host == current.host) return false
+        val bothBridgeCandidates = SocksEndpointResolver.isHostBridgeEndpoint(previous.host) &&
+            SocksEndpointResolver.isHostBridgeEndpoint(current.host)
+        return !bothBridgeCandidates
     }
 
     private suspend fun reapplyTelegramProxy(config: ProxyConfig) {

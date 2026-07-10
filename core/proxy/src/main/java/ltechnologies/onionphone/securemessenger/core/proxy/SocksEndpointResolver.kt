@@ -17,14 +17,45 @@ object SocksEndpointResolver {
     private const val DEFAULT_SOCKS_PORT = 9050
 
     /**
+     * How long a confirmed-reachable host is trusted without re-probing every candidate.
+     *
+     * Without this cache, every call (each account connect + every proxy health check) re-runs
+     * a fresh TCP probe race across all bridge candidates. Under Tor + Waydroid, individual
+     * probes occasionally miss their short timeout even though the bridge is fine, which made
+     * this function flip-flop between e.g. "127.0.0.1" and "192.168.240.1" from one call to the
+     * next. [ConnectionManager] treats any resolved-host change as a proxy config change and
+     * tears down + reconnects every account, so that flip-flopping caused a disconnect/reconnect
+     * storm every time an account or health check ran — dropping in-flight messages along the
+     * way. Sticking with the last known-good host for a while removes that noise at the source.
+     */
+    private const val CACHE_TTL_MS = 120_000L
+
+    private data class CachedHost(val key: String, val host: String, val resolvedAtMs: Long)
+
+    @Volatile
+    private var cached: CachedHost? = null
+
+    /**
      * Returns a SOCKS host that is actually reachable from this process. If [configuredHost]
      * normalizes to loopback, probes the emulator alias, Waydroid bridge, and default gateway
      * (in that order) and returns the first one accepting a TCP connection on [port];
      * falls back to the normalized loopback address if none respond.
+     *
+     * A previously confirmed-reachable host is reused for [CACHE_TTL_MS] (re-verified first,
+     * before falling back to the full candidate race) to avoid transient probe flakiness
+     * causing the resolved host to change from call to call. See [CACHE_TTL_MS] kdoc.
      */
     fun resolveReachableHost(configuredHost: String, port: Int = DEFAULT_SOCKS_PORT): String {
         val normalized = ProxyConfigNormalizer.normalizeHost(configuredHost)
         if (normalized != InvizibleConstants.LOOPBACK) return normalized
+
+        val cacheKey = "$normalized:$port"
+        val now = System.currentTimeMillis()
+        val hit = cached
+        if (hit != null && hit.key == cacheKey && now - hit.resolvedAtMs < CACHE_TTL_MS && canConnect(hit.host, port)) {
+            cached = hit.copy(resolvedAtMs = now)
+            return hit.host
+        }
 
         val candidates = buildList {
             add(normalized)
@@ -33,7 +64,9 @@ object SocksEndpointResolver {
             readDefaultGateway()?.let { add(it) }
         }.distinct()
 
-        return candidates.firstOrNull { canConnect(it, port) } ?: normalized
+        val resolved = candidates.firstOrNull { canConnect(it, port) } ?: normalized
+        cached = CachedHost(cacheKey, resolved, now)
+        return resolved
     }
 
     internal fun readDefaultGateway(): String? = try {
@@ -90,7 +123,7 @@ object SocksEndpointResolver {
 
     private fun canConnect(host: String, port: Int): Boolean = try {
         java.net.Socket().use { socket ->
-            socket.connect(java.net.InetSocketAddress(host, port), 1_500)
+            socket.connect(java.net.InetSocketAddress(host, port), 2_500)
         }
         true
     } catch (_: Exception) {

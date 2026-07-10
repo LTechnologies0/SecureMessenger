@@ -32,6 +32,20 @@ interface MessengerProtocol {
     val connectionState: StateFlow<ConnectionState>
 
     /**
+     * Whether [accountId] specifically has a live, authenticated session right now.
+     *
+     * [connectionState] is protocol-wide: for protocols that support several simultaneous
+     * accounts (XMPP, Matrix) it flips to [ConnectionState.CONNECTED] as soon as *any* account
+     * connects, so it cannot tell "account A is connected" apart from "account B is connected
+     * but A isn't". Callers that need to avoid needlessly reconnecting an already-live session
+     * (e.g. [ltechnologies.onionphone.securemessenger.service.ConnectionManager]'s account
+     * restore, which must not churn a healthy connection just because a sibling account of the
+     * same protocol is mid-(re)connect) must check this per-account signal instead. Default
+     * implementation falls back to the protocol-wide state for single-account protocols.
+     */
+    fun isAccountConnected(accountId: String): Boolean = connectionState.value == ConnectionState.CONNECTED
+
+    /**
      * Authenticates with the server using stored [account] credentials, routed through [proxy]
      * (always a Tor SOCKS5 endpoint in this app). Returns [ConnectionResult.Success],
      * a pending [AuthStep] via [pendingAuthStep], or a failure.
@@ -65,12 +79,28 @@ interface MessengerProtocol {
     /** Live list of messages for [conversationId], newest-appended. */
     fun observeMessages(conversationId: String): Flow<List<Message>>
 
-    /** Starts a new conversation with [remoteId], optionally sending [initialMessage]. */
-    suspend fun startConversation(remoteId: String, initialMessage: SanitizedText? = null): SendResult =
-        SendResult.Failure("Not supported")
+    /**
+     * Starts a new conversation with [remoteId], optionally sending [initialMessage].
+     *
+     * [accountId] picks which locally-connected account originates the conversation when a
+     * protocol has more than one account connected simultaneously (e.g. two XMPP or Matrix
+     * accounts logged in at once). When null, implementations fall back to a single-account
+     * default, which may be ambiguous if several accounts of the same protocol are connected.
+     */
+    suspend fun startConversation(
+        remoteId: String,
+        initialMessage: SanitizedText? = null,
+        accountId: String? = null,
+    ): SendResult = SendResult.Failure("Not supported")
 
-    /** Sends [body] to [conversationId] and returns the delivery outcome. */
-    suspend fun sendMessage(conversationId: String, body: SanitizedText): SendResult
+    /**
+     * Sends [body] to [conversationId] and returns the delivery outcome.
+     *
+     * [accountId] disambiguates which connected account should send when a protocol supports
+     * multiple simultaneous accounts. When null, implementations may derive it from
+     * [conversationId] (most conversation IDs are namespaced as `"${accountId}_$remoteId"`).
+     */
+    suspend fun sendMessage(conversationId: String, body: SanitizedText, accountId: String? = null): SendResult
 
     /** Sync full message history when the user opens a conversation. */
     suspend fun loadMessageHistory(conversationId: String): HistoryLoadResult =
@@ -79,8 +109,15 @@ interface MessengerProtocol {
     /** Protocol hook when the user leaves a conversation screen. */
     suspend fun closeConversation(conversationId: String) = Unit
 
-    /** Tears down the connection and releases any underlying client/socket resources. */
-    suspend fun disconnect()
+    /**
+     * Tears down the connection and releases any underlying client/socket resources.
+     *
+     * When [accountId] is null, all sessions this protocol instance manages are torn down
+     * (used for full logout / app-wide disconnect). When set, only that single account's
+     * session is closed, leaving other simultaneously-connected accounts of the same protocol
+     * untouched.
+     */
+    suspend fun disconnect(accountId: String? = null)
 }
 
 /** Thrown when the app attempts to use a [MessengerProtocol] that hasn't been enabled/configured. */

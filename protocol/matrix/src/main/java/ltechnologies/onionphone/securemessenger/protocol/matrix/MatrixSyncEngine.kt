@@ -6,6 +6,9 @@ import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.parameter
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.isSuccess
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -48,6 +51,7 @@ class MatrixSyncEngine(
     ) {
         stop()
         job = scope.launch {
+            refreshStaleRoomTitles(accountId, userId, client, homeserver, accessToken)
             var nextBatch: String? = since
             while (isActive) {
                 try {
@@ -67,7 +71,7 @@ class MatrixSyncEngine(
                         nextBatch = batch
                         onSinceUpdated(batch)
                     }
-                    processRooms(accountId, userId, body)
+                    processRooms(accountId, userId, body, client, homeserver, accessToken)
                 } catch (e: Exception) {
                     Timber.w(e, "Matrix sync error")
                     delay(5_000)
@@ -81,16 +85,32 @@ class MatrixSyncEngine(
         job = null
     }
 
-    private suspend fun processRooms(accountId: String, userId: String, sync: SyncResponse) {
+    private suspend fun processRooms(
+        accountId: String,
+        userId: String,
+        sync: SyncResponse,
+        client: HttpClient,
+        homeserver: String,
+        accessToken: String,
+    ) {
         val rooms = sync.rooms?.join ?: return
         val conversations = mutableListOf<Conversation>()
         val messages = mutableListOf<Message>()
 
         rooms.forEach { (roomId, roomData) ->
             val convId = MatrixProtocol.conversationIdFor(accountId, roomId)
-            val title = roomData.state?.events?.firstOrNull { it.type == "m.room.name" }
-                ?.content?.get("name")?.jsonPrimitive?.content
-                ?: roomId
+            val stateEvents = buildList {
+                addAll(roomData.state?.events.orEmpty())
+                roomData.timeline?.events.orEmpty().forEach { event ->
+                    when (event.type) {
+                        "m.room.member", "m.room.name", "m.room.message" -> add(event)
+                    }
+                }
+            }
+            var title = MatrixRoomTitles.resolve(roomId, stateEvents, userId)
+            if (title.startsWith("!")) {
+                fetchJoinedPeerLabel(client, homeserver, accessToken, roomId, userId)?.let { title = it }
+            }
 
             var lastPreview: String? = null
             var lastAt = 0L
@@ -143,6 +163,50 @@ class MatrixSyncEngine(
         if (conversations.isNotEmpty()) repository.upsertConversations(conversations)
         if (messages.isNotEmpty()) repository.upsertMessages(messages)
     }
+
+    private suspend fun fetchJoinedPeerLabel(
+        client: HttpClient,
+        homeserver: String,
+        accessToken: String,
+        roomId: String,
+        userId: String,
+    ): String? {
+        return runCatching {
+            val encodedRoom = URLEncoder.encode(roomId, StandardCharsets.UTF_8)
+            val url = "${homeserver.trimEnd('/')}/_matrix/client/v3/rooms/$encodedRoom/joined_members"
+            val response = client.get(url) {
+                header("Authorization", "Bearer $accessToken")
+            }
+            if (!response.status.isSuccess()) return null
+            val body: JoinedMembersResponse = response.body()
+            body.joined.entries
+                .filter { (memberId, _) -> memberId != userId }
+                .map { (memberId, profile) ->
+                    profile.displayName?.takeIf { it.isNotBlank() } ?: memberId
+                }
+                .distinct()
+                .takeIf { it.isNotEmpty() }
+                ?.joinToString(", ")
+        }.getOrNull()
+    }
+
+    private suspend fun refreshStaleRoomTitles(
+        accountId: String,
+        userId: String,
+        client: HttpClient,
+        homeserver: String,
+        accessToken: String,
+    ) {
+        val stale = repository.listConversationsForAccount(accountId)
+            .filter { it.protocol == ProtocolId.MATRIX && it.title.startsWith("!") }
+        if (stale.isEmpty()) return
+        val updates = stale.mapNotNull { conv ->
+            val label = fetchJoinedPeerLabel(client, homeserver, accessToken, conv.remoteId, userId)
+                ?: return@mapNotNull null
+            conv.copy(title = label)
+        }
+        if (updates.isNotEmpty()) repository.upsertConversations(updates)
+    }
 }
 
 @Serializable
@@ -176,7 +240,18 @@ data class TimelineSection(
 data class RoomEvent(
     val type: String? = null,
     val sender: String? = null,
+    @SerialName("state_key") val stateKey: String? = null,
     @SerialName("event_id") val eventId: String? = null,
     @SerialName("origin_server_ts") val originServerTs: Long? = null,
     val content: JsonObject? = null,
+)
+
+@Serializable
+data class JoinedMembersResponse(
+    val joined: Map<String, JoinedMemberProfile> = emptyMap(),
+)
+
+@Serializable
+data class JoinedMemberProfile(
+    @SerialName("display_name") val displayName: String? = null,
 )

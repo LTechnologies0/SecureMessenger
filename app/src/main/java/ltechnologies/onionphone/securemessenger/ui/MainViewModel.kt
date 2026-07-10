@@ -241,7 +241,7 @@ class MainViewModel @Inject constructor(
                 return@launch
             }
             val sanitized = message?.let { MessageSanitizer.sanitize(it) }
-            val result = impl.startConversation(remoteId, sanitized)
+            val result = impl.startConversation(remoteId, sanitized, resolvedAccountId)
             val convId = "${resolvedAccountId}_$remoteId"
             onResult(if (result is ltechnologies.onionphone.securemessenger.core.model.SendResult.Success) convId else null)
         }

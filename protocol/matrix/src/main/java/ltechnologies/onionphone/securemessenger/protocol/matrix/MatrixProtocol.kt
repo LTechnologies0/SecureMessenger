@@ -51,12 +51,24 @@ class MatrixProtocol @Inject constructor(
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     override val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
 
-    private var accountId: String? = null
-    private var trixnityEngine: TrixnityMatrixEngine? = null
-    private var httpFallback: MatrixHttpFallback? = null
+    /** Live session state for one connected Matrix account. */
+    private class MatrixSession(
+        var trixnityEngine: TrixnityMatrixEngine? = null,
+        var httpFallback: MatrixHttpFallback? = null,
+    )
+
+    /**
+     * One [MatrixSession] per connected accountId. Two or more Matrix accounts can be logged in
+     * simultaneously — connecting account B must never tear down account A's live sync loop,
+     * which previously happened because [connect] eagerly disconnected the single shared session.
+     */
+    private val sessions = java.util.concurrent.ConcurrentHashMap<String, MatrixSession>()
     private val registration = MatrixRegistration()
 
-    fun trixnityEngine(): TrixnityMatrixEngine? = trixnityEngine
+    fun trixnityEngine(accountId: String? = null): TrixnityMatrixEngine? =
+        (accountId?.let { sessions[it] } ?: sessions.values.singleOrNull())?.trixnityEngine
+
+    override fun isAccountConnected(accountId: String): Boolean = sessions.containsKey(accountId)
 
     override val canRegister: Boolean = true
 
@@ -117,8 +129,8 @@ class MatrixProtocol @Inject constructor(
                 // site delegating to matrix.example.org) 404 on every /_matrix/... call otherwise.
                 val apiBaseUrl = MatrixUrls.resolveApiBaseUrl(server, proxy)
 
-                disconnect()
-                accountId = account.accountId
+                // Reconnecting the SAME account: tear down its old session only.
+                disconnect(account.accountId)
 
                 val onSinceUpdated: (String) -> Unit = { batch ->
                     credentialStore.put(account.accountId, SYNC_SINCE_KEY, batch)
@@ -166,7 +178,7 @@ class MatrixProtocol @Inject constructor(
                         cause?.message ?: "Matrix connect failed",
                     )
                 }
-                httpFallback = fallback
+                sessions[account.accountId] = MatrixSession(httpFallback = fallback)
                 fallback.persistedAccessToken?.let { token ->
                     credentialStore.put(account.accountId, ACCESS_TOKEN_KEY, token)
                 }
@@ -197,27 +209,39 @@ class MatrixProtocol @Inject constructor(
     override fun observeMessages(conversationId: String): Flow<List<Message>> =
         repository.observeMessages(conversationId)
 
-    override suspend fun startConversation(remoteId: String, initialMessage: SanitizedText?): SendResult {
-        val accId = accountId ?: return SendResult.Failure("Not connected")
+    override suspend fun startConversation(
+        remoteId: String,
+        initialMessage: SanitizedText?,
+        accountId: String?,
+    ): SendResult {
+        val accId = accountId ?: sessions.keys.singleOrNull() ?: return SendResult.Failure("Not connected")
         val convId = conversationIdFor(accId, remoteId)
+        val title = when {
+            remoteId.startsWith("@") -> remoteId
+            remoteId.startsWith("!") -> "Conversation Matrix"
+            else -> remoteId
+        }
         repository.upsertConversation(
             Conversation(
                 id = convId,
                 protocol = ProtocolId.MATRIX,
                 accountId = accId,
                 remoteId = remoteId,
-                title = remoteId,
+                title = title,
             ),
         )
-        return if (initialMessage != null) sendMessage(convId, initialMessage) else SendResult.Success(convId)
+        return if (initialMessage != null) sendMessage(convId, initialMessage, accId) else SendResult.Success(convId)
     }
 
-    override suspend fun sendMessage(conversationId: String, body: SanitizedText): SendResult =
+    override suspend fun sendMessage(conversationId: String, body: SanitizedText, accountId: String?): SendResult =
         withContext(Dispatchers.IO) {
             try {
                 networkGuard.assertNetworkAllowed()
+                val accId = accountId
+                    ?: conversationId.substringBefore('_', missingDelimiterValue = conversationId)
+                val session = sessions[accId] ?: return@withContext SendResult.Failure("Account not connected")
                 val roomId = conversationId.substringAfter('_', missingDelimiterValue = conversationId)
-                trixnityEngine?.let {
+                session.trixnityEngine?.let {
                     it.sendText(roomId, body.value)
                     val msg = Message(
                         id = "${conversationId}_${System.currentTimeMillis()}",
@@ -231,20 +255,25 @@ class MatrixProtocol @Inject constructor(
                     repository.upsertMessage(msg)
                     return@withContext SendResult.Success(msg.id)
                 }
-                httpFallback?.sendMessage(conversationId, body)
+                session.httpFallback?.sendMessage(conversationId, body)
                     ?: SendResult.Failure("Not connected")
             } catch (e: Exception) {
                 SendResult.Failure(e.message ?: "Send failed")
             }
         }
 
-    override suspend fun disconnect() {
+    override suspend fun disconnect(accountId: String?) {
         withContext(Dispatchers.IO) {
-            trixnityEngine?.close()
-            trixnityEngine = null
-            httpFallback?.disconnect()
-            httpFallback = null
-            accountId?.let { id ->
+            val toClose = if (accountId != null) {
+                sessions.remove(accountId)?.let { listOf(accountId to it) } ?: emptyList()
+            } else {
+                val all = sessions.entries.map { it.key to it.value }
+                sessions.clear()
+                all
+            }
+            toClose.forEach { (id, session) ->
+                session.trixnityEngine?.close()
+                session.httpFallback?.disconnect()
                 repository.upsertAccount(
                     ltechnologies.onionphone.securemessenger.core.model.Account(
                         id = id,
@@ -254,7 +283,9 @@ class MatrixProtocol @Inject constructor(
                     ),
                 )
             }
-            _connectionState.value = ConnectionState.DISCONNECTED
+            if (sessions.isEmpty()) {
+                _connectionState.value = ConnectionState.DISCONNECTED
+            }
         }
     }
 

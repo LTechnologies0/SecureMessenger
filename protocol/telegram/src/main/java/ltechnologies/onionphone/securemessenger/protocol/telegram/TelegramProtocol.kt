@@ -550,8 +550,15 @@ class TelegramProtocol @Inject constructor(
         }
     }
 
-    override suspend fun startConversation(remoteId: String, initialMessage: SanitizedText?): SendResult {
-        val accId = accountId ?: return SendResult.Failure("Not connected")
+    override suspend fun startConversation(
+        remoteId: String,
+        initialMessage: SanitizedText?,
+        accountId: String?,
+    ): SendResult {
+        // Telegram only supports a single connected account per app instance today; the
+        // [accountId] parameter is accepted for interface symmetry with XMPP/Matrix but
+        // intentionally ignored here in favor of the sole active TDLib session.
+        val accId = this.accountId ?: return SendResult.Failure("Not connected")
         val tdFacade = facade ?: return SendResult.Failure("Not connected")
 
         val chat = withContext(tdDispatcher) {
@@ -568,7 +575,7 @@ class TelegramProtocol @Inject constructor(
         return if (initialMessage != null) sendMessage(convId, initialMessage) else SendResult.Success(convId)
     }
 
-    override suspend fun sendMessage(conversationId: String, body: SanitizedText): SendResult =
+    override suspend fun sendMessage(conversationId: String, body: SanitizedText, accountId: String?): SendResult =
         withContext(tdDispatcher) {
             val tdFacade = facade
             if (tdFacade == null || !nativeAvailable) {
@@ -580,7 +587,7 @@ class TelegramProtocol @Inject constructor(
             SendResult.Success("pending")
         }
 
-    override suspend fun disconnect() {
+    override suspend fun disconnect(accountId: String?) {
         withContext(tdDispatcher) {
             openChatId?.let { facade?.closeChat(it) }
             openChatId = null
@@ -592,7 +599,7 @@ class TelegramProtocol @Inject constructor(
             awaitingAuth = AuthStepKind.NONE
             _pendingAuthStep.value = null
             pendingPhone = null
-            accountId = null
+            this@TelegramProtocol.accountId = null
             _connectionState.value = ConnectionState.DISCONNECTED
         }
     }

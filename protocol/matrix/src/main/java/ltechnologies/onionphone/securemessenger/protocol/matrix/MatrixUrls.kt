@@ -49,14 +49,32 @@ internal object MatrixUrls {
     suspend fun resolveApiBaseUrl(normalizedServer: String, proxy: ProxyConfig): String {
         val client = MatrixHttpClientFactory.create(proxy)
         return try {
-            val response = client.get("$normalizedServer/.well-known/matrix/client")
-            if (!response.status.isSuccess()) return normalizedServer
-            val baseUrl = response.body<WellKnownClient>().homeserver?.baseUrl
-                ?.trim()
-                ?.trimEnd('/')
-            if (baseUrl.isNullOrBlank()) normalizedServer else baseUrl
+            fetchWellKnownBaseUrl(client, normalizedServer)?.let { resolved ->
+                Timber.i("Matrix API base for $normalizedServer -> $resolved (well-known)")
+                return resolved
+            }
+
+            // Many deployments delegate CS API to matrix.<domain> but block or omit
+            // `.well-known` over Tor/Orbot. Probe the common subdomain before falling
+            // back to the marketing host (which often 404s on /_matrix/client/v3/login).
+            val hostname = hostnameFrom(normalizedServer)
+            if (!hostname.startsWith("matrix.")) {
+                val matrixSubdomain = "https://matrix.$hostname"
+                if (hasMatrixClientApi(client, matrixSubdomain)) {
+                    Timber.i("Matrix API base for $normalizedServer -> $matrixSubdomain (matrix subdomain probe)")
+                    return matrixSubdomain
+                }
+            }
+
+            if (hasMatrixClientApi(client, normalizedServer)) {
+                Timber.i("Matrix API base for $normalizedServer -> $normalizedServer (direct probe)")
+                normalizedServer
+            } else {
+                Timber.w("Matrix API not found at $normalizedServer; using it as-is")
+                normalizedServer
+            }
         } catch (e: Exception) {
-            Timber.w(e, "Matrix well-known discovery failed for $normalizedServer, using it as-is")
+            Timber.w(e, "Matrix homeserver discovery failed for $normalizedServer, using it as-is")
             normalizedServer
         } finally {
             try {
@@ -65,6 +83,34 @@ internal object MatrixUrls {
             }
         }
     }
+
+    private suspend fun fetchWellKnownBaseUrl(client: io.ktor.client.HttpClient, normalizedServer: String): String? {
+        return try {
+            val response = client.get("$normalizedServer/.well-known/matrix/client")
+            if (!response.status.isSuccess()) return null
+            response.body<WellKnownClient>().homeserver?.baseUrl
+                ?.trim()
+                ?.trimEnd('/')
+                ?.takeIf { it.isNotBlank() }
+        } catch (e: Exception) {
+            Timber.w(e, "Matrix well-known discovery failed for $normalizedServer")
+            null
+        }
+    }
+
+    private suspend fun hasMatrixClientApi(client: io.ktor.client.HttpClient, baseUrl: String): Boolean =
+        try {
+            client.get("$baseUrl/_matrix/client/versions").status.isSuccess()
+        } catch (_: Exception) {
+            false
+        }
+
+    private fun hostnameFrom(normalizedServer: String): String =
+        normalizedServer
+            .removePrefix("https://")
+            .removePrefix("http://")
+            .substringBefore('/')
+            .substringBefore(':')
 
     @Serializable
     private data class WellKnownClient(

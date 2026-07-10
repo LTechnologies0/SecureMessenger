@@ -1,6 +1,7 @@
 package ltechnologies.onionphone.securemessenger.protocol.matrix
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class MatrixUrlsTest {
@@ -9,6 +10,12 @@ class MatrixUrlsTest {
     fun normalizeHomeserver_addsHttpsScheme() {
         assertEquals("https://matrix.org", MatrixUrls.normalizeHomeserver("matrix.org"))
         assertEquals("https://matrix.org", MatrixUrls.normalizeHomeserver("https://matrix.org/"))
+    }
+
+    @Test
+    fun normalizeHomeserver_rejectsLoopback() {
+        val err = runCatching { MatrixUrls.normalizeHomeserver("127.0.0.1") }.exceptionOrNull()
+        assertTrue(err is IllegalArgumentException)
     }
 
     @Test

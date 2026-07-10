@@ -74,6 +74,9 @@ interface ConversationDao {
     @Query("SELECT * FROM conversations ORDER BY lastMessageAt DESC")
     fun observeAll(): Flow<List<ConversationEntity>>
 
+    @Query("SELECT * FROM conversations WHERE accountId = :accountId")
+    suspend fun listForAccount(accountId: String): List<ConversationEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(conversation: ConversationEntity)
 

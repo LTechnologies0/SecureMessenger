@@ -45,7 +45,9 @@ class MatrixHttpFallback(private val repository: MessengerRepository) {
         val client = createProxiedClient(proxy)
         httpClient = client
         val localPart = MatrixUrls.loginLocalPart(matrixUser)
-        val httpResponse = client.post("$server/_matrix/client/v3/login") {
+        val loginUrl = "${server.trimEnd('/')}/_matrix/client/v3/login"
+        timber.log.Timber.d("Matrix password login -> $loginUrl user=$localPart")
+        val httpResponse = client.post(loginUrl) {
             contentType(ContentType.Application.Json)
             setBody(
                 LoginRequest(
