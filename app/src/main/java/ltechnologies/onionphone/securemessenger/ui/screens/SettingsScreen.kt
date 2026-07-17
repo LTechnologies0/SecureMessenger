@@ -13,9 +13,14 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.hilt.navigation.compose.hiltViewModel
 import ltechnologies.onionphone.securemessenger.core.model.FeatureFlags
+import ltechnologies.onionphone.securemessenger.core.security.AppLockManager
+import ltechnologies.onionphone.securemessenger.core.security.AppLockState
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -23,7 +28,9 @@ fun SettingsScreen(
     modifier: Modifier = Modifier,
     onOpenProxy: () -> Unit = {},
     onClose: (() -> Unit)? = null,
+    appLockManager: AppLockManager = hiltViewModel<SettingsLockViewModel>().appLockManager,
 ) {
+    val lockState by appLockManager.state.collectAsState()
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -40,8 +47,17 @@ fun SettingsScreen(
             },
         )
         Text("SecureMessenger 1.0.0-alpha")
+        Text(
+            when (lockState) {
+                AppLockState.UNLOCKED -> "Verrouillage : actif (code / biométrie système)"
+                AppLockState.LOCKED -> "Verrouillage : en attente d'authentification"
+                AppLockState.DEVICE_INSECURE -> "Verrouillage : configurez un PIN dans Android"
+            },
+        )
+        Text("Données chiffrées (SQLCipher + Keystore) — déverrouillage système requis.")
         Text("Enabled protocols: ${FeatureFlags.enabled.joinToString { it.name }}")
-        Text("Discord and Signal (Molly) are reserved for a future release.")
+        Text("Toutes les inscriptions et tout le trafic passent exclusivement par Tor (fail-closed).")
+        Text("Signal : inscription API via Tor ; SMS via numéro / service en ligne.")
         Button(
             onClick = onOpenProxy,
             modifier = Modifier

@@ -11,6 +11,12 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        maven {
+            url = uri("https://build-artifacts.signal.org/libraries/maven/")
+            content {
+                includeGroup("org.signal")
+            }
+        }
     }
 }
 
@@ -27,6 +33,9 @@ include(
     ":protocol:xmpp",
     ":protocol:matrix",
     ":protocol:telegram",
-    ":protocol:discord",
     ":protocol:signal",
+    ":vendor:signal:util-jvm",
+    ":vendor:signal:models-jvm",
+    ":vendor:signal:network-jvm",
+    ":vendor:signal:libsignal-service",
 )

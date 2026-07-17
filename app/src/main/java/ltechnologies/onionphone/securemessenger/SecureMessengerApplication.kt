@@ -13,6 +13,7 @@ import timber.log.Timber
 class SecureMessengerApplication : Application() {
     override fun onCreate() {
         super.onCreate()
+        System.loadLibrary("sqlcipher")
         createNotificationChannel()
         if (BuildConfig.DEBUG) {
             Timber.plant(

@@ -1,0 +1,22 @@
+--- a/src/main/java/org/whispersystems/signalservice/api/SignalUrlExtensions.kt
++++ b/src/main/java/org/whispersystems/signalservice/api/SignalUrlExtensions.kt
+@@ -10,6 +10,7 @@ import org.whispersystems.signalservice.api.push.TrustStore
+ import org.whispersystems.signalservice.api.util.Tls12SocketFactory
+ import org.whispersystems.signalservice.api.util.TlsProxySocketFactory
+ import org.whispersystems.signalservice.internal.configuration.SignalServiceConfiguration
++import org.signal.core.util.SignalSocksHolder
+ import org.whispersystems.signalservice.internal.configuration.SignalUrl
+ import org.whispersystems.signalservice.internal.util.BlacklistingTrustManager
+ import org.whispersystems.signalservice.internal.util.Util
+@@ -45,8 +46,11 @@ fun <T : SignalUrl> T.buildOkHttpClient(configuration: SignalServiceConfiguration
+     builder.addInterceptor(interceptor)
+   }
+ 
+-  if (configuration.signalProxy.isPresent) {
++  val socksProxy = SignalSocksHolder.get()
++  if (socksProxy != null) {
++    builder.proxy(socksProxy)
++  } else if (configuration.signalProxy.isPresent) {
+     val proxy = configuration.signalProxy.get()
+     builder.socketFactory(TlsProxySocketFactory(proxy.host, proxy.port, configuration.dns))
+   }

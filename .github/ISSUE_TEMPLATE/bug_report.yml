@@ -10,7 +10,7 @@ body:
     id: version
     attributes:
       label: SecureMessenger version
-      placeholder: "1.0.0-alpha"
+      placeholder: "1.0.0-alpha.3"
     validations:
       required: true
   - type: dropdown
@@ -21,7 +21,6 @@ body:
         - Matrix
         - XMPP
         - Telegram
-        - Discord
         - Signal
         - Not protocol-specific
     validations:

@@ -9,21 +9,19 @@ import ltechnologies.onionphone.securemessenger.core.model.Conversation
 import ltechnologies.onionphone.securemessenger.core.model.Message
 import ltechnologies.onionphone.securemessenger.core.model.ProxyConfig
 import ltechnologies.onionphone.securemessenger.core.model.TorProvider
-import ltechnologies.onionphone.securemessenger.data.db.AccountDao
-import ltechnologies.onionphone.securemessenger.data.db.ConversationDao
-import ltechnologies.onionphone.securemessenger.data.db.MessageDao
-import ltechnologies.onionphone.securemessenger.data.db.ProxySettingsDao
 import ltechnologies.onionphone.securemessenger.data.db.ProxySettingsEntity
 import ltechnologies.onionphone.securemessenger.data.db.toDomain
 import ltechnologies.onionphone.securemessenger.data.db.toEntity
 
 @Singleton
 class MessengerRepository @Inject constructor(
-    private val accountDao: AccountDao,
-    private val conversationDao: ConversationDao,
-    private val messageDao: MessageDao,
-    private val proxySettingsDao: ProxySettingsDao,
+    private val database: EncryptedMessengerDatabase,
 ) {
+    private val accountDao get() = database.get().accountDao()
+    private val conversationDao get() = database.get().conversationDao()
+    private val messageDao get() = database.get().messageDao()
+    private val proxySettingsDao get() = database.get().proxySettingsDao()
+
     fun observeAccounts(): Flow<List<Account>> =
         accountDao.observeAll().map { list -> list.map { it.toDomain() } }
 

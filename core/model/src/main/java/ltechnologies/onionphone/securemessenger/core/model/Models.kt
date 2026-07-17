@@ -4,7 +4,6 @@ enum class ProtocolId {
     XMPP,
     MATRIX,
     TELEGRAM,
-    DISCORD,
     SIGNAL,
 }
 
@@ -13,6 +12,7 @@ object FeatureFlags {
         ProtocolId.XMPP,
         ProtocolId.MATRIX,
         ProtocolId.TELEGRAM,
+        ProtocolId.SIGNAL,
     )
 }
 
@@ -69,13 +69,39 @@ enum class AuthStepKind {
     TELEGRAM_REGISTRATION,
     TELEGRAM_OTHER_DEVICE,
     MATRIX_SSO,
+    SIGNAL_SMS_CODE,
+    SIGNAL_CAPTCHA,
+    SIGNAL_PIN,
 }
 
 data class AuthStep(
     val kind: AuthStepKind,
     val prompt: String,
     val fields: List<String> = emptyList(),
+    /** Optional browser URL (e.g. Matrix SSO redirect). */
+    val url: String? = null,
 )
+
+/** Deep-link target for Matrix SSO WebView redirects (`m.login.sso`). */
+object MatrixSsoRedirect {
+    const val SCHEME = "securemessenger"
+    const val HOST = "matrix-sso"
+    const val URI = "$SCHEME://$HOST"
+
+    fun extractLoginToken(redirectUrl: String): String? {
+        val q = redirectUrl.substringAfter('?', missingDelimiterValue = "")
+        if (q.isEmpty()) return null
+        return q.split('&').asSequence()
+            .map { it.split('=', limit = 2) }
+            .firstOrNull { it.size == 2 && (it[0] == "loginToken" || it[0] == "login_token") }
+            ?.get(1)
+            ?.takeIf { it.isNotBlank() }
+            ?.let { java.net.URLDecoder.decode(it, Charsets.UTF_8.name()) }
+    }
+
+    fun matchesRedirect(url: String): Boolean =
+        url.startsWith(URI) || url.startsWith("$URI?")
+}
 
 data class ProtocolCapabilities(
     val directMessages: Boolean = true,
@@ -93,6 +119,23 @@ data class Account(
     val protocol: ProtocolId,
     val displayName: String,
     val connectionState: ConnectionState = ConnectionState.DISCONNECTED,
+)
+
+enum class AttachmentState {
+    PENDING,
+    DOWNLOADING,
+    READY,
+    FAILED,
+}
+
+data class Attachment(
+    val id: String,
+    val mimeType: String,
+    val fileName: String? = null,
+    val localPath: String? = null,
+    val remoteRef: String? = null,
+    val sizeBytes: Long = 0L,
+    val state: AttachmentState = AttachmentState.PENDING,
 )
 
 data class Conversation(
@@ -115,6 +158,7 @@ data class Message(
     val direction: MessageDirection,
     val deliveryState: DeliveryState = DeliveryState.SENT,
     val senderDisplayName: String? = null,
+    val attachments: List<Attachment> = emptyList(),
 )
 
 @JvmInline

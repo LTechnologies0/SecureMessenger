@@ -23,8 +23,8 @@ android {
         applicationId = "ltechnologies.onionphone.securemessenger"
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
-        versionCode = 2
-        versionName = "1.0.0-alpha.1"
+        versionCode = 3
+        versionName = "1.0.0-alpha.3"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         val telegramApiId = localProperties.getProperty("telegram.api.id")
@@ -57,9 +57,17 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_21
         targetCompatibility = JavaVersion.VERSION_21
+        isCoreLibraryDesugaringEnabled = true
     }
 
     packaging {
+        jniLibs {
+            excludes += setOf(
+                "**/libsignal_jni_*.dylib",
+                "**/libsignal_jni_*.dll",
+                "**/libsignal_jni_testing.so",
+            )
+        }
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
             excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
@@ -81,10 +89,10 @@ dependencies {
     val tdlibAar = rootProject.file(
         "protocol/telegram/libs/tdlib-core-${libs.versions.tdlib.android.get()}.aar",
     )
-    if (tdlibAar.exists()) {
-        implementation(files(tdlibAar))
+    check(tdlibAar.exists()) {
+        "Missing ${tdlibAar.path} — run ./scripts/fetch-tdlib-prebuilt.sh before packaging"
     }
-    implementation(project(":protocol:discord"))
+    implementation(files(tdlibAar))
     implementation(project(":protocol:signal"))
 
     implementation(libs.androidx.core.ktx)
@@ -95,7 +103,9 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.lifecycle.service)
     implementation(libs.androidx.navigation.compose)
+    implementation(libs.androidx.biometric)
     implementation(libs.androidx.webkit)
+
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.ui.tooling.preview)
@@ -109,6 +119,8 @@ dependencies {
     implementation(libs.timber)
     implementation(libs.coil.compose)
     implementation(libs.coil.network.okhttp)
+
+    coreLibraryDesugaring(libs.android.desugar)
 
     debugImplementation(libs.androidx.compose.ui.test.manifest)
 

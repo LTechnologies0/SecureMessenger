@@ -12,7 +12,7 @@
 
 1. Use **GitHub Private Vulnerability Reporting** (Security → Advisories → Report a vulnerability) on this repository.
 2. Or email the maintainers with:
-   - Affected version(s) and protocol (Matrix / XMPP / Telegram / Discord / Signal)
+   - Affected version(s) and protocol (Matrix / XMPP / Telegram / Signal)
    - Steps to reproduce
    - Impact assessment (traffic deanonymization, credential exposure, message plaintext leak, etc.)
 
@@ -31,7 +31,7 @@ In scope:
 
 Out of scope:
 
-- Vulnerabilities in upstream SDKs themselves (Smack, Trixnity, TDLib, Signal, Discord libs) — report upstream
+- Vulnerabilities in upstream SDKs themselves (Smack, Trixnity, TDLib, Signal libs) — report upstream
 - Third-party Android OS bugs
 - Compromised devices (root malware, accessibility malware)
 - Weak user-chosen passwords
@@ -40,7 +40,7 @@ Out of scope:
 
 ## Security Design
 
-- **Tor-only by default**: all protocol traffic (Matrix, XMPP, Telegram, Discord, Signal, and any in-app WebView) is routed through a SOCKS5 proxy to Tor. A killswitch blocks all connections if the proxy is unavailable — see `core/network`.
+- **Tor-only by default**: all protocol traffic (Matrix, XMPP, Telegram, Signal, and any in-app WebView) is routed through a SOCKS5 proxy to Tor. A killswitch blocks all connections if the proxy is unavailable — see `core/network`.
 - **No direct DNS**: hostname resolution for the Matrix `.well-known` discovery and XMPP SRV lookups happens through the proxy, not the device's default resolver.
 - **Encrypted credential storage**: account secrets (passwords, tokens, session data) are stored via `EncryptedCredentialStore` (AndroidX Security Crypto / Keystore-backed).
 - **No hardcoded secrets**: signing keys, SDK/NDK paths, and Telegram API credentials are never committed (`keystore.properties`, `local.properties` are gitignored; see `local.properties.example`).

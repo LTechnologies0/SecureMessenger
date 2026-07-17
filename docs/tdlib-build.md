@@ -30,7 +30,10 @@ chmod +x scripts/fetch-tdlib-prebuilt.sh
 ```
 
 This downloads `protocol/telegram/libs/tdlib-core-0.1.0.aar` (all ABIs + Java API).
-The Gradle module auto-detects the AAR and uses it instead of the Maven JAR stub.
+`:protocol:telegram` **refuses** the Maven JAR stub (no natives) and auto-fetches the AAR when missing.
+
+Debug APKs package `arm64-v8a` + `x86_64` by default so Waydroid/x86 emulators get `libtdjni.so`
+(`-Psecuremessenger.devAbis=arm64-v8a` to override).
 
 ## 3. Build from source (optional)
 
@@ -55,6 +58,9 @@ After install, APK must contain `libtdjni.so`:
 
 ```bash
 unzip -l app/build/outputs/apk/debug/app-debug.apk | grep libtdjni
+# Expect at least:
+#   lib/arm64-v8a/libtdjni.so
+#   lib/x86_64/libtdjni.so
 ```
 
 In the app, Telegram connect should no longer show `libtdjni.so missing`.

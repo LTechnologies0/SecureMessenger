@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/compileSdk-37-green" alt="compileSdk 37">
 </p>
 
-**SecureMessenger** is an open-source Android app that lets you chat over **Matrix, XMPP, Telegram, Discord, and Signal** from a single app — with **every byte of network traffic forced through Tor**. Part of the [OnionPhone](https://onionphone.org) app family.
+**SecureMessenger** is an open-source Android app that lets you chat over **Matrix, XMPP, Telegram, and Signal** from a single app — with **every byte of network traffic forced through Tor**. Part of the [OnionPhone](https://onionphone.org) app family.
 
 > If Tor is unreachable, a killswitch blocks all connections. There is no "send over clearnet" fallback — by design.
 
@@ -36,7 +36,7 @@
 
 | Feature | Description |
 |---------|-------------|
-| **Multi-protocol** | Matrix, XMPP, Telegram, Discord, Signal accounts side by side in one app |
+| **Multi-protocol** | Matrix, XMPP, Telegram, Signal accounts side by side in one app |
 | **Tor-only networking** | Every protocol, including in-app WebViews, is force-routed through a SOCKS5 → Tor proxy; a killswitch blocks traffic if Tor is down |
 | **Account registration** | Create new Matrix accounts (UIA dummy/token stages inline, WebView fallback for captcha/email/terms) and XMPP accounts (XEP-0077 in-band registration with dynamic extra fields) — no browser needed for the common case |
 | **Matrix well-known discovery** | Automatically resolves delegated homeservers via `.well-known/matrix/client` |
@@ -52,9 +52,8 @@ flowchart LR
     CM --> Matrix[protocol:matrix]
     CM --> XMPP[protocol:xmpp]
     CM --> TG[protocol:telegram]
-    CM --> Discord[protocol:discord]
     CM --> Signal[protocol:signal]
-    Matrix & XMPP & TG & Discord & Signal --> Proxy[core:proxy — SOCKS5 resolver]
+    Matrix & XMPP & TG & Signal --> Proxy[core:proxy — SOCKS5 resolver]
     Proxy --> Guard[core:network — Tor killswitch]
     Guard -->|Tor reachable| Tor((Tor network))
     Guard -->|Tor unreachable| Blocked[🚫 all traffic blocked]
@@ -77,7 +76,6 @@ flowchart LR
       ├── :protocol:xmpp      (Smack)
       ├── :protocol:matrix    (raw CS API + Trixnity)
       ├── :protocol:telegram  (TDLib JNI)
-      ├── :protocol:discord
       └── :protocol:signal
 ```
 

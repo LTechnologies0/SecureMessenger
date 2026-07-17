@@ -1,0 +1,23 @@
+--- a/src/main/java/org/whispersystems/signalservice/internal/push/PushServiceSocket.java
++++ b/src/main/java/org/whispersystems/signalservice/internal/push/PushServiceSocket.java
+@@ -73,6 +73,7 @@ import org.whispersystems.signalservice.api.util.CredentialsProvider;
+ import org.whispersystems.signalservice.api.util.Tls12SocketFactory;
+ import org.whispersystems.signalservice.api.util.TlsProxySocketFactory;
+ import org.whispersystems.signalservice.api.util.UntrustedIdentityException;
++import org.signal.core.util.SignalSocksHolder;
+ import org.whispersystems.signalservice.internal.configuration.SignalServiceConfiguration;
+ import org.whispersystems.signalservice.internal.configuration.SignalUrl;
+ import org.whispersystems.signalservice.internal.contacts.entities.MultiRemoteAttestationResponse;
+@@ -1663,8 +1664,11 @@ public class PushServiceSocket {
+                                                      .connectionSpecs(url.getConnectionSpecs().orElse(Util.immutableList(ConnectionSpec.RESTRICTED_TLS)))
+                                                      .dns(dns.orElse(Dns.SYSTEM));
+ 
+-      if (proxy.isPresent()) {
++      java.net.Proxy socksProxy = SignalSocksHolder.get();
++      if (socksProxy != null) {
++        builder.proxy(socksProxy);
++      } else if (proxy.isPresent()) {
+         builder.socketFactory(new TlsProxySocketFactory(proxy.get().getHost(), proxy.get().getPort(), dns));
+       }
+ 
+       builder.sslSocketFactory(new Tls12SocketFactory(context.getSocketFactory()), (X509TrustManager)trustManagers[0])

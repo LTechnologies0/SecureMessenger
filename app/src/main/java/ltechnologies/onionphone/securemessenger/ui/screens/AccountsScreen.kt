@@ -29,6 +29,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import java.util.UUID
 import ltechnologies.onionphone.securemessenger.core.model.AccountCredentials
+import ltechnologies.onionphone.securemessenger.core.model.AuthStep
+import ltechnologies.onionphone.securemessenger.core.model.AuthStepKind
 import ltechnologies.onionphone.securemessenger.core.model.ConnectionResult
 import ltechnologies.onionphone.securemessenger.core.model.ProtocolId
 import ltechnologies.onionphone.securemessenger.core.model.RegistrationRequest
@@ -64,6 +66,7 @@ fun AccountsScreen(
     var pendingInstructions by remember { mutableStateOf<String?>(null) }
     val pendingFieldValues = remember { mutableStateMapOf<String, String>() }
     var webViewState by remember { mutableStateOf<RegistrationResult.NeedsWebView?>(null) }
+    var matrixSsoStep by remember { mutableStateOf<AuthStep?>(null) }
 
     fun resetRegistrationFlow() {
         pendingSessionId = null
@@ -71,6 +74,7 @@ fun AccountsScreen(
         pendingInstructions = null
         pendingFieldValues.clear()
         webViewState = null
+        matrixSsoStep = null
     }
 
     fun handleRegistrationResult(result: RegistrationResult) {
@@ -96,6 +100,40 @@ fun AccountsScreen(
                 statusMessage = result.reason
             }
         }
+    }
+
+    matrixSsoStep?.let { step ->
+        val ssoUrl = step.url
+        if (ssoUrl.isNullOrBlank()) {
+            matrixSsoStep = null
+            statusMessage = "URL SSO Matrix manquante"
+        } else {
+            val (socksHost, socksPort) = viewModel.resolvedSocksEndpoint()
+            RegistrationWebViewDialog(
+                url = ssoUrl,
+                instructions = step.prompt,
+                socksHost = socksHost,
+                socksPort = socksPort,
+                onContinue = {},
+                onDismiss = {
+                    matrixSsoStep = null
+                    statusMessage = "SSO Matrix annulé"
+                },
+                onLoginToken = { loginToken ->
+                    matrixSsoStep = null
+                    viewModel.continueAuth(
+                        ProtocolId.MATRIX,
+                        mapOf("loginToken" to loginToken),
+                    ) { result ->
+                        statusMessage = when (result) {
+                            is ConnectionResult.Success -> "Connecté (SSO Matrix + E2EE)"
+                            is ConnectionResult.Failure -> result.reason
+                        }
+                    }
+                },
+            )
+        }
+        return
     }
 
     webViewState?.let { pending ->
@@ -174,8 +212,8 @@ fun AccountsScreen(
                 }
                 ProtocolId.MATRIX -> {
                     OutlinedTextField(field1, { field1 = it }, label = { Text("Homeserver (ex. matrix.org)") }, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(field2, { field2 = it }, label = { Text("User ID (@user:server)") }, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(field3, { field3 = it }, label = { Text("Password or access token") }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(field2, { field2 = it }, label = { Text("User ID (@user:server, optionnel si SSO)") }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(field3, { field3 = it }, label = { Text("Password / access token (vide = SSO)") }, modifier = Modifier.fillMaxWidth())
                 }
                 ProtocolId.TELEGRAM -> {
                     Text("Utilisez l'écran Telegram dédié depuis « Ajouter un compte ».")
@@ -197,10 +235,10 @@ fun AccountsScreen(
                             buildMap {
                                 put("homeserver", field1.trim())
                                 put("userId", field2.trim())
-                                if (secret.startsWith("syt_")) {
-                                    put("accessToken", secret)
-                                } else {
-                                    put("password", field3)
+                                when {
+                                    secret.isBlank() -> Unit // SSO path
+                                    secret.startsWith("syt_") -> put("accessToken", secret)
+                                    else -> put("password", field3)
                                 }
                             }
                         }
@@ -214,9 +252,24 @@ fun AccountsScreen(
                         secrets = secrets,
                     )
                     viewModel.connectAccount(creds) { result ->
-                        statusMessage = when (result) {
-                            is ConnectionResult.Success -> "Connecté"
-                            is ConnectionResult.Failure -> result.reason
+                        when (result) {
+                            is ConnectionResult.Failure -> statusMessage = result.reason
+                            is ConnectionResult.Success -> {
+                                if (selectedProtocol == ProtocolId.MATRIX) {
+                                    viewModel.pendingAuth(ProtocolId.MATRIX) { step ->
+                                        if (step?.kind == AuthStepKind.MATRIX_SSO &&
+                                            !step.url.isNullOrBlank()
+                                        ) {
+                                            matrixSsoStep = step
+                                            statusMessage = step.prompt
+                                        } else {
+                                            statusMessage = "Connecté"
+                                        }
+                                    }
+                                } else {
+                                    statusMessage = "Connecté"
+                                }
+                            }
                         }
                     }
                 },

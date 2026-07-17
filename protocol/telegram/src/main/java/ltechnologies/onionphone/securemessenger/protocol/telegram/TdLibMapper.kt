@@ -1,5 +1,7 @@
 package ltechnologies.onionphone.securemessenger.protocol.telegram
 
+import ltechnologies.onionphone.securemessenger.core.model.Attachment
+import ltechnologies.onionphone.securemessenger.core.model.AttachmentState
 import ltechnologies.onionphone.securemessenger.core.model.Conversation
 import ltechnologies.onionphone.securemessenger.core.model.DeliveryState
 import ltechnologies.onionphone.securemessenger.core.model.Message
@@ -45,8 +47,9 @@ object TdLibMapper {
     fun toMessage(accountId: String, msg: TdApi.Message): Message {
         val body = messageBody(msg)
         val convId = conversationId(accountId, msg.chatId)
+        val msgKey = messageId(convId, msg.id)
         return Message(
-            id = messageId(convId, msg.id),
+            id = msgKey,
             conversationId = convId,
             protocol = ProtocolId.TELEGRAM,
             body = body,
@@ -54,8 +57,42 @@ object TdLibMapper {
             direction = if (msg.isOutgoing) MessageDirection.OUTGOING else MessageDirection.INCOMING,
             deliveryState = deliveryState(msg),
             senderDisplayName = senderLabel(msg.senderId),
+            attachments = attachmentsFromContent(msg.content, msgKey),
         )
     }
+
+    fun attachmentsFromContent(content: TdApi.MessageContent, messageId: String): List<Attachment> =
+        when (content) {
+            is TdApi.MessagePhoto -> listOf(attachmentFromFile(
+                messageId = messageId,
+                suffix = "photo",
+                file = largestPhotoFile(content.photo),
+                mimeType = "image/jpeg",
+                fileName = null,
+            ))
+            is TdApi.MessageVideo -> listOf(attachmentFromFile(
+                messageId = messageId,
+                suffix = "video",
+                file = content.video.video,
+                mimeType = content.video.mimeType.ifBlank { "video/mp4" },
+                fileName = null,
+            ))
+            is TdApi.MessageDocument -> listOf(attachmentFromFile(
+                messageId = messageId,
+                suffix = "document",
+                file = content.document.document,
+                mimeType = content.document.mimeType.ifBlank { "application/octet-stream" },
+                fileName = content.document.fileName,
+            ))
+            is TdApi.MessageVoiceNote -> listOf(attachmentFromFile(
+                messageId = messageId,
+                suffix = "voice",
+                file = content.voiceNote.voice,
+                mimeType = content.voiceNote.mimeType.ifBlank { "audio/ogg" },
+                fileName = null,
+            ))
+            else -> emptyList()
+        }
 
     fun messageBody(msg: TdApi.Message): String = messageBody(msg.content)
 
@@ -95,5 +132,33 @@ object TdLibMapper {
         is TdApi.MessageSenderUser -> null
         is TdApi.MessageSenderChat -> "Chat ${sender.chatId}"
         else -> null
+    }
+
+    private fun largestPhotoFile(photo: TdApi.Photo): TdApi.File? =
+        photo.sizes?.maxByOrNull { it.width * it.height }?.photo
+
+    private fun attachmentFromFile(
+        messageId: String,
+        suffix: String,
+        file: TdApi.File?,
+        mimeType: String,
+        fileName: String?,
+    ): Attachment {
+        val local = file?.local
+        val state = when {
+            file == null -> AttachmentState.FAILED
+            local?.isDownloadingCompleted == true && !local.path.isNullOrBlank() -> AttachmentState.READY
+            local?.isDownloadingActive == true -> AttachmentState.DOWNLOADING
+            else -> AttachmentState.PENDING
+        }
+        return Attachment(
+            id = "${messageId}_$suffix",
+            mimeType = mimeType,
+            fileName = fileName,
+            localPath = local?.path?.takeIf { it.isNotBlank() },
+            remoteRef = file?.id?.toString(),
+            sizeBytes = file?.size ?: 0L,
+            state = state,
+        )
     }
 }

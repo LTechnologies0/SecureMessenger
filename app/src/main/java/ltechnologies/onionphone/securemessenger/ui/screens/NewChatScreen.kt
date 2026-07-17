@@ -43,6 +43,7 @@ fun NewChatScreen(
     }
     var remoteId by remember { mutableStateOf("") }
     var firstMessage by remember { mutableStateOf("") }
+    var joinAsMuc by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
 
     Column(modifier = modifier.fillMaxSize()) {
@@ -73,15 +74,25 @@ fun NewChatScreen(
                     )
                 }
             }
+            if (protocol == ProtocolId.XMPP) {
+                FilterChip(
+                    selected = joinAsMuc,
+                    onClick = { joinAsMuc = !joinAsMuc },
+                    label = { Text("Rejoindre une salle MUC") },
+                )
+            }
             OutlinedTextField(
                 value = remoteId,
                 onValueChange = { remoteId = it },
                 label = {
                     Text(
-                        when (protocol) {
-                            ProtocolId.XMPP -> "JID (user@domain)"
-                            ProtocolId.MATRIX -> "Room ID (!abc:server)"
-                            ProtocolId.TELEGRAM -> "Chat ID"
+                        when {
+                            protocol == ProtocolId.XMPP && joinAsMuc ->
+                                "JID salle (room@conference.domain)"
+                            protocol == ProtocolId.XMPP -> "JID (user@domain)"
+                            protocol == ProtocolId.MATRIX -> "Room ID (!abc:server) ou @user:server"
+                            protocol == ProtocolId.TELEGRAM -> "Chat ID ou @username"
+                            protocol == ProtocolId.SIGNAL -> "Numéro E.164 (+33…) ou ACI"
                             else -> "Remote ID"
                         },
                     )
@@ -115,7 +126,7 @@ fun NewChatScreen(
                 },
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Démarrer")
+                Text(if (protocol == ProtocolId.XMPP && joinAsMuc) "Rejoindre" else "Démarrer")
             }
             status?.let { Text(it) }
         }

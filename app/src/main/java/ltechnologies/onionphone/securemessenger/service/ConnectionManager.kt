@@ -1,5 +1,6 @@
 package ltechnologies.onionphone.securemessenger.service
 
+import dagger.Lazy
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CompletableDeferred
@@ -24,42 +25,62 @@ import ltechnologies.onionphone.securemessenger.core.model.RegistrationResult
 import ltechnologies.onionphone.securemessenger.core.proxy.ProxyConfigNormalizer
 import ltechnologies.onionphone.securemessenger.core.proxy.ProxyManager
 import ltechnologies.onionphone.securemessenger.core.proxy.SocksEndpointResolver
+import ltechnologies.onionphone.securemessenger.core.security.AppLockManager
+import ltechnologies.onionphone.securemessenger.core.security.AppLockState
 import ltechnologies.onionphone.securemessenger.core.security.EncryptedCredentialStore
 import ltechnologies.onionphone.securemessenger.data.MessengerRepository
 import ltechnologies.onionphone.securemessenger.protocol.api.ProtocolNotEnabledException
 import ltechnologies.onionphone.securemessenger.protocol.api.ProtocolRegistry
 import ltechnologies.onionphone.securemessenger.protocol.telegram.TelegramProtocol
+import ltechnologies.onionphone.securemessenger.protocol.signal.SignalProtocol
 import timber.log.Timber
 
 @Singleton
 class ConnectionManager @Inject constructor(
     private val protocolRegistry: ProtocolRegistry,
     private val proxyManager: ProxyManager,
-    private val repository: MessengerRepository,
+    private val repository: Lazy<MessengerRepository>,
     private val credentialStore: EncryptedCredentialStore,
+    private val appLockManager: AppLockManager,
 ) {
     private val bootstrapScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val bootstrapReady = CompletableDeferred<Unit>()
     private val restoreMutex = Mutex()
+    private var proxyBootstrapped = false
 
     private var lastProxyHealthy: Boolean? = null
     private var lastProxyConfig: ProxyConfig? = null
 
     init {
         bootstrapScope.launch {
-            runCatching {
-                val saved = repository.observeProxySettings().first()
-                val password = credentialStore.getProxyPassword()
-                if (saved != null) {
-                    val merged = ProxyConfigNormalizer.normalize(
-                        saved.copy(password = password),
-                    )
-                    proxyManager.updateConfig(merged)
+            appLockManager.state.collect { state ->
+                when (state) {
+                    AppLockState.LOCKED -> runCatching { disconnectAll() }
+                    AppLockState.UNLOCKED -> {
+                        runCatching { ensureProxyBootstrapped() }
+                            .onFailure { Timber.w(it, "Proxy bootstrap failed") }
+                        restorePersistedAccounts()
+                    }
+                    AppLockState.DEVICE_INSECURE -> Unit
                 }
-                proxyManager.refreshStatusAndWait()
-            }.onFailure { Timber.w(it, "Proxy bootstrap failed") }
+            }
+        }
+    }
+
+    private suspend fun ensureProxyBootstrapped() {
+        if (proxyBootstrapped) return
+        val saved = repository.get().observeProxySettings().first()
+        val password = credentialStore.getProxyPassword()
+        if (saved != null) {
+            val merged = ProxyConfigNormalizer.normalize(
+                saved.copy(password = password),
+            )
+            proxyManager.updateConfig(merged)
+        }
+        proxyManager.refreshStatusAndWait()
+        proxyBootstrapped = true
+        if (!bootstrapReady.isCompleted) {
             bootstrapReady.complete(Unit)
-            restorePersistedAccounts()
         }
     }
 
@@ -112,15 +133,19 @@ class ConnectionManager @Inject constructor(
             val pending = protocol.pendingAuthStep()
             val telegramConnecting = credentials.protocol == ProtocolId.TELEGRAM &&
                 protocol.connectionState.value != ConnectionState.CONNECTED
+            val signalConnecting = credentials.protocol == ProtocolId.SIGNAL &&
+                protocol.connectionState.value != ConnectionState.CONNECTED
             val state = when {
                 pending != null -> ConnectionState.CONNECTING
-                telegramConnecting -> ConnectionState.CONNECTING
+                telegramConnecting || signalConnecting -> ConnectionState.CONNECTING
                 else -> ConnectionState.CONNECTED
             }
-            val shouldPersistAccount = credentials.protocol != ProtocolId.TELEGRAM ||
-                state == ConnectionState.CONNECTED
+            val shouldPersistAccount = when (credentials.protocol) {
+                ProtocolId.TELEGRAM, ProtocolId.SIGNAL -> state == ConnectionState.CONNECTED
+                else -> true
+            }
             if (shouldPersistAccount) {
-                repository.upsertAccount(
+                repository.get().upsertAccount(
                     ltechnologies.onionphone.securemessenger.core.model.Account(
                         id = credentials.accountId,
                         protocol = credentials.protocol,
@@ -172,6 +197,7 @@ class ConnectionManager @Inject constructor(
     }
 
     suspend fun restorePersistedAccounts() {
+        if (!appLockManager.isUnlocked) return
         awaitBootstrap()
         restoreMutex.withLock {
             if (!proxyManager.ensureProxyReady()) {
@@ -181,17 +207,24 @@ class ConnectionManager @Inject constructor(
             }
             _killswitchActive.value = false
 
-            val roomAccounts = repository.observeAccounts().first()
+            val roomAccounts = repository.get().observeAccounts().first()
             for (account in roomAccounts) {
                 if (account.protocol == ProtocolId.TELEGRAM &&
                     account.connectionState != ConnectionState.CONNECTED
                 ) {
                     Timber.i("Removing incomplete Telegram account ${account.id}")
                     credentialStore.removeAccount(account.id)
-                    repository.deleteAccount(account.id)
+                    repository.get().deleteAccount(account.id)
+                }
+                if (account.protocol == ProtocolId.SIGNAL &&
+                    account.connectionState != ConnectionState.CONNECTED
+                ) {
+                    Timber.i("Removing incomplete Signal account ${account.id}")
+                    credentialStore.removeAccount(account.id)
+                    repository.get().deleteAccount(account.id)
                 }
             }
-            val cleanedRoomAccounts = repository.observeAccounts().first()
+            val cleanedRoomAccounts = repository.get().observeAccounts().first()
             val ids = (cleanedRoomAccounts.map { it.id } + credentialStore.listAccountIds()).toSet()
             for (accountId in ids) {
                 val protocolName = credentialStore.getProtocol(accountId)
@@ -202,6 +235,10 @@ class ConnectionManager @Inject constructor(
 
                 val existing = cleanedRoomAccounts.firstOrNull { it.id == accountId }
                 if (protocolId == ProtocolId.TELEGRAM && existing?.connectionState != ConnectionState.CONNECTED) {
+                    credentialStore.removeAccount(accountId)
+                    continue
+                }
+                if (protocolId == ProtocolId.SIGNAL && existing?.connectionState != ConnectionState.CONNECTED) {
                     credentialStore.removeAccount(accountId)
                     continue
                 }
@@ -241,7 +278,13 @@ class ConnectionManager @Inject constructor(
     suspend fun cancelTelegramLogin(accountId: String) {
         protocolRegistry.get(ProtocolId.TELEGRAM)?.disconnect()
         credentialStore.removeAccount(accountId)
-        repository.deleteAccount(accountId)
+        repository.get().deleteAccount(accountId)
+    }
+
+    suspend fun cancelSignalLogin(accountId: String) {
+        (protocolRegistry.get(ProtocolId.SIGNAL) as? SignalProtocol)?.cancelRegistration()
+        credentialStore.removeAccount(accountId)
+        repository.get().deleteAccount(accountId)
     }
 
     suspend fun disconnectAccount(accountId: String) {
@@ -251,7 +294,7 @@ class ConnectionManager @Inject constructor(
         // same type (XMPP, Matrix) only tear down this one session, not every connected account.
         protocolId?.let { protocolRegistry.get(it)?.disconnect(accountId) }
         credentialStore.removeAccount(accountId)
-        repository.deleteAccount(accountId)
+        repository.get().deleteAccount(accountId)
     }
 
     suspend fun disconnect(protocolId: ProtocolId) {
@@ -292,6 +335,7 @@ class ConnectionManager @Inject constructor(
     fun protocolFor(id: ProtocolId) = protocolRegistry.get(id)
 
     suspend fun onProxyStateChanged(healthy: Boolean, config: ProxyConfig) {
+        if (!appLockManager.isUnlocked) return
         val wasHealthy = lastProxyHealthy
         val previousConfig = lastProxyConfig
         lastProxyHealthy = healthy
@@ -340,12 +384,7 @@ class ConnectionManager @Inject constructor(
     private suspend fun reapplyTelegramProxy(config: ProxyConfig) {
         val telegram = protocolRegistry.get(ProtocolId.TELEGRAM) as? TelegramProtocol ?: return
         if (telegram.connectionState.value != ConnectionState.CONNECTED) return
-        telegram.tdLibFacade()?.configureProxy(
-            config.host,
-            config.port,
-            config.username,
-            config.password,
-        )
+        telegram.reapplyProxy(config)
     }
 
     suspend fun refreshProxyState() {
@@ -357,7 +396,7 @@ class ConnectionManager @Inject constructor(
         awaitBootstrap()
         val normalized = ProxyConfigNormalizer.normalize(config)
         val previous = proxyManager.currentConfig()
-        repository.saveProxySettings(normalized)
+        repository.get().saveProxySettings(normalized)
         credentialStore.putProxyPassword(normalized.password)
         val withSecrets = normalized.copy(
             password = normalized.password ?: credentialStore.getProxyPassword(),

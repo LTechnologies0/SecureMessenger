@@ -28,6 +28,7 @@ fun AddAccountScreen(
     modifier: Modifier = Modifier,
     onClose: () -> Unit,
     onPickTelegram: () -> Unit,
+    onPickSignal: () -> Unit,
     onPickProtocol: (ProtocolId) -> Unit,
 ) {
     Column(
@@ -55,6 +56,12 @@ fun AddAccountScreen(
             subtitle = "Numéro de téléphone + code SMS",
             accent = protocolAccentColor(ProtocolId.TELEGRAM),
             onClick = onPickTelegram,
+        )
+        ProtocolChoiceCard(
+            title = protocolShortPrefix(ProtocolId.SIGNAL),
+            subtitle = "SMS via Tor — code sur service SMS en ligne",
+            accent = protocolAccentColor(ProtocolId.SIGNAL),
+            onClick = onPickSignal,
         )
         ProtocolChoiceCard(
             title = protocolShortPrefix(ProtocolId.MATRIX),

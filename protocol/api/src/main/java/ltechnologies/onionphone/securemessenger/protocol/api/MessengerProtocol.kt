@@ -11,6 +11,7 @@ import ltechnologies.onionphone.securemessenger.core.model.Message
 import ltechnologies.onionphone.securemessenger.core.model.ProtocolCapabilities
 import ltechnologies.onionphone.securemessenger.core.model.ProtocolId
 import ltechnologies.onionphone.securemessenger.core.model.ProxyConfig
+import ltechnologies.onionphone.securemessenger.core.model.Attachment
 import ltechnologies.onionphone.securemessenger.core.model.SanitizedText
 import ltechnologies.onionphone.securemessenger.core.model.HistoryLoadResult
 import ltechnologies.onionphone.securemessenger.core.model.RegistrationRequest
@@ -22,7 +23,7 @@ import ltechnologies.onionphone.securemessenger.core.model.SendResult
  * Protocol adapters map Smack / Trixnity / TDLib (and future SDKs) onto this surface.
  */
 interface MessengerProtocol {
-    /** Stable identifier for this protocol (Matrix, XMPP, Telegram, Discord, Signal). */
+    /** Stable identifier for this protocol (Matrix, XMPP, Telegram, Signal). */
     val id: ProtocolId
 
     /** Feature flags describing what this adapter supports (registration, history sync, etc.). */
@@ -101,6 +102,14 @@ interface MessengerProtocol {
      * [conversationId] (most conversation IDs are namespaced as `"${accountId}_$remoteId"`).
      */
     suspend fun sendMessage(conversationId: String, body: SanitizedText, accountId: String? = null): SendResult
+
+    /** Sends a local media [attachment] to [conversationId]. Default: unsupported. */
+    suspend fun sendMedia(
+        conversationId: String,
+        attachment: Attachment,
+        caption: SanitizedText? = null,
+        accountId: String? = null,
+    ): SendResult = SendResult.Failure("Media not supported for $id")
 
     /** Sync full message history when the user opens a conversation. */
     suspend fun loadMessageHistory(conversationId: String): HistoryLoadResult =

@@ -86,6 +86,26 @@ class OmemoHelper(
         return sent.buildMessage(builder, jid)
     }
 
+    fun encryptMuc(muc: org.jivesoftware.smackx.muc.MultiUserChat, body: String): SmackMessage {
+        val sent = try {
+            omemoManager.encrypt(muc, body)
+        } catch (e: UndecidedOmemoIdentityException) {
+            e.undecidedDevices.forEach { device ->
+                val fp = omemoManager.getFingerprint(device)
+                omemoManager.trustOmemoIdentity(device, fp)
+            }
+            omemoManager.encrypt(muc, body)
+        }
+        val builder = connection.stanzaFactory.buildMessageStanza()
+        return sent.buildMessage(builder, muc.room)
+    }
+
+    fun multiUserChatSupportsOmemo(muc: org.jivesoftware.smackx.muc.MultiUserChat): Boolean = try {
+        omemoManager.multiUserChatSupportsOmemo(muc)
+    } catch (_: Exception) {
+        false
+    }
+
     fun tryDecrypt(remoteJid: String, stanza: SmackMessage): String? {
         if (stanza.getExtension(OmemoElement::class.java) == null) return null
         val element = stanza.getExtension(OmemoElement::class.java) ?: return null

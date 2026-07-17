@@ -11,6 +11,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import ltechnologies.onionphone.securemessenger.core.model.AccountCredentials
+import ltechnologies.onionphone.securemessenger.core.model.Attachment
+import ltechnologies.onionphone.securemessenger.core.model.AttachmentState
+import ltechnologies.onionphone.securemessenger.core.model.AuthStep
+import ltechnologies.onionphone.securemessenger.core.model.AuthStepKind
 import ltechnologies.onionphone.securemessenger.core.model.ConnectionResult
 import ltechnologies.onionphone.securemessenger.core.model.ConnectionState
 import ltechnologies.onionphone.securemessenger.core.model.Conversation
@@ -38,7 +42,7 @@ class MatrixProtocol @Inject constructor(
 
     override val id: ProtocolId = ProtocolId.MATRIX
 
-    override val capabilities = ProtocolCapabilities(
+    private val baseCapabilities = ProtocolCapabilities(
         directMessages = true,
         groupChats = true,
         mediaSend = true,
@@ -48,6 +52,17 @@ class MatrixProtocol @Inject constructor(
         endToEndEncryption = true,
     )
 
+    /** Reflects live session: E2EE and encrypted media require an active Trixnity engine. */
+    override val capabilities: ProtocolCapabilities
+        get() {
+            val e2ee = sessions.values.any { it.e2eeEnabled }
+            return baseCapabilities.copy(
+                endToEndEncryption = e2ee,
+                mediaSend = e2ee,
+                mediaReceive = e2ee,
+            )
+        }
+
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     override val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
 
@@ -55,6 +70,7 @@ class MatrixProtocol @Inject constructor(
     private class MatrixSession(
         var trixnityEngine: TrixnityMatrixEngine? = null,
         var httpFallback: MatrixHttpFallback? = null,
+        var e2eeEnabled: Boolean = false,
     )
 
     /**
@@ -65,8 +81,29 @@ class MatrixProtocol @Inject constructor(
     private val sessions = java.util.concurrent.ConcurrentHashMap<String, MatrixSession>()
     private val registration = MatrixRegistration()
 
+    private val _pendingAuthStep = MutableStateFlow<AuthStep?>(null)
+    fun observePendingAuthStep(): StateFlow<AuthStep?> = _pendingAuthStep.asStateFlow()
+
+    private var pendingSsoAccountId: String? = null
+    private var pendingSsoApiBase: String? = null
+    private var pendingSsoProxy: ProxyConfig? = null
+    private var pendingSsoDisplayName: String? = null
+    private var pendingSsoUserHint: String? = null
+
+    private fun clearPendingSso() {
+        pendingSsoAccountId = null
+        pendingSsoApiBase = null
+        pendingSsoProxy = null
+        pendingSsoDisplayName = null
+        pendingSsoUserHint = null
+    }
+
     fun trixnityEngine(accountId: String? = null): TrixnityMatrixEngine? =
         (accountId?.let { sessions[it] } ?: sessions.values.singleOrNull())?.trixnityEngine
+
+    /** Whether Trixnity E2EE is active for [accountId]. */
+    fun usesE2ee(accountId: String? = null): Boolean =
+        (accountId?.let { sessions[it] } ?: sessions.values.singleOrNull())?.e2eeEnabled == true
 
     override fun isAccountConnected(accountId: String): Boolean = sessions.containsKey(accountId)
 
@@ -113,13 +150,15 @@ class MatrixProtocol @Inject constructor(
                 }.getOrElse {
                     return@withContext ConnectionResult.Failure(it.message ?: "Invalid homeserver URL")
                 }
-                val matrixUser = runCatching {
-                    MatrixUrls.normalizeUserId(
-                        account.secrets["userId"] ?: error("Missing Matrix user ID"),
-                        server,
-                    )
-                }.getOrElse {
-                    return@withContext ConnectionResult.Failure(it.message ?: "Invalid Matrix user ID")
+                val rawUserId = account.secrets["userId"]?.trim().orEmpty()
+                val matrixUser = if (rawUserId.isBlank()) {
+                    ""
+                } else {
+                    runCatching {
+                        MatrixUrls.normalizeUserId(rawUserId, server)
+                    }.getOrElse {
+                        return@withContext ConnectionResult.Failure(it.message ?: "Invalid Matrix user ID")
+                    }
                 }
                 val password = account.secrets["password"]
                 val accessToken = account.secrets["accessToken"]
@@ -140,8 +179,34 @@ class MatrixProtocol @Inject constructor(
                     _connectionState.value = ConnectionState.ERROR
                 }
 
-                // Password login via CS API first — Trixnity on matrix.org triggers MSC2965/OIDC
-                // with an http://localhost callback, which Android cleartext policy blocks.
+                val flows = MatrixLoginFlows.fetchFlows(apiBaseUrl, proxy)
+
+                // Password path unavailable (OIDC-only homeservers): park SSO auth step.
+                if ((accessToken == null || accessToken.isBlank()) &&
+                    (password == null || password.isBlank() || !MatrixLoginFlows.supportsPassword(flows)) &&
+                    MatrixLoginFlows.supportsSso(flows)
+                ) {
+                    pendingSsoAccountId = account.accountId
+                    pendingSsoApiBase = apiBaseUrl
+                    pendingSsoProxy = proxy
+                    pendingSsoDisplayName = account.displayName
+                    pendingSsoUserHint = matrixUser.takeIf { it.isNotBlank() }
+                    _pendingAuthStep.value = AuthStep(
+                        kind = AuthStepKind.MATRIX_SSO,
+                        prompt = "Connexion SSO Matrix requise",
+                        fields = listOf("loginToken"),
+                        url = MatrixLoginFlows.ssoRedirectUrl(apiBaseUrl),
+                    )
+                    _connectionState.value = ConnectionState.CONNECTING
+                    return@withContext ConnectionResult.Success
+                }
+
+                if (matrixUser.isBlank()) {
+                    return@withContext ConnectionResult.Failure(
+                        "Matrix user ID requis (sauf connexion SSO)",
+                    )
+                }
+
                 val fallback = MatrixHttpFallback(repository)
                 val fb = when {
                     accessToken != null && accessToken.isNotBlank() -> {
@@ -157,7 +222,7 @@ class MatrixProtocol @Inject constructor(
                         )
                     }
                     password != null -> {
-                        fallback.connect(
+                        val passwordResult = fallback.connect(
                             account.accountId,
                             apiBaseUrl,
                             matrixUser,
@@ -167,6 +232,22 @@ class MatrixProtocol @Inject constructor(
                             onSinceUpdated = onSinceUpdated,
                             onAuthExpired = onAuthExpired,
                         )
+                        if (passwordResult.isFailure && MatrixLoginFlows.supportsSso(flows)) {
+                            pendingSsoAccountId = account.accountId
+                            pendingSsoApiBase = apiBaseUrl
+                            pendingSsoProxy = proxy
+                            pendingSsoDisplayName = account.displayName
+                            pendingSsoUserHint = matrixUser
+                            _pendingAuthStep.value = AuthStep(
+                                kind = AuthStepKind.MATRIX_SSO,
+                                prompt = "Mot de passe refusé — connectez-vous via SSO",
+                                fields = listOf("loginToken"),
+                                url = MatrixLoginFlows.ssoRedirectUrl(apiBaseUrl),
+                            )
+                            _connectionState.value = ConnectionState.CONNECTING
+                            return@withContext ConnectionResult.Success
+                        }
+                        passwordResult
                     }
                     else -> Result.failure(IllegalStateException("Missing Matrix credentials"))
                 }
@@ -178,29 +259,151 @@ class MatrixProtocol @Inject constructor(
                         cause?.message ?: "Matrix connect failed",
                     )
                 }
-                sessions[account.accountId] = MatrixSession(httpFallback = fallback)
-                fallback.persistedAccessToken?.let { token ->
-                    credentialStore.put(account.accountId, ACCESS_TOKEN_KEY, token)
-                }
-                password?.let { credentialStore.put(account.accountId, "password", it) }
-                credentialStore.put(account.accountId, "userId", matrixUser)
-                // Cache the resolved API base URL so future reconnects skip the well-known lookup.
-                credentialStore.put(account.accountId, "homeserver", apiBaseUrl)
 
-                repository.upsertAccount(
-                    ltechnologies.onionphone.securemessenger.core.model.Account(
-                        id = account.accountId,
-                        protocol = ProtocolId.MATRIX,
-                        displayName = account.displayName,
-                        connectionState = ConnectionState.CONNECTED,
-                    ),
+                return@withContext finalizeMatrixSession(
+                    accountId = account.accountId,
+                    displayName = account.displayName,
+                    apiBaseUrl = apiBaseUrl,
+                    matrixUser = fallback.persistedUserId ?: matrixUser,
+                    accessToken = fallback.persistedAccessToken
+                        ?: accessToken?.takeIf { it.isNotBlank() }
+                        ?: return@withContext ConnectionResult.Failure("Access token manquant"),
+                    password = password,
+                    proxy = proxy,
+                    fallback = fallback,
                 )
-                _connectionState.value = ConnectionState.CONNECTED
-                ConnectionResult.Success
             } catch (e: Exception) {
                 Timber.e(e, "Matrix connect failed")
                 _connectionState.value = ConnectionState.ERROR
                 ConnectionResult.Failure(e.message ?: "Matrix connect failed")
+            }
+        }
+
+    private suspend fun finalizeMatrixSession(
+        accountId: String,
+        displayName: String,
+        apiBaseUrl: String,
+        matrixUser: String,
+        accessToken: String,
+        password: String?,
+        proxy: ProxyConfig,
+        fallback: MatrixHttpFallback,
+    ): ConnectionResult {
+        val session = MatrixSession(httpFallback = fallback)
+        sessions[accountId] = session
+
+        val engine = TrixnityMatrixEngine(repository, context.filesDir)
+        var trixnityLogin = engine.loginWithAccessToken(
+            accountId,
+            apiBaseUrl,
+            matrixUser,
+            accessToken,
+            proxy,
+        )
+        if (trixnityLogin.isFailure) {
+            Timber.w(trixnityLogin.exceptionOrNull(), "Trixnity first login failed; wiping store and retrying")
+            engine.close()
+            TrixnityMatrixEngine.wipeAccountStore(context.filesDir, accountId)
+            val retryEngine = TrixnityMatrixEngine(repository, context.filesDir)
+            trixnityLogin = retryEngine.loginWithAccessToken(
+                accountId,
+                apiBaseUrl,
+                matrixUser,
+                accessToken,
+                proxy,
+            )
+            if (trixnityLogin.isSuccess) {
+                session.trixnityEngine = retryEngine
+            } else {
+                retryEngine.close()
+            }
+        } else {
+            session.trixnityEngine = engine
+        }
+
+        if (trixnityLogin.isSuccess) {
+            session.e2eeEnabled = true
+            // Trixnity owns sync + E2EE — stop plaintext HTTP /sync to avoid dual timelines.
+            fallback.disconnect()
+            session.httpFallback = null
+            Timber.i("Matrix Trixnity E2EE session active for $accountId")
+        } else {
+            session.e2eeEnabled = false
+            sessions.remove(accountId)
+            fallback.disconnect()
+            engine.close()
+            _connectionState.value = ConnectionState.ERROR
+            return ConnectionResult.Failure(
+                "E2EE Matrix (Trixnity) indisponible: " +
+                    (trixnityLogin.exceptionOrNull()?.message ?: "login failed"),
+            )
+        }
+
+        credentialStore.put(accountId, ACCESS_TOKEN_KEY, accessToken)
+        password?.let { credentialStore.put(accountId, "password", it) }
+        credentialStore.put(accountId, "userId", matrixUser)
+        credentialStore.put(accountId, "homeserver", apiBaseUrl)
+
+        repository.upsertAccount(
+            ltechnologies.onionphone.securemessenger.core.model.Account(
+                id = accountId,
+                protocol = ProtocolId.MATRIX,
+                displayName = displayName,
+                connectionState = ConnectionState.CONNECTED,
+            ),
+        )
+        _pendingAuthStep.value = null
+        _connectionState.value = ConnectionState.CONNECTED
+        return ConnectionResult.Success
+    }
+
+    override suspend fun pendingAuthStep(): AuthStep? = _pendingAuthStep.value
+
+    override suspend fun continueAuthentication(fields: Map<String, String>): ConnectionResult =
+        withContext(Dispatchers.IO) {
+            when (_pendingAuthStep.value?.kind) {
+                AuthStepKind.MATRIX_SSO -> {
+                    val loginToken = fields["loginToken"]?.trim().orEmpty()
+                    if (loginToken.isBlank()) {
+                        return@withContext ConnectionResult.Failure("loginToken SSO manquant")
+                    }
+                    val apiBase = pendingSsoApiBase
+                        ?: return@withContext ConnectionResult.Failure("Session SSO expirée")
+                    val proxy = pendingSsoProxy
+                        ?: return@withContext ConnectionResult.Failure("Proxy SSO manquant")
+                    val accountId = pendingSsoAccountId
+                        ?: return@withContext ConnectionResult.Failure("Compte SSO manquant")
+                    try {
+                        networkGuard.assertNetworkAllowed()
+                        // One-shot loginToken: exchange once via CS API, then soft-login Trixnity
+                        // (never call m.login.token twice — the token is consumed).
+                        val tokenLogin = MatrixLoginFlows.loginWithToken(apiBase, loginToken, proxy)
+                        val fallback = MatrixHttpFallback(repository)
+                        fallback.connectWithToken(
+                            accountId,
+                            apiBase,
+                            tokenLogin.userId,
+                            tokenLogin.accessToken,
+                            proxy,
+                        ).getOrThrow()
+                        finalizeMatrixSession(
+                            accountId = accountId,
+                            displayName = pendingSsoDisplayName ?: tokenLogin.userId,
+                            apiBaseUrl = apiBase,
+                            matrixUser = tokenLogin.userId,
+                            accessToken = tokenLogin.accessToken,
+                            password = null,
+                            proxy = proxy,
+                            fallback = fallback,
+                        ).also { clearPendingSso() }
+                    } catch (e: Exception) {
+                        Timber.e(e, "Matrix SSO continue failed")
+                        clearPendingSso()
+                        _connectionState.value = ConnectionState.ERROR
+                        ConnectionResult.Failure(e.message ?: "SSO Matrix échoué")
+                    }
+                }
+                else -> ConnectionResult.Failure("Aucune étape d'auth Matrix en attente")
             }
         }
 
@@ -261,6 +464,54 @@ class MatrixProtocol @Inject constructor(
                 SendResult.Failure(e.message ?: "Send failed")
             }
         }
+
+    override suspend fun sendMedia(
+        conversationId: String,
+        attachment: Attachment,
+        caption: SanitizedText?,
+        accountId: String?,
+    ): SendResult = withContext(Dispatchers.IO) {
+        try {
+            networkGuard.assertNetworkAllowed()
+            val accId = accountId
+                ?: conversationId.substringBefore('_', missingDelimiterValue = conversationId)
+            val session = sessions[accId] ?: return@withContext SendResult.Failure("Account not connected")
+            val roomId = conversationId.substringAfter('_', missingDelimiterValue = conversationId)
+            val localPath = attachment.localPath
+                ?: return@withContext SendResult.Failure("Missing local file path")
+            val engine = session.trixnityEngine
+                ?: return@withContext SendResult.Failure("Media send requires Trixnity E2EE session")
+            val sent = engine.sendMedia(
+                roomId = roomId,
+                localPath = localPath,
+                mimeType = attachment.mimeType,
+                fileName = attachment.fileName,
+                caption = caption?.value,
+            )
+            if (sent.isFailure) {
+                return@withContext SendResult.Failure(
+                    sent.exceptionOrNull()?.message ?: "Media send failed",
+                )
+            }
+            val body = caption?.value ?: attachment.fileName ?: "Attachment"
+            val msg = Message(
+                id = "${conversationId}_${System.currentTimeMillis()}",
+                conversationId = conversationId,
+                protocol = ProtocolId.MATRIX,
+                body = body,
+                timestamp = System.currentTimeMillis(),
+                direction = ltechnologies.onionphone.securemessenger.core.model.MessageDirection.OUTGOING,
+                deliveryState = ltechnologies.onionphone.securemessenger.core.model.DeliveryState.SENT,
+                attachments = listOf(
+                    attachment.copy(state = AttachmentState.READY),
+                ),
+            )
+            repository.upsertMessage(msg)
+            SendResult.Success(msg.id)
+        } catch (e: Exception) {
+            SendResult.Failure(e.message ?: "Media send failed")
+        }
+    }
 
     override suspend fun disconnect(accountId: String?) {
         withContext(Dispatchers.IO) {

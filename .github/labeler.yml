@@ -57,12 +57,10 @@ telegram:
       - any-glob-to-any-file:
           - "protocol/telegram/**"
 
-discord:
-  - changed-files:
-      - any-glob-to-any-file:
-          - "protocol/discord/**"
-
 signal:
   - changed-files:
       - any-glob-to-any-file:
           - "protocol/signal/**"
+          - "vendor/signal/**"
+          - "scripts/sync-signal-vendor.sh"
+          - "docs/signal-vendor.md"

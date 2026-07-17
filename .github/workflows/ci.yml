@@ -58,6 +58,11 @@ jobs:
           chmod +x scripts/fetch-tdlib-prebuilt.sh
           ./scripts/fetch-tdlib-prebuilt.sh
 
+      - name: Sync Signal vendor (libsignal-service)
+        run: |
+          chmod +x scripts/sync-signal-vendor.sh
+          ./scripts/sync-signal-vendor.sh
+
       - name: Unit tests
         run: ./gradlew test --stacktrace --no-daemon
 

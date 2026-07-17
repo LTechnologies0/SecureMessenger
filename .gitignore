@@ -10,6 +10,12 @@
 .cxx
 .kotlin/
 protocol/telegram/libs/*.aar
+vendor/signal/util-jvm/src/
+vendor/signal/models-jvm/src/
+vendor/signal/network-jvm/src/
+vendor/signal/libsignal-service/src/
+vendor/signal/VERSION
+vendor/signal/**/build/
 *.apk
 *.aab
 *.dex

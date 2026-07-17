@@ -9,6 +9,7 @@ import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.RoomDatabase
 import kotlinx.coroutines.flow.Flow
+import ltechnologies.onionphone.securemessenger.core.model.Attachment
 import ltechnologies.onionphone.securemessenger.core.model.ConnectionState
 import ltechnologies.onionphone.securemessenger.core.model.DeliveryState
 import ltechnologies.onionphone.securemessenger.core.model.MessageDirection
@@ -44,6 +45,7 @@ data class MessageEntity(
     val direction: String,
     val deliveryState: String,
     val senderDisplayName: String?,
+    val attachmentsJson: String = "[]",
 )
 
 @Entity(tableName = "proxy_settings")
@@ -118,7 +120,7 @@ interface ProxySettingsDao {
         MessageEntity::class,
         ProxySettingsEntity::class,
     ],
-    version = 2,
+    version = 3,
     exportSchema = true,
 )
 abstract class MessengerDatabase : RoomDatabase() {
@@ -155,6 +157,7 @@ fun MessageEntity.toDomain() = ltechnologies.onionphone.securemessenger.core.mod
     direction = MessageDirection.valueOf(direction),
     deliveryState = DeliveryState.valueOf(deliveryState),
     senderDisplayName = senderDisplayName,
+    attachments = AttachmentConverters.toAttachments(attachmentsJson),
 )
 
 fun ltechnologies.onionphone.securemessenger.core.model.Account.toEntity() = AccountEntity(
@@ -184,4 +187,5 @@ fun ltechnologies.onionphone.securemessenger.core.model.Message.toEntity() = Mes
     direction = direction.name,
     deliveryState = deliveryState.name,
     senderDisplayName = senderDisplayName,
+    attachmentsJson = AttachmentConverters.fromAttachments(attachments),
 )

@@ -16,7 +16,6 @@ flowchart TB
     XMPP[:protocol/xmpp]
     MATRIX[:protocol/matrix]
     TG[:protocol/telegram]
-    DISCORD[:protocol/discord]
     SIGNAL[:protocol/signal]
 
     APP --> DATA
@@ -26,18 +25,37 @@ flowchart TB
     XMPP --> PAPI
     MATRIX --> PAPI
     TG --> PAPI
-    DISCORD --> PAPI
     SIGNAL --> PAPI
     PAPI --> MODEL
     PAPI --> PROXY
     XMPP --> PROXY
     MATRIX --> PROXY
     TG --> PROXY
-    DISCORD --> PROXY
     SIGNAL --> PROXY
     DATA --> SEC
     DATA --> MODEL
 ```
+
+## Protocol feature grid (1.0.0-alpha.3)
+
+| Protocole | Connexion | Envoi | Réception | Groupes | Médias | E2EE | Inscription |
+|-----------|-----------|-------|-----------|---------|--------|------|-------------|
+| XMPP | OK | OK | OK | MUC + bookmarks | HTTP upload + OOB/aesgcm | OMEMO 1:1+MUC (fail-closed) | OK (Tor) |
+| Matrix | OK + SSO | OK | OK | OK | Trixnity upload + mxc download | Megolm (H2 `fromStore`, fail-closed) | OK (Tor) |
+| Telegram | OK* | OK | OK | OK | TDLib send/receive | MTProto (cloud)† | OK (Tor fail-closed) |
+| Signal | OK | OK | OK WS | GV2 sender-key (+ encrypted fan-out) | CDN upload/download | libsignal store (sessions/SK) | OK (Tor) |
+
+\* Requires prebuilt TDLib AAR with `libtdjni.so` for packaged ABIs ([docs/tdlib-build.md](tdlib-build.md)). Debug APKs include `arm64-v8a` + `x86_64` by default (Waydroid/emulators).
+
+† Telegram cloud chats use MTProto (client↔server). Secret chats are not exposed in this build.
+
+Toutes les inscriptions et le trafic protocolaire passent par Tor (SOCKS5 fail-closed). Discord a été retiré du projet.
+
+Matrix E2EE is **fail-closed**: connect / SSO succeeds only when Trixnity is live; plaintext HTTP `/sync` is stopped once Trixnity owns the session. OIDC homeservers use `m.login.sso` → Tor WebView → one-shot `loginToken` → soft-login (never reuse `m.login.token` with an access token).
+
+XMPP OMEMO is **fail-closed** when the peer/room advertises OMEMO: encrypt failure aborts send (no cleartext fallback). Contacts/rooms without OMEMO still use plaintext XMPP (protocol limitation).
+
+Signal GV2 prefers sender keys; if endorsements/certificates are unavailable it fans out **encrypted** per-recipient Signal messages (not cleartext).
 
 ## Module responsibilities
 
@@ -53,13 +71,12 @@ flowchart TB
 | `:protocol:xmpp` | Smack-based XMPP client (`SmackClientFacade`), XEP-0077 registration (`XmppRegistration`) |
 | `:protocol:matrix` | Raw Matrix Client-Server API client, well-known discovery, UIA registration + WebView fallback |
 | `:protocol:telegram` | TDLib JNI bindings (see [docs/tdlib-build.md](tdlib-build.md)) |
-| `:protocol:discord` | Discord client adapter |
-| `:protocol:signal` | Signal protocol adapter |
+| `:protocol:signal` | Signal adapter (`libsignal-service` + `libsignal-client`) — see [docs/signal-vendor.md](signal-vendor.md) |
 
 ## Network flow (every protocol)
 
 ```
-Protocol adapter (Matrix / XMPP / Telegram / Discord / Signal)
+Protocol adapter (Matrix / XMPP / Telegram / Signal)
         ↓
 core/proxy — SocksEndpointResolver (resolve reachable Tor SOCKS host:port)
         ↓

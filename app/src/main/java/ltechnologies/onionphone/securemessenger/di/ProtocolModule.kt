@@ -8,7 +8,6 @@ import javax.inject.Singleton
 import ltechnologies.onionphone.securemessenger.core.model.ProtocolId
 import ltechnologies.onionphone.securemessenger.protocol.api.MessengerProtocol
 import ltechnologies.onionphone.securemessenger.protocol.api.ProtocolRegistry
-import ltechnologies.onionphone.securemessenger.protocol.discord.DiscordProtocol
 import ltechnologies.onionphone.securemessenger.protocol.matrix.MatrixProtocol
 import ltechnologies.onionphone.securemessenger.protocol.signal.SignalProtocol
 import ltechnologies.onionphone.securemessenger.protocol.telegram.TelegramProtocol
@@ -31,14 +30,12 @@ object ProtocolModule {
         xmpp: XmppProtocol,
         matrix: MatrixProtocol,
         telegram: TelegramProtocol,
-        discord: DiscordProtocol,
         signal: SignalProtocol,
     ): ProtocolRegistry = ProtocolRegistryImpl(
         mapOf(
             ProtocolId.XMPP to xmpp,
             ProtocolId.MATRIX to matrix,
             ProtocolId.TELEGRAM to telegram,
-            ProtocolId.DISCORD to discord,
             ProtocolId.SIGNAL to signal,
         ),
     )

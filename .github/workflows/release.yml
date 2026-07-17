@@ -61,6 +61,11 @@ jobs:
           chmod +x scripts/fetch-tdlib-prebuilt.sh
           ./scripts/fetch-tdlib-prebuilt.sh
 
+      - name: Sync Signal vendor (libsignal-service)
+        run: |
+          chmod +x scripts/sync-signal-vendor.sh
+          ./scripts/sync-signal-vendor.sh
+
       - name: Verify signing secrets
         run: |
           missing=0
@@ -139,8 +144,8 @@ jobs:
           tag_name: ${{ steps.meta.outputs.tag }}
           name: SecureMessenger ${{ steps.meta.outputs.version }}
           generate_release_notes: true
-          prerelease: false
-          latest: true
+          prerelease: ${{ contains(steps.meta.outputs.version, 'alpha') || contains(steps.meta.outputs.version, 'beta') || contains(steps.meta.outputs.version, 'rc') }}
+          latest: ${{ !(contains(steps.meta.outputs.version, 'alpha') || contains(steps.meta.outputs.version, 'beta') || contains(steps.meta.outputs.version, 'rc')) }}
           body_path: dist/release/ABI_LIST.md
           files: |
             dist/release/securemessenger-*.apk

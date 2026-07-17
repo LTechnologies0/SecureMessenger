@@ -101,6 +101,16 @@ internal class XmppRegistration(private val context: Context) {
 
     private fun openProbeConnection(server: String, proxy: ProxyConfig): XMPPTCPConnection {
         val socksHost = SocksEndpointResolver.resolveReachableHost(proxy.host, proxy.port)
+        try {
+            java.net.Socket().use { socket ->
+                socket.connect(java.net.InetSocketAddress(socksHost, proxy.port), 3_000)
+            }
+        } catch (e: Exception) {
+            throw IllegalStateException(
+                "Tor requis : SOCKS $socksHost:${proxy.port} injoignable — démarrez Orbot ou InviZible",
+                e,
+            )
+        }
         // See SmackClientFacade.connect() — Smack's SOCKS5 client always offers both
         // no-auth and username/password methods, and Tor's SocksPort commonly picks the
         // latter for stream isolation. A non-null value must always be present or the

@@ -1,15 +1,17 @@
 // Per-ABI release APKs for all Android CPU architectures.
-// Debug builds compile a single ABI (default arm64-v8a) to save local resources.
+// Debug builds default to arm64 + x86_64 so Waydroid/emulators get libtdjni.so.
 
 def SECUREMESSENGER_ABIS = ["armeabi-v7a", "arm64-v8a", "x86", "x86_64"] as String[]
-def devAbi = findProperty("securemessenger.devAbi") ?: "arm64-v8a"
 def isDebugBuild = gradle.startParameter.taskNames.any { it.containsIgnoreCase("debug") }
+// Comma-separated override, e.g. -Psecuremessenger.devAbis=arm64-v8a
+def devAbisProp = findProperty("securemessenger.devAbis") ?: findProperty("securemessenger.devAbi")
+def debugAbis = (devAbisProp?.toString()?.split(",")*.trim()?.findAll { it } ?: ["arm64-v8a", "x86_64"]) as String[]
 
 android {
     defaultConfig {
         if (isDebugBuild) {
             ndk {
-                abiFilters devAbi
+                abiFilters(*debugAbis)
             }
         }
     }

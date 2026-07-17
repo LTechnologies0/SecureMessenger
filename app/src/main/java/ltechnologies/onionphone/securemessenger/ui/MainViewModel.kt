@@ -15,9 +15,10 @@ import java.util.concurrent.ConcurrentHashMap
 import ltechnologies.onionphone.securemessenger.core.model.AccountCredentials
 import ltechnologies.onionphone.securemessenger.core.model.ConnectionResult
 import ltechnologies.onionphone.securemessenger.core.model.ConnectionState
-import ltechnologies.onionphone.securemessenger.core.model.HistoryLoadResult
+import ltechnologies.onionphone.securemessenger.core.model.Attachment
 import ltechnologies.onionphone.securemessenger.core.model.Conversation
 import ltechnologies.onionphone.securemessenger.core.model.FeatureFlags
+import ltechnologies.onionphone.securemessenger.core.model.HistoryLoadResult
 import ltechnologies.onionphone.securemessenger.core.model.Message
 import ltechnologies.onionphone.securemessenger.core.model.ProtocolId
 import ltechnologies.onionphone.securemessenger.core.model.ProxyConfig
@@ -47,8 +48,12 @@ class MainViewModel @Inject constructor(
     val accounts = repository.observeAccounts()
         .map { list ->
             list.filter { account ->
-                account.protocol != ProtocolId.TELEGRAM ||
-                    account.connectionState == ConnectionState.CONNECTED
+                when (account.protocol) {
+                    ProtocolId.TELEGRAM,
+                    ProtocolId.SIGNAL,
+                    -> account.connectionState == ConnectionState.CONNECTED
+                    else -> true
+                }
             }
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -81,6 +86,43 @@ class MainViewModel @Inject constructor(
 
     fun telegramProtocol(): TelegramProtocol? =
         connectionManager.protocolFor(ProtocolId.TELEGRAM) as? TelegramProtocol
+
+    fun signalProtocol(): ltechnologies.onionphone.securemessenger.protocol.signal.SignalProtocol? =
+        connectionManager.protocolFor(ProtocolId.SIGNAL) as? ltechnologies.onionphone.securemessenger.protocol.signal.SignalProtocol
+
+    fun connectSignal(phone: String, onResult: (ConnectionResult, String) -> Unit) {
+        val accountId = UUID.randomUUID().toString()
+        val credentials = AccountCredentials(
+            protocol = ProtocolId.SIGNAL,
+            accountId = accountId,
+            displayName = phone,
+            secrets = mapOf(
+                "e164" to phone.trim(),
+                "phone" to phone.trim(),
+            ),
+        )
+        connectAccount(credentials) { result -> onResult(result, accountId) }
+    }
+
+    fun cancelSignalLogin(accountId: String) {
+        viewModelScope.launch {
+            connectionManager.cancelSignalLogin(accountId)
+        }
+    }
+
+    fun resendSignalCode(onResult: (ConnectionResult) -> Unit) {
+        viewModelScope.launch {
+            val protocol = connectionManager.protocolFor(ProtocolId.SIGNAL) as? ltechnologies.onionphone.securemessenger.protocol.signal.SignalProtocol
+            onResult(protocol?.resendSmsCode() ?: ConnectionResult.Failure("Signal non disponible"))
+        }
+    }
+
+    fun requestSignalSms(onResult: (ConnectionResult) -> Unit) {
+        viewModelScope.launch {
+            val protocol = connectionManager.protocolFor(ProtocolId.SIGNAL) as? ltechnologies.onionphone.securemessenger.protocol.signal.SignalProtocol
+            onResult(protocol?.requestSmsAfterCaptcha() ?: ConnectionResult.Failure("Signal non disponible"))
+        }
+    }
 
     fun connectTelegram(phone: String, onResult: (ConnectionResult, String) -> Unit) {
         val accountId = UUID.randomUUID().toString()
@@ -125,6 +167,24 @@ class MainViewModel @Inject constructor(
                 return@launch
             }
             val result = protocolImpl.sendMessage(conversationId, sanitized)
+            onResult(result is ltechnologies.onionphone.securemessenger.core.model.SendResult.Success)
+        }
+    }
+
+    fun sendMedia(
+        conversationId: String,
+        protocol: ProtocolId,
+        attachment: Attachment,
+        caption: String?,
+        onResult: (Boolean) -> Unit,
+    ) {
+        viewModelScope.launch {
+            val protocolImpl = connectionManager.protocolFor(protocol) ?: run {
+                onResult(false)
+                return@launch
+            }
+            val sanitizedCaption = caption?.let { MessageSanitizer.sanitize(it) }
+            val result = protocolImpl.sendMedia(conversationId, attachment, sanitizedCaption)
             onResult(result is ltechnologies.onionphone.securemessenger.core.model.SendResult.Success)
         }
     }

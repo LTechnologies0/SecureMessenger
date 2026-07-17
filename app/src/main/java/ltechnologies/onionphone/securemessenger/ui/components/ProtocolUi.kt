@@ -19,24 +19,18 @@ fun protocolShortPrefix(protocol: ProtocolId): String = when (protocol) {
     ProtocolId.TELEGRAM -> "TG"
     ProtocolId.MATRIX -> "Matrix"
     ProtocolId.XMPP -> "XMPP"
-    ProtocolId.DISCORD -> "Discord"
     ProtocolId.SIGNAL -> "Signal"
 }
 
 fun accountRailLabel(account: Account, indexAmongProtocol: Int): String {
     val prefix = protocolShortPrefix(account.protocol)
-  return if (account.protocol == ProtocolId.MATRIX || account.protocol == ProtocolId.XMPP) {
-        "$prefix#${indexAmongProtocol + 1}"
-    } else {
-        "$prefix#${indexAmongProtocol + 1}"
-    }
+    return "$prefix#${indexAmongProtocol + 1}"
 }
 
 fun protocolAccentColor(protocol: ProtocolId): Color = when (protocol) {
     ProtocolId.TELEGRAM -> PrimaryBlue
     ProtocolId.MATRIX -> SecondaryTeal
     ProtocolId.XMPP -> TertiaryAmber
-    ProtocolId.DISCORD -> Color(0xFF5865F2)
     ProtocolId.SIGNAL -> Color(0xFF3A76F0)
 }
 
@@ -44,7 +38,6 @@ fun protocolIcon(protocol: ProtocolId): ImageVector = when (protocol) {
     ProtocolId.TELEGRAM -> Icons.Default.Send
     ProtocolId.MATRIX -> Icons.Default.Forum
     ProtocolId.XMPP -> Icons.AutoMirrored.Filled.Chat
-    ProtocolId.DISCORD -> Icons.Default.Forum
     ProtocolId.SIGNAL -> Icons.AutoMirrored.Filled.Chat
 }
 

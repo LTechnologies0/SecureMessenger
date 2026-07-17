@@ -35,6 +35,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import java.text.DateFormat
 import java.util.Date
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Image
+import androidx.compose.material3.IconButton
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import coil3.compose.AsyncImage
+import java.io.File
+import java.util.UUID
+import ltechnologies.onionphone.securemessenger.core.model.Attachment
+import ltechnologies.onionphone.securemessenger.core.model.AttachmentState
 import ltechnologies.onionphone.securemessenger.core.model.DeliveryState
 import ltechnologies.onionphone.securemessenger.core.model.HistoryLoadResult
 import ltechnologies.onionphone.securemessenger.core.model.MessageDirection
@@ -156,7 +169,34 @@ fun ChatScreen(
                     }
                     Card(colors = colors) {
                         Column(modifier = Modifier.padding(12.dp)) {
-                            Text(text = message.body)
+                            if (message.attachments.isNotEmpty()) {
+                                message.attachments.forEach { attachment ->
+                                    when {
+                                        attachment.mimeType.startsWith("image/") -> {
+                                            attachment.localPath?.let { path ->
+                                                AsyncImage(
+                                                    model = File(path),
+                                                    contentDescription = attachment.fileName,
+                                                    modifier = Modifier
+                                                        .padding(top = 4.dp)
+                                                        .fillMaxWidth(),
+                                                    contentScale = ContentScale.Inside,
+                                                )
+                                            }
+                                        }
+                                        else -> {
+                                            Text(
+                                                text = attachment.fileName ?: attachment.mimeType,
+                                                style = MaterialTheme.typography.labelMedium,
+                                                modifier = Modifier.padding(top = 4.dp),
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                            if (message.body.isNotBlank()) {
+                                Text(text = message.body)
+                            }
                             Text(
                                 text = buildString {
                                     append(timeFormat.format(Date(message.timestamp)))
@@ -189,12 +229,49 @@ fun ChatScreen(
                 modifier = Modifier.padding(horizontal = 12.dp),
             )
         }
+        val context = LocalContext.current
+        val pickAttachment = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+            if (uri == null) return@rememberLauncherForActivityResult
+            val mime = context.contentResolver.getType(uri) ?: "application/octet-stream"
+            val fileName = uri.lastPathSegment ?: "attachment"
+            val dest = File(context.cacheDir, "out_${UUID.randomUUID()}_$fileName")
+            runCatching {
+                context.contentResolver.openInputStream(uri)?.use { input ->
+                    dest.outputStream().use { output -> input.copyTo(output) }
+                }
+            }.onSuccess {
+                val attachment = Attachment(
+                    id = UUID.randomUUID().toString(),
+                    mimeType = mime,
+                    fileName = fileName,
+                    localPath = dest.absolutePath,
+                    sizeBytes = dest.length(),
+                    state = AttachmentState.READY,
+                )
+                viewModel.sendMedia(conversationId, protocol, attachment, draft.takeIf { it.isNotBlank() }) { ok ->
+                    if (ok) {
+                        draft = ""
+                        sendError = null
+                    } else {
+                        sendError = "Envoi média échoué"
+                    }
+                }
+            }.onFailure {
+                sendError = it.message ?: "Lecture du fichier impossible"
+            }
+        }
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(8.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            IconButton(onClick = { pickAttachment.launch("image/*") }) {
+                Icon(Icons.Default.Image, contentDescription = "Image")
+            }
+            IconButton(onClick = { pickAttachment.launch("*/*") }) {
+                Icon(Icons.Default.AttachFile, contentDescription = "Fichier")
+            }
             OutlinedTextField(
                 value = draft,
                 onValueChange = { draft = it },

@@ -1,0 +1,22 @@
+--- a/src/main/java/org/whispersystems/signalservice/internal/websocket/OkHttpWebSocketConnection.java
++++ b/src/main/java/org/whispersystems/signalservice/internal/websocket/OkHttpWebSocketConnection.java
+@@ -15,6 +15,7 @@ import org.signal.core.util.logging.Log;
+ import org.whispersystems.signalservice.api.util.CredentialsProvider;
+ import org.whispersystems.signalservice.api.util.Tls12SocketFactory;
+ import org.whispersystems.signalservice.api.util.TlsProxySocketFactory;
++import org.signal.core.util.SignalSocksHolder;
+ import org.whispersystems.signalservice.internal.configuration.SignalServiceConfiguration;
+ import org.whispersystems.signalservice.internal.configuration.SignalServiceUrl;
+ import org.whispersystems.signalservice.internal.util.BlacklistingTrustManager;
+@@ -150,8 +151,11 @@ public class OkHttpWebSocketConnection implements WebSocketConnection {
+         clientBuilder.addInterceptor(interceptor);
+       }
+ 
+-      if (signalProxy.isPresent()) {
++      java.net.Proxy socksProxy = SignalSocksHolder.get();
++      if (socksProxy != null) {
++        clientBuilder.proxy(socksProxy);
++      } else if (signalProxy.isPresent()) {
+         clientBuilder.socketFactory(new TlsProxySocketFactory(signalProxy.get().getHost(), signalProxy.get().getPort(), dns));
+       }
+ 

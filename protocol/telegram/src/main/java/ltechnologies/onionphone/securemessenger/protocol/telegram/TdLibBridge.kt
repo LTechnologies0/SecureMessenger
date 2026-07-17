@@ -85,9 +85,8 @@ class TdLibFacade(private val client: TdLibClient) {
         client.send(TdApi.DisableProxy())
     }
 
-    suspend fun configureProxy(host: String, port: Int, username: String?, password: String?): Boolean {
-        disableProxy()
-        return suspendCancellableCoroutine { cont ->
+    suspend fun configureProxy(host: String, port: Int, username: String?, password: String?): Boolean =
+        suspendCancellableCoroutine { cont ->
             client.send(
                 TdApi.AddProxy().apply {
                     proxy = TdApi.Proxy(
@@ -100,6 +99,10 @@ class TdLibFacade(private val client: TdLibClient) {
                 },
             ) { result ->
                 when (result) {
+                    is TdApi.AddedProxy -> {
+                        Timber.i("TDLib SOCKS5 enabled ${result.proxy.server}:${result.proxy.port}")
+                        if (cont.isActive) cont.resume(true)
+                    }
                     is TdApi.Proxy -> {
                         Timber.i("TDLib SOCKS5 enabled ${result.server}:${result.port}")
                         if (cont.isActive) cont.resume(true)
@@ -112,10 +115,12 @@ class TdLibFacade(private val client: TdLibClient) {
                 }
             }
         }
-    }
 
+    @Deprecated(
+        "Use suspend configureProxy() and await the result before TDLib auth steps",
+        ReplaceWith("configureProxy(host, port, username, password)"),
+    )
     fun configureProxyFireAndForget(host: String, port: Int, username: String?, password: String?) {
-        disableProxy()
         client.send(
             TdApi.AddProxy().apply {
                 proxy = TdApi.Proxy(
@@ -185,6 +190,67 @@ class TdLibFacade(private val client: TdLibClient) {
 
     suspend fun registerUser(firstName: String, lastName: String): String? = awaitResult {
         client.send(TdApi.RegisterUser(firstName, lastName, false), it)
+    }
+
+    suspend fun downloadFile(fileId: Int, priority: Int = 32): TdApi.File? =
+        suspendCancellableCoroutine { cont ->
+            client.send(TdApi.DownloadFile(fileId, priority, 0, 0, true)) { result ->
+                when (result) {
+                    is TdApi.File -> if (cont.isActive) cont.resume(result)
+                    is TdApi.Error -> {
+                        Timber.w("DownloadFile error ${result.code}: ${result.message}")
+                        if (cont.isActive) cont.resume(null)
+                    }
+                    else -> if (cont.isActive) cont.resume(null)
+                }
+            }
+        }
+
+    suspend fun sendMedia(
+        chatId: Long,
+        localPath: String,
+        mimeType: String,
+        caption: String?,
+    ): String? {
+        val formattedCaption = TdApi.FormattedText(caption.orEmpty(), emptyArray())
+        val localFile = TdApi.InputFileLocal(localPath)
+        val content: TdApi.InputMessageContent = when {
+            mimeType.startsWith("image/") -> TdApi.InputMessagePhoto(
+                TdApi.InputPhoto(localFile, null, null, intArrayOf(), 0, 0),
+                formattedCaption,
+                false,
+                null,
+                false,
+            )
+            mimeType.startsWith("video/") -> TdApi.InputMessageVideo(
+                TdApi.InputVideo(localFile, null, null, 0, intArrayOf(), 0, 0, 0, true),
+                formattedCaption,
+                false,
+                null,
+                false,
+            )
+            mimeType.startsWith("audio/") -> TdApi.InputMessageAudio(
+                TdApi.InputAudio(localFile, null, 0, "", ""),
+                formattedCaption,
+            )
+            else -> TdApi.InputMessageDocument(
+                TdApi.InputDocument(localFile, null, false),
+                formattedCaption,
+            )
+        }
+        return awaitResult {
+            client.send(
+                TdApi.SendMessage().apply {
+                    this.chatId = chatId
+                    topicId = null
+                    replyTo = null
+                    options = TdApi.MessageSendOptions()
+                    replyMarkup = null
+                    inputMessageContent = content
+                },
+                it,
+            )
+        }
     }
 
     fun sendText(chatId: Long, text: String) {

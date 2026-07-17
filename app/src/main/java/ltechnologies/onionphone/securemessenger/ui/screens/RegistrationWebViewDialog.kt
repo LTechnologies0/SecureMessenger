@@ -1,6 +1,7 @@
 package ltechnologies.onionphone.securemessenger.ui.screens
 
 import android.annotation.SuppressLint
+import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.layout.Column
@@ -28,11 +29,12 @@ import androidx.webkit.ProxyController
 import androidx.webkit.WebViewFeature
 import java.util.concurrent.Executor
 import androidx.webkit.ProxyConfig as WebViewProxyConfig
+import ltechnologies.onionphone.securemessenger.core.model.MatrixSsoRedirect
 
 /**
- * Full-screen WebView used for Matrix UIA fallback stages (captcha/email/terms) that have no
- * native UI. Traffic is force-routed through the app's SOCKS/Tor proxy via [ProxyController] —
- * there is no OS-level VPN killswitch in this app, so a plain WebView would leak the real IP.
+ * Full-screen WebView used for Matrix UIA / SSO stages. Traffic is force-routed through Tor via
+ * [ProxyController]. When [onLoginToken] is set, SSO redirects to [MatrixSsoRedirect.URI]
+ * are intercepted and the loginToken is returned automatically.
  */
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
@@ -43,6 +45,7 @@ fun RegistrationWebViewDialog(
     socksPort: Int,
     onContinue: () -> Unit,
     onDismiss: () -> Unit,
+    onLoginToken: ((String) -> Unit)? = null,
 ) {
     var proxyReady by remember { mutableStateOf(false) }
     var proxyError by remember { mutableStateOf<String?>(null) }
@@ -88,18 +91,35 @@ fun RegistrationWebViewDialog(
                     factory = { context ->
                         WebView(context).apply {
                             settings.javaScriptEnabled = true
-                            webViewClient = WebViewClient()
+                            webViewClient = object : WebViewClient() {
+                                override fun shouldOverrideUrlLoading(
+                                    view: WebView?,
+                                    request: WebResourceRequest?,
+                                ): Boolean {
+                                    val target = request?.url?.toString() ?: return false
+                                    if (onLoginToken != null && MatrixSsoRedirect.matchesRedirect(target)) {
+                                        val token = MatrixSsoRedirect.extractLoginToken(target)
+                                        if (!token.isNullOrBlank()) {
+                                            onLoginToken(token)
+                                            return true
+                                        }
+                                    }
+                                    return false
+                                }
+                            }
                             loadUrl(url)
                         }
                     },
                 )
             }
-            Button(
-                onClick = onContinue,
-                modifier = Modifier.fillMaxWidth().padding(16.dp),
-                enabled = proxyReady,
-            ) {
-                Text("Continuer")
+            if (onLoginToken == null) {
+                Button(
+                    onClick = onContinue,
+                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    enabled = proxyReady,
+                ) {
+                    Text("Continuer")
+                }
             }
         }
     }
