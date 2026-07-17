@@ -26,6 +26,7 @@ Synced modules land under `vendor/signal/`:
 - `network-jvm` — from `core/network`
 - `libsignal-service` — from `lib/libsignal-service`
 - `wire-handler/wire-handler-1.0.0.jar` — Wire proto codegen
+- `overlays/` — SecureMessenger Tor SOCKS holder + restored attachment/certificate helpers (applied after every sync)
 
 `VERSION` records the git ref. Re-run the script after bumping `libsignal-client` in `gradle/libs.versions.toml`.
 

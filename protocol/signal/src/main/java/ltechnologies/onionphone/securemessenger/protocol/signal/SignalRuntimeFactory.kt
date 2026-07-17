@@ -115,6 +115,7 @@ internal object SignalRuntimeFactory {
             keysApi,
             protocolStore.aci(),
             localProtocolAddress,
+            SignalSessionLockImpl,
             PreKeyRepository.BatchHelper { block -> block.run() },
         )
         val messageSender = SignalServiceMessageSender(

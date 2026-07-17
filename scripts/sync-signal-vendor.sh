@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Sync libsignal-service and its JVM core deps from Signal-Android (AGPL-3.0).
+# Keeps our vendored build.gradle.kts / patches / wire-handler; only refreshes sources.
 # libsignal-client + libsignal-android come from Signal's Maven repo at build time.
 set -euo pipefail
 
@@ -23,20 +24,36 @@ echo "Fetching signalapp/Signal-Android @ $REF ..."
 git clone --depth 1 --branch "$REF" https://github.com/signalapp/Signal-Android.git "$TMP" 2>/dev/null \
   || git clone --depth 1 https://github.com/signalapp/Signal-Android.git "$TMP"
 
-copy_module() {
+# Copy upstream sources into an existing module dir without wiping our Gradle wrappers.
+sync_sources() {
   local src_path="$1"
   local dest_name="$2"
-  rm -rf "$VENDOR/$dest_name"
-  mkdir -p "$VENDOR/$dest_name"
-  cp -a "$TMP/$src_path/." "$VENDOR/$dest_name/"
-  # Drop upstream Gradle files — we ship our own build.gradle.kts per module.
-  rm -f "$VENDOR/$dest_name/build.gradle.kts"
+  local dest="$VENDOR/$dest_name"
+  mkdir -p "$dest"
+  # Remove previous synced trees only (keep build.gradle.kts, .gitignore, lint.xml, etc.).
+  rm -rf "$dest/src" "$dest/consumer-rules.pro" "$dest/proguard-rules.pro"
+  if [[ -d "$TMP/$src_path/src" ]]; then
+    cp -a "$TMP/$src_path/src" "$dest/"
+  else
+    echo "ERROR: missing $TMP/$src_path/src" >&2
+    exit 1
+  fi
+  # Optional non-Gradle assets from upstream module root.
+  for f in consumer-rules.pro proguard-rules.pro; do
+    if [[ -f "$TMP/$src_path/$f" ]]; then
+      cp -a "$TMP/$src_path/$f" "$dest/"
+    fi
+  done
+  if [[ ! -f "$dest/build.gradle.kts" ]]; then
+    echo "ERROR: $dest/build.gradle.kts missing — commit SecureMessenger vendor Gradle files first." >&2
+    exit 1
+  fi
 }
 
-copy_module "core/util-jvm" "util-jvm"
-copy_module "core/models-jvm" "models-jvm"
-copy_module "core/network" "network-jvm"
-copy_module "lib/libsignal-service" "libsignal-service"
+sync_sources "core/util-jvm" "util-jvm"
+sync_sources "core/models-jvm" "models-jvm"
+sync_sources "core/network" "network-jvm"
+sync_sources "lib/libsignal-service" "libsignal-service"
 
 mkdir -p "$VENDOR/wire-handler"
 cp "$TMP/wire-handler/wire-handler-1.0.0.jar" "$VENDOR/wire-handler/"
@@ -48,13 +65,8 @@ elif [[ -f "$TMP/app/src/main/res/raw/whisper" ]]; then
   cp "$TMP/app/src/main/res/raw/whisper" "$ROOT/protocol/signal/src/main/res/raw/whisper"
 fi
 
-# Tor SOCKS5: prefer OkHttp SOCKS proxy over Signal TLS circumvention proxy.
-for PATCH in push-socket-socks signal-url-socks websocket-socks; do
-  PATCH_FILE="$ROOT/vendor/signal/patches/${PATCH}.patch"
-  if [[ -f "$PATCH_FILE" ]]; then
-    (cd "$VENDOR/libsignal-service" && patch -p1 -N < "$PATCH_FILE" || true)
-  fi
-done
+# Tor SOCKS5 + restored CS APIs used by SecureMessenger.
+python3 "$VENDOR/overlays/apply-overlays.py"
 
 echo "$REF" > "$VENDOR/VERSION"
-echo "Synced Signal vendor modules to $VENDOR (ref=$REF)"
+echo "Synced Signal vendor sources to $VENDOR (ref=$REF)"
