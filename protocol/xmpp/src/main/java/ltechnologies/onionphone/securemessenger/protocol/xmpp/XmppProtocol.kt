@@ -317,6 +317,7 @@ class XmppProtocol @Inject constructor(
         remoteId: String,
         initialMessage: SanitizedText?,
         accountId: String?,
+        asGroup: Boolean,
     ): SendResult =
         withContext(Dispatchers.IO) {
             val accId = accountId ?: sessions.keys.singleOrNull()
@@ -324,7 +325,7 @@ class XmppProtocol @Inject constructor(
             val smack = sessions[accId]
                 ?: return@withContext SendResult.Failure("Account not connected")
             networkGuard.assertNetworkAllowed()
-            if (SmackClientFacade.isLikelyMucJid(remoteId) || smack.isMucRoom(remoteId)) {
+            if (asGroup || SmackClientFacade.isLikelyMucJid(remoteId) || smack.isMucRoom(remoteId)) {
                 val nickname = smack.myBareJid()?.substringBefore('@') ?: "SecureMessenger"
                 runCatching {
                     smack.joinMuc(remoteId, nickname) { message ->
@@ -345,10 +346,10 @@ class XmppProtocol @Inject constructor(
                 ),
             )
             if (initialMessage != null) {
-                sendMessage(convId, initialMessage, accId)
-            } else {
-                SendResult.Success(convId)
+                val send = sendMessage(convId, initialMessage, accId)
+                if (send is SendResult.Failure) return@withContext send
             }
+            SendResult.Success(convId)
         }
 
     override suspend fun sendMessage(conversationId: String, body: SanitizedText, accountId: String?): SendResult =

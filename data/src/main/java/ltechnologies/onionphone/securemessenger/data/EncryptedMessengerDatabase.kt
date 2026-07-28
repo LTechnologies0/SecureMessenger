@@ -12,6 +12,7 @@ import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
 
 /**
  * Lazily opens the SQLCipher-backed Room database only after [AppLockManager] is unlocked.
+ * [close] drops the in-process handle on re-lock so DAO access cannot continue while locked.
  */
 @Singleton
 class EncryptedMessengerDatabase @Inject constructor(
@@ -26,6 +27,14 @@ class EncryptedMessengerDatabase @Inject constructor(
         appLockManager.assertUnlocked()
         return instance ?: synchronized(this) {
             instance ?: buildDatabase().also { instance = it }
+        }
+    }
+
+    /** Closes Room without requiring unlock — used when the app re-locks. */
+    fun close() {
+        synchronized(this) {
+            runCatching { instance?.close() }
+            instance = null
         }
     }
 

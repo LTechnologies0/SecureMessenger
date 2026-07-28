@@ -10,23 +10,25 @@ import ltechnologies.onionphone.securemessenger.core.security.AppLockManager
 import ltechnologies.onionphone.securemessenger.core.security.AuthenticatedCrypto
 
 /**
- * SQLCipher passphrase stored in auth-bound EncryptedSharedPreferences.
- * Readable only after the user unlocks with the device lock.
+ * SQLCipher passphrase in EncryptedSharedPreferences.
+ * Readable only after [AppLockManager] unlock (software gate + lazy prefs open).
  */
 @Singleton
 class DatabasePassphraseStore @Inject constructor(
-    @ApplicationContext context: Context,
+    @ApplicationContext private val context: Context,
     private val appLockManager: AppLockManager,
 ) {
-    private val masterKey = AuthenticatedCrypto.createAuthenticatedMasterKey(context)
-
-    private val prefs = EncryptedSharedPreferences.create(
-        context,
-        PREFS_NAME,
-        masterKey,
-        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
-    )
+    private val prefs by lazy {
+        appLockManager.assertUnlocked()
+        val masterKey = AuthenticatedCrypto.createAuthenticatedMasterKey(context)
+        EncryptedSharedPreferences.create(
+            context,
+            PREFS_NAME,
+            masterKey,
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
+        )
+    }
 
     fun getOrCreatePassphrase(): ByteArray {
         appLockManager.assertUnlocked()
@@ -42,7 +44,7 @@ class DatabasePassphraseStore @Inject constructor(
     }
 
     companion object {
-        private const val PREFS_NAME = "secure_messenger_db_key"
+        private const val PREFS_NAME = "secure_messenger_db_key_v2"
         private const val KEY_PASSPHRASE = "sqlcipher_passphrase"
     }
 }

@@ -416,6 +416,7 @@ class MatrixProtocol @Inject constructor(
         remoteId: String,
         initialMessage: SanitizedText?,
         accountId: String?,
+        asGroup: Boolean,
     ): SendResult {
         val accId = accountId ?: sessions.keys.singleOrNull() ?: return SendResult.Failure("Not connected")
         val convId = conversationIdFor(accId, remoteId)
@@ -433,7 +434,14 @@ class MatrixProtocol @Inject constructor(
                 title = title,
             ),
         )
-        return if (initialMessage != null) sendMessage(convId, initialMessage, accId) else SendResult.Success(convId)
+        return if (initialMessage != null) {
+            when (val send = sendMessage(convId, initialMessage, accId)) {
+                is SendResult.Failure -> send
+                else -> SendResult.Success(convId)
+            }
+        } else {
+            SendResult.Success(convId)
+        }
     }
 
     override suspend fun sendMessage(conversationId: String, body: SanitizedText, accountId: String?): SendResult =

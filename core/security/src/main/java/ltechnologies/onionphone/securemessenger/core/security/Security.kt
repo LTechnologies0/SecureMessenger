@@ -17,18 +17,24 @@ import ltechnologies.onionphone.securemessenger.core.model.SanitizedText
  */
 @Singleton
 class EncryptedCredentialStore @Inject constructor(
-    @ApplicationContext context: Context,
+    @ApplicationContext private val context: Context,
     private val appLockManager: AppLockManager,
 ) {
-    private val masterKey = AuthenticatedCrypto.createAuthenticatedMasterKey(context)
-
-    private val prefs = EncryptedSharedPreferences.create(
-        context,
-        PREFS_NAME,
-        masterKey,
-        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
-    )
+    /**
+     * Lazy open after [AppLockManager.assertUnlocked] — never touch prefs during Hilt
+     * construction of the foreground service / ConnectionManager.
+     */
+    private val prefs by lazy {
+        appLockManager.assertUnlocked()
+        val masterKey = AuthenticatedCrypto.createAuthenticatedMasterKey(context)
+        EncryptedSharedPreferences.create(
+            context,
+            PREFS_NAME,
+            masterKey,
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
+        )
+    }
 
     /** Stores an arbitrary secret [value] under [key], namespaced to [accountId]. */
     fun put(accountId: String, key: String, value: String) {
@@ -104,7 +110,7 @@ class EncryptedCredentialStore @Inject constructor(
     private fun prefKey(accountId: String, key: String) = "$accountId:$key"
 
     companion object {
-        private const val PREFS_NAME = "secure_messenger_credentials_auth"
+        private const val PREFS_NAME = "secure_messenger_credentials_v2"
         const val META_PROTOCOL = "__protocol"
         const val META_DISPLAY_NAME = "__displayName"
         private const val PROXY_PASSWORD_KEY = "__proxy:password"

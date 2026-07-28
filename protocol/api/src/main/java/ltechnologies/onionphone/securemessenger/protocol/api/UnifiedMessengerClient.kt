@@ -74,9 +74,10 @@ class UnifiedMessengerClient @Inject constructor(
         protocol: ProtocolId,
         remoteId: String,
         initialMessage: SanitizedText? = null,
+        asGroup: Boolean = false,
     ): SendResult {
         val impl = registry.get(protocol) ?: return SendResult.Failure("Protocol not registered")
-        return impl.startConversation(remoteId, initialMessage)
+        return impl.startConversation(remoteId, initialMessage, asGroup = asGroup)
     }
 
     suspend fun disconnect(protocol: ProtocolId) {

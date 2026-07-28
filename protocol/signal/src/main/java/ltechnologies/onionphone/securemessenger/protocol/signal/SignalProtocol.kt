@@ -319,7 +319,7 @@ class SignalProtocol @Inject constructor(
     private fun startSync(accId: String, proxy: ProxyConfig) {
         syncEngine?.stop()
         val activeSession = session ?: return
-        val helper = SignalGroupHelper(context, accId).also { groupHelper = it }
+        val helper = SignalGroupHelper(context, accId, credentialStore).also { groupHelper = it }
         syncEngine = SignalSyncEngine(
             context = context,
             accountId = accId,
@@ -348,6 +348,7 @@ class SignalProtocol @Inject constructor(
         remoteId: String,
         initialMessage: SanitizedText?,
         accountId: String?,
+        asGroup: Boolean,
     ): SendResult = withContext(signalDispatcher) {
         val accId = accountId ?: this@SignalProtocol.accountId ?: return@withContext SendResult.Failure("Compte non connecté")
         val proxy = proxyConfig ?: return@withContext SendResult.Failure("Proxy non configuré")
@@ -367,7 +368,10 @@ class SignalProtocol @Inject constructor(
                     ),
                 )
                 if (initialMessage != null) {
-                    deliverMessage(activeSession, convId, accId, recipient, initialMessage)
+                    when (val send = deliverMessage(activeSession, convId, accId, recipient, initialMessage)) {
+                        is SendResult.Failure -> send
+                        else -> SendResult.Success(convId)
+                    }
                 } else {
                     SendResult.Success(convId)
                 }
@@ -493,7 +497,7 @@ class SignalProtocol @Inject constructor(
         attachments: List<org.whispersystems.signalservice.api.messages.SignalServiceAttachment> = emptyList(),
         localAttachment: Attachment? = null,
     ): SendResult {
-        val helper = groupHelper ?: SignalGroupHelper(context, accId).also { groupHelper = it }
+        val helper = groupHelper ?: SignalGroupHelper(context, accId, credentialStore).also { groupHelper = it }
         val plan = helper.resolveSendTargets(activeSession, masterKeyBytes)
             ?: return SendResult.Failure("Membres du groupe Signal inconnus — attendez un message entrant")
         val timestamp = System.currentTimeMillis()

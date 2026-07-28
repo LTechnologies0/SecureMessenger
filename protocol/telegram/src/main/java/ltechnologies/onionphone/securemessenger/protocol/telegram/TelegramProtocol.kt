@@ -655,6 +655,7 @@ class TelegramProtocol @Inject constructor(
         remoteId: String,
         initialMessage: SanitizedText?,
         accountId: String?,
+        asGroup: Boolean,
     ): SendResult {
         val accId = accountId ?: sessions.keys.singleOrNull()
             ?: return SendResult.Failure("Not connected")
@@ -671,7 +672,14 @@ class TelegramProtocol @Inject constructor(
 
         val convId = TdLibMapper.conversationId(accId, chat.id)
         repository.upsertConversation(TdLibMapper.toConversation(accId, chat))
-        return if (initialMessage != null) sendMessage(convId, initialMessage, accId) else SendResult.Success(convId)
+        return if (initialMessage != null) {
+            when (val send = sendMessage(convId, initialMessage, accId)) {
+                is SendResult.Failure -> send
+                else -> SendResult.Success(convId)
+            }
+        } else {
+            SendResult.Success(convId)
+        }
     }
 
     override suspend fun sendMessage(conversationId: String, body: SanitizedText, accountId: String?): SendResult {

@@ -15,7 +15,7 @@ sealed class AppLockAuthResult {
 
 /**
  * Prompts the user with the system lock (PIN / schéma / biométrie).
- * Successful auth satisfies the Keystore user-auth requirement for [AuthenticatedCrypto.AUTH_VALIDITY_SECONDS].
+ * Successful system lock prompt gates [AppLockManager]; encrypted stores open only after unlock.
  */
 @Singleton
 class AppLockAuthenticator @Inject constructor() {

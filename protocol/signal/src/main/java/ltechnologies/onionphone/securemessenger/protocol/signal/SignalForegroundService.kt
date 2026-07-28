@@ -24,7 +24,8 @@ class SignalForegroundService : Service() {
         ensureChannel()
         val notification = buildNotification(accountId)
         startForeground(NOTIFICATION_ID, notification)
-        return START_STICKY
+        // Same as MessengerForegroundService: avoid restart while app lock / Keystore gate is closed.
+        return START_NOT_STICKY
     }
 
     private fun ensureChannel() {

@@ -1,6 +1,7 @@
 package ltechnologies.onionphone.securemessenger.protocol.signal
 
 import android.content.Context
+import android.util.Base64
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 import org.signal.core.models.ServiceId.ACI
@@ -14,44 +15,53 @@ import org.whispersystems.signalservice.api.messages.SignalServiceGroupV2
 import org.whispersystems.signalservice.api.push.DistributionId
 import org.whispersystems.signalservice.api.push.SignalServiceAddress
 import timber.log.Timber
+import ltechnologies.onionphone.securemessenger.core.security.EncryptedCredentialStore
 
 /**
- * GV2 helper: member cache, GroupsV2 refresh, DistributionId, and sender-key send plan
- * (GroupSendEndorsements + UnidentifiedAccess + SenderCertificate).
+ * GV2 helper: member cache, GroupsV2 refresh, DistributionId, and sender-key send plan.
+ * Cache lives in [EncryptedCredentialStore] (gated by app lock), not plaintext SharedPreferences.
  */
 internal class SignalGroupHelper(
     context: Context,
     private val accountId: String,
+    private val credentialStore: EncryptedCredentialStore,
 ) {
-    private val prefs = context.getSharedPreferences("signal_gv2_$accountId", Context.MODE_PRIVATE)
+    init {
+        // Wipe legacy plaintext GV2 cache from earlier builds.
+        runCatching {
+            context.getSharedPreferences("signal_gv2_$accountId", Context.MODE_PRIVATE)
+                .edit()
+                .clear()
+                .apply()
+        }
+    }
 
     fun rememberMember(masterKeyBytes: ByteArray, memberAci: String) {
-        val key = prefsKey(masterKeyBytes)
-        val existing = prefs.getStringSet(key, emptySet())?.toMutableSet() ?: mutableSetOf()
+        val key = membersKey(masterKeyBytes)
+        val existing = readMembers(masterKeyBytes).toMutableSet()
         if (existing.add(memberAci)) {
-            prefs.edit().putStringSet(key, existing).apply()
+            credentialStore.put(accountId, key, existing.joinToString(","))
         }
-        if (!prefs.contains(revPrefsKey(masterKeyBytes))) {
-            prefs.edit().putInt(revPrefsKey(masterKeyBytes), 0).apply()
+        if (credentialStore.get(accountId, revKey(masterKeyBytes)) == null) {
+            credentialStore.put(accountId, revKey(masterKeyBytes), "0")
         }
     }
 
     fun rememberRevision(masterKeyBytes: ByteArray, revision: Int) {
-        prefs.edit().putInt(revPrefsKey(masterKeyBytes), revision.coerceAtLeast(0)).apply()
+        credentialStore.put(accountId, revKey(masterKeyBytes), revision.coerceAtLeast(0).toString())
     }
 
-    fun cachedMembers(masterKeyBytes: ByteArray): Set<String> =
-        prefs.getStringSet(prefsKey(masterKeyBytes), emptySet()).orEmpty()
+    fun cachedMembers(masterKeyBytes: ByteArray): Set<String> = readMembers(masterKeyBytes)
 
     fun cachedRevision(masterKeyBytes: ByteArray): Int =
-        prefs.getInt(revPrefsKey(masterKeyBytes), 0)
+        credentialStore.get(accountId, revKey(masterKeyBytes))?.toIntOrNull() ?: 0
 
     fun cachedTitle(masterKeyBytes: ByteArray): String? =
-        prefs.getString(titlePrefsKey(masterKeyBytes), null)
+        credentialStore.get(accountId, titleKey(masterKeyBytes))
 
     fun distributionId(masterKeyBytes: ByteArray): DistributionId {
-        val key = distPrefsKey(masterKeyBytes)
-        val existing = prefs.getString(key, null)
+        val key = distKey(masterKeyBytes)
+        val existing = credentialStore.get(accountId, key)
         if (existing != null) {
             return runCatching { DistributionId.from(UUID.fromString(existing)) }
                 .getOrElse { DistributionId.create().also { persistDistributionId(masterKeyBytes, it) } }
@@ -60,7 +70,13 @@ internal class SignalGroupHelper(
     }
 
     private fun persistDistributionId(masterKeyBytes: ByteArray, id: DistributionId) {
-        prefs.edit().putString(distPrefsKey(masterKeyBytes), id.asUuid().toString()).apply()
+        credentialStore.put(accountId, distKey(masterKeyBytes), id.asUuid().toString())
+    }
+
+    private fun readMembers(masterKeyBytes: ByteArray): Set<String> {
+        val raw = credentialStore.get(accountId, membersKey(masterKeyBytes)).orEmpty()
+        if (raw.isBlank()) return emptySet()
+        return raw.split(',').map { it.trim() }.filter { it.isNotEmpty() }.toSet()
     }
 
     /**
@@ -135,12 +151,10 @@ internal class SignalGroupHelper(
             .map { it.toString() }
             .filter { it != session.aci.toString() }
             .toSet()
-        prefs.edit()
-            .putStringSet(prefsKey(masterKeyBytes), members)
-            .putInt(revPrefsKey(masterKeyBytes), response.group.revision)
-            .apply()
+        credentialStore.put(accountId, membersKey(masterKeyBytes), members.joinToString(","))
+        credentialStore.put(accountId, revKey(masterKeyBytes), response.group.revision.toString())
         if (response.group.title.isNotBlank()) {
-            prefs.edit().putString(titlePrefsKey(masterKeyBytes), response.group.title).apply()
+            credentialStore.put(accountId, titleKey(masterKeyBytes), response.group.title)
         }
         FetchedGroup(
             members = members,
@@ -175,7 +189,6 @@ internal class SignalGroupHelper(
                 sealedSenderCertificate = senderCertificate,
                 groupSecretParams = secretParams,
             )
-            // Access keys are synthetic; GSE tokens provide the sealed-sender auth path.
             val accessKey = ByteArray(16)
             val ua = recipients.map {
                 UnidentifiedAccess(accessKey, certBytes, /* isUnrestrictedForStory = */ true)
@@ -205,7 +218,7 @@ internal class SignalGroupHelper(
             if (!remoteId.startsWith("gv2:")) return null
             return try {
                 runCatching {
-                    android.util.Base64.decode(remoteId.removePrefix("gv2:"), android.util.Base64.NO_WRAP)
+                    Base64.decode(remoteId.removePrefix("gv2:"), Base64.NO_WRAP)
                 }.getOrElse {
                     java.util.Base64.getDecoder().decode(remoteId.removePrefix("gv2:"))
                 }
@@ -214,16 +227,12 @@ internal class SignalGroupHelper(
             }
         }
 
-        private fun prefsKey(masterKeyBytes: ByteArray): String =
-            "members_" + java.util.Base64.getEncoder().encodeToString(masterKeyBytes)
+        private fun mk(masterKeyBytes: ByteArray): String =
+            Base64.encodeToString(masterKeyBytes, Base64.NO_WRAP)
 
-        private fun revPrefsKey(masterKeyBytes: ByteArray): String =
-            "rev_" + java.util.Base64.getEncoder().encodeToString(masterKeyBytes)
-
-        private fun titlePrefsKey(masterKeyBytes: ByteArray): String =
-            "title_" + java.util.Base64.getEncoder().encodeToString(masterKeyBytes)
-
-        private fun distPrefsKey(masterKeyBytes: ByteArray): String =
-            "dist_" + java.util.Base64.getEncoder().encodeToString(masterKeyBytes)
+        private fun membersKey(masterKeyBytes: ByteArray): String = "gv2:members:${mk(masterKeyBytes)}"
+        private fun revKey(masterKeyBytes: ByteArray): String = "gv2:rev:${mk(masterKeyBytes)}"
+        private fun titleKey(masterKeyBytes: ByteArray): String = "gv2:title:${mk(masterKeyBytes)}"
+        private fun distKey(masterKeyBytes: ByteArray): String = "gv2:dist:${mk(masterKeyBytes)}"
     }
 }

@@ -7,11 +7,16 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.core.view.WindowCompat
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import ltechnologies.onionphone.securemessenger.core.security.AppLockManager
+import ltechnologies.onionphone.securemessenger.core.security.AppLockState
+import ltechnologies.onionphone.securemessenger.protocol.signal.SignalForegroundService
 import ltechnologies.onionphone.securemessenger.service.MessengerForegroundService
 import ltechnologies.onionphone.securemessenger.ui.applock.AppLockGate
 import ltechnologies.onionphone.securemessenger.ui.navigation.SecureMessengerNavHost
@@ -23,9 +28,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        startForegroundService(
-            Intent(this, MessengerForegroundService::class.java),
-        )
         enableEdgeToEdge()
         WindowCompat.setDecorFitsSystemWindows(window, false)
         window.setFlags(
@@ -35,6 +37,21 @@ class MainActivity : AppCompatActivity() {
         setContent {
             SecureMessengerTheme {
                 val snackbarHostState = remember { SnackbarHostState() }
+                val lockState by appLockManager.state.collectAsStateWithLifecycle()
+                // FGS only while unlocked — stop on lock so process work cannot outlive the gate.
+                LaunchedEffect(lockState) {
+                    when (lockState) {
+                        AppLockState.UNLOCKED -> {
+                            startForegroundService(
+                                Intent(this@MainActivity, MessengerForegroundService::class.java),
+                            )
+                        }
+                        AppLockState.LOCKED, AppLockState.DEVICE_INSECURE -> {
+                            stopService(Intent(this@MainActivity, MessengerForegroundService::class.java))
+                            SignalForegroundService.stop(this@MainActivity)
+                        }
+                    }
+                }
                 AppLockGate(snackbarHostState = snackbarHostState) {
                     SecureMessengerNavHost(snackbarHostState = snackbarHostState)
                 }

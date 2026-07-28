@@ -20,6 +20,7 @@ import ltechnologies.onionphone.securemessenger.core.model.Conversation
 import ltechnologies.onionphone.securemessenger.core.model.FeatureFlags
 import ltechnologies.onionphone.securemessenger.core.model.HistoryLoadResult
 import ltechnologies.onionphone.securemessenger.core.model.Message
+import ltechnologies.onionphone.securemessenger.core.model.ProtocolCapabilities
 import ltechnologies.onionphone.securemessenger.core.model.ProtocolId
 import ltechnologies.onionphone.securemessenger.core.model.ProxyConfig
 import ltechnologies.onionphone.securemessenger.core.model.RegistrationRequest
@@ -282,11 +283,19 @@ class MainViewModel @Inject constructor(
         }
     }
 
+    fun capabilitiesFor(protocol: ProtocolId): ProtocolCapabilities =
+        connectionManager.protocolFor(protocol)?.capabilities
+            ?: ProtocolCapabilities()
+
+    fun canRegister(protocol: ProtocolId): Boolean =
+        connectionManager.protocolFor(protocol)?.canRegister == true
+
     fun startConversation(
         protocol: ProtocolId,
         remoteId: String,
         message: String?,
         accountId: String? = null,
+        asGroup: Boolean = false,
         onResult: (String?) -> Unit,
     ) {
         viewModelScope.launch {
@@ -301,9 +310,13 @@ class MainViewModel @Inject constructor(
                 return@launch
             }
             val sanitized = message?.let { MessageSanitizer.sanitize(it) }
-            val result = impl.startConversation(remoteId, sanitized, resolvedAccountId)
-            val convId = "${resolvedAccountId}_$remoteId"
-            onResult(if (result is ltechnologies.onionphone.securemessenger.core.model.SendResult.Success) convId else null)
+            when (val result = impl.startConversation(remoteId, sanitized, resolvedAccountId, asGroup)) {
+                is ltechnologies.onionphone.securemessenger.core.model.SendResult.Success ->
+                    // Protocols return conversation id here (not message id).
+                    onResult(result.messageId)
+                is ltechnologies.onionphone.securemessenger.core.model.SendResult.Failure ->
+                    onResult(null)
+            }
         }
     }
 

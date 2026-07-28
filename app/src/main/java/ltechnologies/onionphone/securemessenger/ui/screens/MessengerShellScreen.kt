@@ -52,6 +52,8 @@ import ltechnologies.onionphone.securemessenger.ui.MainViewModel
 import ltechnologies.onionphone.securemessenger.ui.components.accountRailLabel
 import ltechnologies.onionphone.securemessenger.ui.components.connectionIndicatorColor
 import ltechnologies.onionphone.securemessenger.ui.components.protocolAccentColor
+import ltechnologies.onionphone.securemessenger.ui.components.protocolIcon
+import ltechnologies.onionphone.securemessenger.ui.components.protocolShortPrefix
 
 private fun rememberAccountProtocolIndices(accounts: List<Account>): Map<String, Int> {
     val counts = mutableMapOf<ProtocolId, Int>()
@@ -159,8 +161,12 @@ fun MessengerShellScreen(
             Scaffold { padding ->
                 SettingsScreen(
                     modifier = Modifier.padding(padding),
+                    viewModel = viewModel,
                     onOpenProxy = { overlay = ShellOverlay.PROXY },
                     onClose = { overlay = ShellOverlay.NONE },
+                    onDisconnectAccount = { accountId ->
+                        viewModel.disconnectAccount(accountId)
+                    },
                 )
             }
             return
@@ -303,7 +309,6 @@ private fun AccountRailAvatar(
     accent: Color,
     selected: Boolean,
 ) {
-    val initial = account.displayName.firstOrNull()?.uppercaseChar()?.toString() ?: "?"
     val borderWidth = if (selected) 3.dp else 1.5.dp
     val borderColor = if (selected) MaterialTheme.colorScheme.primary else accent
     Box(contentAlignment = Alignment.BottomEnd) {
@@ -315,11 +320,11 @@ private fun AccountRailAvatar(
                 .border(borderWidth, borderColor, RoundedCornerShape(14.dp)),
             contentAlignment = Alignment.Center,
         ) {
-            Text(
-                text = initial,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-                color = accent,
+            Icon(
+                imageVector = protocolIcon(account.protocol),
+                contentDescription = protocolShortPrefix(account.protocol),
+                tint = accent,
+                modifier = Modifier.size(24.dp),
             )
         }
         Box(
@@ -380,7 +385,13 @@ private fun MainContentPane(
                             fontWeight = FontWeight.SemiBold,
                         )
                         Text(
-                            text = selectedAccountLabel ?: selectedAccount.displayName,
+                            text = buildString {
+                                append(selectedAccountLabel ?: selectedAccount.displayName)
+                                append(" · ")
+                                append(selectedAccount.connectionState.name)
+                                val caps = viewModel.capabilitiesFor(selectedAccount.protocol)
+                                if (caps.endToEndEncryption) append(" · E2EE")
+                            },
                             style = MaterialTheme.typography.labelLarge,
                             color = protocolAccentColor(selectedAccount.protocol),
                         )

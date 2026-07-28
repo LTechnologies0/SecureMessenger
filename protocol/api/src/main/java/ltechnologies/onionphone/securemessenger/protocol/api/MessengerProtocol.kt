@@ -87,11 +87,15 @@ interface MessengerProtocol {
      * protocol has more than one account connected simultaneously (e.g. two XMPP or Matrix
      * accounts logged in at once). When null, implementations fall back to a single-account
      * default, which may be ambiguous if several accounts of the same protocol are connected.
+     *
+     * [asGroup] forces a group/MUC/room join path when the protocol supports [ProtocolCapabilities.groupChats]
+     * (e.g. XMPP MUC even if the JID does not look like `@conference`).
      */
     suspend fun startConversation(
         remoteId: String,
         initialMessage: SanitizedText? = null,
         accountId: String? = null,
+        asGroup: Boolean = false,
     ): SendResult = SendResult.Failure("Not supported")
 
     /**

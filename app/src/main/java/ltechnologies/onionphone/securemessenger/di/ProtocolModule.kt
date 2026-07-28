@@ -13,30 +13,33 @@ import ltechnologies.onionphone.securemessenger.protocol.signal.SignalProtocol
 import ltechnologies.onionphone.securemessenger.protocol.telegram.TelegramProtocol
 import ltechnologies.onionphone.securemessenger.protocol.xmpp.XmppProtocol
 
-@Singleton
-class ProtocolRegistryImpl(
-    private val byId: Map<ProtocolId, MessengerProtocol>,
-) : ProtocolRegistry {
-    override fun get(id: ProtocolId): MessengerProtocol? = byId[id]
-    override fun all(): List<MessengerProtocol> = byId.values.toList()
-}
-
 @Module
 @InstallIn(SingletonComponent::class)
 object ProtocolModule {
+    /**
+     * Protocols are [dagger.Lazy] so constructing [ConnectionManager] / FGS does not force
+     * every protocol graph (MessengerRepository → SQLCipher) until a protocol is first used.
+     */
     @Provides
     @Singleton
     fun provideProtocolRegistry(
-        xmpp: XmppProtocol,
-        matrix: MatrixProtocol,
-        telegram: TelegramProtocol,
-        signal: SignalProtocol,
-    ): ProtocolRegistry = ProtocolRegistryImpl(
-        mapOf(
-            ProtocolId.XMPP to xmpp,
-            ProtocolId.MATRIX to matrix,
-            ProtocolId.TELEGRAM to telegram,
-            ProtocolId.SIGNAL to signal,
-        ),
-    )
+        xmpp: dagger.Lazy<XmppProtocol>,
+        matrix: dagger.Lazy<MatrixProtocol>,
+        telegram: dagger.Lazy<TelegramProtocol>,
+        signal: dagger.Lazy<SignalProtocol>,
+    ): ProtocolRegistry = object : ProtocolRegistry {
+        override fun get(id: ProtocolId): MessengerProtocol? = when (id) {
+            ProtocolId.XMPP -> xmpp.get()
+            ProtocolId.MATRIX -> matrix.get()
+            ProtocolId.TELEGRAM -> telegram.get()
+            ProtocolId.SIGNAL -> signal.get()
+        }
+
+        override fun all(): List<MessengerProtocol> = listOf(
+            xmpp.get(),
+            matrix.get(),
+            telegram.get(),
+            signal.get(),
+        )
+    }
 }

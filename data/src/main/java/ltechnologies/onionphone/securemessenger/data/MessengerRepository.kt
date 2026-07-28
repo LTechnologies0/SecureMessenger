@@ -3,6 +3,8 @@ package ltechnologies.onionphone.securemessenger.data
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import ltechnologies.onionphone.securemessenger.core.model.Account
 import ltechnologies.onionphone.securemessenger.core.model.Conversation
@@ -17,67 +19,72 @@ import ltechnologies.onionphone.securemessenger.data.db.toEntity
 class MessengerRepository @Inject constructor(
     private val database: EncryptedMessengerDatabase,
 ) {
-    private val accountDao get() = database.get().accountDao()
-    private val conversationDao get() = database.get().conversationDao()
-    private val messageDao get() = database.get().messageDao()
-    private val proxySettingsDao get() = database.get().proxySettingsDao()
+    /** Opens SQLCipher only when the Flow is collected (after app unlock). */
+    fun observeAccounts(): Flow<List<Account>> = flow {
+        emitAll(database.get().accountDao().observeAll().map { list -> list.map { it.toDomain() } })
+    }
 
-    fun observeAccounts(): Flow<List<Account>> =
-        accountDao.observeAll().map { list -> list.map { it.toDomain() } }
-
-    fun observeConversations(): Flow<List<Conversation>> =
-        conversationDao.observeAll().map { list -> list.map { it.toDomain() } }
+    fun observeConversations(): Flow<List<Conversation>> = flow {
+        emitAll(database.get().conversationDao().observeAll().map { list -> list.map { it.toDomain() } })
+    }
 
     suspend fun listConversationsForAccount(accountId: String): List<Conversation> =
-        conversationDao.listForAccount(accountId).map { it.toDomain() }
+        database.get().conversationDao().listForAccount(accountId).map { it.toDomain() }
 
-    fun observeMessages(conversationId: String): Flow<List<Message>> =
-        messageDao.observeForConversation(conversationId).map { list -> list.map { it.toDomain() } }
+    fun observeMessages(conversationId: String): Flow<List<Message>> = flow {
+        emitAll(
+            database.get().messageDao().observeForConversation(conversationId)
+                .map { list -> list.map { it.toDomain() } },
+        )
+    }
 
-    fun observeProxySettings(): Flow<ProxyConfig?> =
-        proxySettingsDao.observe().map { entity ->
-            entity?.let {
-                ProxyConfig(
-                    host = it.host,
-                    port = it.port,
-                    username = it.username,
-                    torRequired = true,
-                    remoteDns = it.remoteDns,
-                    torProvider = runCatching { TorProvider.valueOf(it.torProvider) }
-                        .getOrDefault(TorProvider.CUSTOM),
-                )
-            }
-        }
+    fun observeProxySettings(): Flow<ProxyConfig?> = flow {
+        emitAll(
+            database.get().proxySettingsDao().observe().map { entity ->
+                entity?.let {
+                    ProxyConfig(
+                        host = it.host,
+                        port = it.port,
+                        username = it.username,
+                        torRequired = true,
+                        remoteDns = it.remoteDns,
+                        torProvider = runCatching { TorProvider.valueOf(it.torProvider) }
+                            .getOrDefault(TorProvider.CUSTOM),
+                    )
+                }
+            },
+        )
+    }
 
     suspend fun upsertAccount(account: Account) {
-        accountDao.upsert(account.toEntity())
+        database.get().accountDao().upsert(account.toEntity())
     }
 
     suspend fun upsertConversation(conversation: Conversation) {
-        conversationDao.upsert(conversation.toEntity())
+        database.get().conversationDao().upsert(conversation.toEntity())
     }
 
     suspend fun upsertConversations(conversations: List<Conversation>) {
-        conversationDao.upsertAll(conversations.map { it.toEntity() })
+        database.get().conversationDao().upsertAll(conversations.map { it.toEntity() })
     }
 
     suspend fun upsertMessage(message: Message) {
-        messageDao.upsert(message.toEntity())
+        database.get().messageDao().upsert(message.toEntity())
     }
 
     suspend fun upsertMessages(messages: List<Message>) {
         if (messages.isEmpty()) return
-        messageDao.upsertAll(messages.map { it.toEntity() })
+        database.get().messageDao().upsertAll(messages.map { it.toEntity() })
     }
 
     suspend fun deleteMessages(ids: List<String>) {
         if (ids.isEmpty()) return
-        messageDao.deleteByIds(ids)
+        database.get().messageDao().deleteByIds(ids)
     }
 
     suspend fun saveProxySettings(config: ProxyConfig) {
         val torOnly = config.copy(torRequired = true)
-        proxySettingsDao.upsert(
+        database.get().proxySettingsDao().upsert(
             ProxySettingsEntity(
                 host = torOnly.host,
                 port = torOnly.port,
@@ -90,6 +97,6 @@ class MessengerRepository @Inject constructor(
     }
 
     suspend fun deleteAccount(id: String) {
-        accountDao.delete(id)
+        database.get().accountDao().delete(id)
     }
 }

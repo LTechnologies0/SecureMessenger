@@ -28,6 +28,7 @@ import ltechnologies.onionphone.securemessenger.core.proxy.SocksEndpointResolver
 import ltechnologies.onionphone.securemessenger.core.security.AppLockManager
 import ltechnologies.onionphone.securemessenger.core.security.AppLockState
 import ltechnologies.onionphone.securemessenger.core.security.EncryptedCredentialStore
+import ltechnologies.onionphone.securemessenger.data.EncryptedMessengerDatabase
 import ltechnologies.onionphone.securemessenger.data.MessengerRepository
 import ltechnologies.onionphone.securemessenger.protocol.api.ProtocolNotEnabledException
 import ltechnologies.onionphone.securemessenger.protocol.api.ProtocolRegistry
@@ -40,6 +41,7 @@ class ConnectionManager @Inject constructor(
     private val protocolRegistry: ProtocolRegistry,
     private val proxyManager: ProxyManager,
     private val repository: Lazy<MessengerRepository>,
+    private val encryptedDb: EncryptedMessengerDatabase,
     private val credentialStore: EncryptedCredentialStore,
     private val appLockManager: AppLockManager,
 ) {
@@ -55,30 +57,44 @@ class ConnectionManager @Inject constructor(
         bootstrapScope.launch {
             appLockManager.state.collect { state ->
                 when (state) {
-                    AppLockState.LOCKED -> runCatching { disconnectAll() }
+                    AppLockState.LOCKED, AppLockState.DEVICE_INSECURE -> {
+                        runCatching { disconnectAll() }
+                        // Drop SQLCipher handle so DAO flows cannot keep reading after lock.
+                        runCatching { encryptedDb.close() }
+                    }
                     AppLockState.UNLOCKED -> {
                         runCatching { ensureProxyBootstrapped() }
                             .onFailure { Timber.w(it, "Proxy bootstrap failed") }
                         restorePersistedAccounts()
                     }
-                    AppLockState.DEVICE_INSECURE -> Unit
                 }
             }
         }
     }
 
     private suspend fun ensureProxyBootstrapped() {
-        if (proxyBootstrapped) return
-        val saved = repository.get().observeProxySettings().first()
-        val password = credentialStore.getProxyPassword()
-        if (saved != null) {
-            val merged = ProxyConfigNormalizer.normalize(
-                saved.copy(password = password),
-            )
-            proxyManager.updateConfig(merged)
+        if (proxyBootstrapped) {
+            completeBootstrap()
+            return
         }
-        proxyManager.refreshStatusAndWait()
-        proxyBootstrapped = true
+        try {
+            val saved = repository.get().observeProxySettings().first()
+            val password = credentialStore.getProxyPassword()
+            if (saved != null) {
+                val merged = ProxyConfigNormalizer.normalize(
+                    saved.copy(password = password),
+                )
+                proxyManager.updateConfig(merged)
+            }
+            proxyManager.refreshStatusAndWait()
+            proxyBootstrapped = true
+        } finally {
+            // Always unblock connect()/register() even if Tor/DB bootstrap fails.
+            completeBootstrap()
+        }
+    }
+
+    private fun completeBootstrap() {
         if (!bootstrapReady.isCompleted) {
             bootstrapReady.complete(Unit)
         }
@@ -88,6 +104,10 @@ class ConnectionManager @Inject constructor(
     val killswitchActive: StateFlow<Boolean> = _killswitchActive.asStateFlow()
 
     private suspend fun awaitBootstrap() {
+        appLockManager.awaitUnlocked()
+        if (!bootstrapReady.isCompleted) {
+            ensureProxyBootstrapped()
+        }
         bootstrapReady.await()
     }
 

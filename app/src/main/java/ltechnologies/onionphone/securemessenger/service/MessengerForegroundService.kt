@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import ltechnologies.onionphone.securemessenger.R
 import ltechnologies.onionphone.securemessenger.core.proxy.ProxyManager
+import ltechnologies.onionphone.securemessenger.core.security.AppLockManager
 import ltechnologies.onionphone.securemessenger.ui.MainActivity
 
 @AndroidEntryPoint
@@ -22,15 +23,21 @@ class MessengerForegroundService : LifecycleService() {
 
     @Inject lateinit var connectionManager: ConnectionManager
     @Inject lateinit var proxyManager: ProxyManager
+    @Inject lateinit var appLockManager: AppLockManager
 
     override fun onCreate() {
         super.onCreate()
+        if (!appLockManager.isUnlocked) {
+            stopSelf()
+            return
+        }
         startForegroundWithNotification()
         lifecycleScope.launch {
             proxyManager.status
                 .map { status -> status.proxyHealthy to status.config }
                 .distinctUntilChanged()
                 .collect { (healthy, config) ->
+                    if (!appLockManager.isUnlocked) return@collect
                     connectionManager.onProxyStateChanged(healthy, config)
                 }
         }
@@ -39,7 +46,8 @@ class MessengerForegroundService : LifecycleService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
         startForegroundWithNotification()
-        return START_STICKY
+        // Do not restart while the process is dead / app locked — Keystore & DB need unlock.
+        return START_NOT_STICKY
     }
 
     private fun startForegroundWithNotification() {
