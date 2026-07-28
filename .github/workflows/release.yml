@@ -62,6 +62,8 @@ jobs:
           ./scripts/fetch-tdlib-prebuilt.sh
 
       - name: Sync Signal vendor (libsignal-service)
+        env:
+          SIGNAL_ANDROID_REF: v7.49.0
         run: |
           chmod +x scripts/sync-signal-vendor.sh
           ./scripts/sync-signal-vendor.sh

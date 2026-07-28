@@ -6,7 +6,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VENDOR="$ROOT/vendor/signal"
-REF="${SIGNAL_ANDROID_REF:-main}"
+REF="${SIGNAL_ANDROID_REF:-v7.49.0}"
 TMP="${TMPDIR:-/tmp}/signal-android-sync-$$"
 
 cleanup() { rm -rf "$TMP"; }
