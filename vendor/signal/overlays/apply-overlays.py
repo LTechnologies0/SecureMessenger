@@ -50,10 +50,14 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
 def patch_push_socket() -> None:
     path = VENDOR / "libsignal-service/src/main/java/org/whispersystems/signalservice/internal/push/PushServiceSocket.java"
     text = path.read_text()
+    # Upstream moved TlsProxySocketFactory into org.signal.network.util (was signalservice.api.util).
+    tls_import = "import org.signal.network.util.TlsProxySocketFactory;"
+    if "import org.whispersystems.signalservice.api.util.TlsProxySocketFactory;" in text:
+        tls_import = "import org.whispersystems.signalservice.api.util.TlsProxySocketFactory;"
     text = ensure_import(
         text,
         "import org.signal.core.util.SignalSocksHolder;",
-        "import org.whispersystems.signalservice.api.util.TlsProxySocketFactory;",
+        tls_import,
     )
     text = replace_once(
         text,
@@ -118,10 +122,13 @@ def patch_push_socket() -> None:
 def patch_websocket() -> None:
     path = VENDOR / "libsignal-service/src/main/java/org/whispersystems/signalservice/internal/websocket/OkHttpWebSocketConnection.java"
     text = path.read_text()
+    tls_import = "import org.signal.network.util.TlsProxySocketFactory;"
+    if "import org.whispersystems.signalservice.api.util.TlsProxySocketFactory;" in text:
+        tls_import = "import org.whispersystems.signalservice.api.util.TlsProxySocketFactory;"
     text = ensure_import(
         text,
         "import org.signal.core.util.SignalSocksHolder;",
-        "import org.whispersystems.signalservice.api.util.TlsProxySocketFactory;",
+        tls_import,
     )
     text = replace_once(
         text,
@@ -143,10 +150,13 @@ def patch_websocket() -> None:
 def patch_url_extensions() -> None:
     path = VENDOR / "libsignal-service/src/main/java/org/whispersystems/signalservice/api/SignalUrlExtensions.kt"
     text = path.read_text()
+    tls_import = "import org.signal.network.util.TlsProxySocketFactory"
+    if "import org.whispersystems.signalservice.api.util.TlsProxySocketFactory" in text:
+        tls_import = "import org.whispersystems.signalservice.api.util.TlsProxySocketFactory"
     text = ensure_import(
         text,
         "import org.signal.core.util.SignalSocksHolder",
-        "import org.whispersystems.signalservice.api.util.TlsProxySocketFactory",
+        tls_import,
     )
     text = replace_once(
         text,
