@@ -64,7 +64,13 @@ jobs:
           ./scripts/sync-signal-vendor.sh
 
       - name: Unit tests
-        run: ./gradlew test --stacktrace --no-daemon
+        # Vendor Signal modules have no testImplementation deps; only our modules are asserted.
+        run: >
+          ./gradlew test --stacktrace --no-daemon
+          -x :vendor:signal:models-jvm:test
+          -x :vendor:signal:util-jvm:test
+          -x :vendor:signal:network-jvm:test
+          -x :vendor:signal:libsignal-service:test
 
       - name: Assemble debug APK (arm64-v8a)
         run: ./gradlew :app:assembleDebug -Psecuremessenger.devAbi=arm64-v8a --stacktrace --no-daemon
@@ -131,6 +137,11 @@ jobs:
         run: |
           chmod +x scripts/fetch-tdlib-prebuilt.sh
           ./scripts/fetch-tdlib-prebuilt.sh
+
+      - name: Sync Signal vendor (libsignal-service)
+        run: |
+          chmod +x scripts/sync-signal-vendor.sh
+          ./scripts/sync-signal-vendor.sh
 
       - name: Generate KDoc (Dokka HTML)
         run: ./gradlew dokkaGenerate --stacktrace --no-daemon

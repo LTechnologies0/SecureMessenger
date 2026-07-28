@@ -32,10 +32,12 @@ sync_sources() {
   mkdir -p "$dest"
   # Remove previous synced trees only (keep build.gradle.kts, .gitignore, lint.xml, etc.).
   rm -rf "$dest/src" "$dest/consumer-rules.pro" "$dest/proguard-rules.pro"
-  if [[ -d "$TMP/$src_path/src" ]]; then
-    cp -a "$TMP/$src_path/src" "$dest/"
+  # Main sources only — upstream unit tests pull assertk/turbine we do not vendor.
+  if [[ -d "$TMP/$src_path/src/main" ]]; then
+    mkdir -p "$dest/src"
+    cp -a "$TMP/$src_path/src/main" "$dest/src/"
   else
-    echo "ERROR: missing $TMP/$src_path/src" >&2
+    echo "ERROR: missing $TMP/$src_path/src/main" >&2
     exit 1
   fi
   # Optional non-Gradle assets from upstream module root.
