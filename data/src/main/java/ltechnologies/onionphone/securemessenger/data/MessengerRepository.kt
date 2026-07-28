@@ -46,7 +46,7 @@ class MessengerRepository @Inject constructor(
                         host = it.host,
                         port = it.port,
                         username = it.username,
-                        torRequired = true,
+                        torRequired = it.torRequired,
                         remoteDns = it.remoteDns,
                         torProvider = runCatching { TorProvider.valueOf(it.torProvider) }
                             .getOrDefault(TorProvider.CUSTOM),
@@ -83,15 +83,14 @@ class MessengerRepository @Inject constructor(
     }
 
     suspend fun saveProxySettings(config: ProxyConfig) {
-        val torOnly = config.copy(torRequired = true)
         database.get().proxySettingsDao().upsert(
             ProxySettingsEntity(
-                host = torOnly.host,
-                port = torOnly.port,
-                torRequired = true,
-                remoteDns = torOnly.remoteDns,
-                username = torOnly.username,
-                torProvider = torOnly.torProvider.name,
+                host = config.host,
+                port = config.port,
+                torRequired = config.torRequired,
+                remoteDns = config.remoteDns,
+                username = config.username,
+                torProvider = config.torProvider.name,
             ),
         )
     }

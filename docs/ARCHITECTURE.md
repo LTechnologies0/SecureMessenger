@@ -64,7 +64,7 @@ Signal GV2 prefers sender keys; if endorsements/certificates are unavailable it 
 | `:app` | Compose UI (accounts, conversations, chat), navigation, `MainViewModel`, `ConnectionManager` orchestration |
 | `:core:model` | Shared data classes: `AccountCredentials`, `ProxyConfig`, `RegistrationRequest`/`RegistrationResult`, protocol enums |
 | `:core:proxy` | SOCKS5 endpoint resolution and reachability probing shared by every protocol adapter |
-| `:core:network` | Tor-only enforcement (`NetworkGuard`), killswitch, WebView SOCKS routing (`androidx.webkit.ProxyController`) |
+| `:core:network` | Optional Tor gate (`NetworkGuard`), clearnet HTTP clients by default, WebView SOCKS when Tor enabled |
 | `:core:security` | `EncryptedCredentialStore` and other Keystore-backed secret storage |
 | `:data` | Persistence for accounts, conversations, and message caches |
 | `:protocol:api` | `MessengerProtocol` interface every adapter implements — connect, disconnect, send, register |
@@ -80,7 +80,7 @@ Protocol adapter (Matrix / XMPP / Telegram / Signal)
         ↓
 core/proxy — SocksEndpointResolver (resolve reachable Tor SOCKS host:port)
         ↓
-core/network — NetworkGuard killswitch (blocks all traffic if Tor is unavailable)
+core/network — NetworkGuard (blocks only when Tor is opted-in and SOCKS is down)
         ↓
 Tor SOCKS5 proxy → Tor network → destination server
 ```

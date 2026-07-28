@@ -100,34 +100,34 @@ internal class XmppRegistration(private val context: Context) {
     }
 
     private fun openProbeConnection(server: String, proxy: ProxyConfig): XMPPTCPConnection {
-        val socksHost = SocksEndpointResolver.resolveReachableHost(proxy.host, proxy.port)
-        try {
-            java.net.Socket().use { socket ->
-                socket.connect(java.net.InetSocketAddress(socksHost, proxy.port), 3_000)
-            }
-        } catch (e: Exception) {
-            throw IllegalStateException(
-                "Tor requis : SOCKS $socksHost:${proxy.port} injoignable — démarrez Orbot ou InviZible",
-                e,
-            )
-        }
-        // See SmackClientFacade.connect() — Smack's SOCKS5 client always offers both
-        // no-auth and username/password methods, and Tor's SocksPort commonly picks the
-        // latter for stream isolation. A non-null value must always be present or the
-        // handshake fails before ever sending the destination host.
-        val proxyInfo = ProxyInfo(
-            ProxyInfo.ProxyType.SOCKS5,
-            socksHost,
-            proxy.port,
-            proxy.username ?: server,
-            proxy.password ?: "x",
-        )
         val builder = XMPPTCPConnectionConfiguration.builder()
             .setXmppDomain(server)
             .setHost(server)
             .setPort(5222)
             .setSecurityMode(ConnectionConfiguration.SecurityMode.required)
-            .setProxyInfo(proxyInfo)
+        if (proxy.torRequired) {
+            val socksHost = SocksEndpointResolver.resolveReachableHost(proxy.host, proxy.port)
+            try {
+                java.net.Socket().use { socket ->
+                    socket.connect(java.net.InetSocketAddress(socksHost, proxy.port), 3_000)
+                }
+            } catch (e: Exception) {
+                throw IllegalStateException(
+                    "Tor activé : SOCKS $socksHost:${proxy.port} injoignable — démarrez Orbot/InviZible ou désactivez Tor",
+                    e,
+                )
+            }
+            // See SmackClientFacade.connect() — Smack SOCKS5 needs non-null auth for Tor stream isolation.
+            builder.setProxyInfo(
+                ProxyInfo(
+                    ProxyInfo.ProxyType.SOCKS5,
+                    socksHost,
+                    proxy.port,
+                    proxy.username ?: server,
+                    proxy.password ?: "x",
+                ),
+            )
+        }
         val conn = XMPPTCPConnection(builder.build())
         conn.connect()
         return conn

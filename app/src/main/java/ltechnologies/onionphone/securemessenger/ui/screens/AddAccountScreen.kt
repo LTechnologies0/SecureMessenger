@@ -59,7 +59,7 @@ fun AddAccountScreen(
         )
         ProtocolChoiceCard(
             title = protocolShortPrefix(ProtocolId.SIGNAL),
-            subtitle = "SMS via Tor — code sur service SMS en ligne",
+            subtitle = "Numéro E.164 + code SMS",
             accent = protocolAccentColor(ProtocolId.SIGNAL),
             onClick = onPickSignal,
         )

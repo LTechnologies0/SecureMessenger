@@ -110,7 +110,7 @@ fun SignalLoginScreen(
         delay(90_000)
         if (loading && step == SignalLoginStep.PHONE) {
             loading = false
-            statusMessage = "Tor requis : démarrez Orbot ou InviZible, puis réessayez."
+            statusMessage = "Délai dépassé. Vérifiez le numéro et la connexion, puis réessayez."
             accountId?.let { viewModel.cancelSignalLogin(it) }
             accountId = null
         }
@@ -138,12 +138,12 @@ fun SignalLoginScreen(
         )
 
         Text(
-            text = "Inscription via Tor",
+            text = "Inscription Signal",
             style = MaterialTheme.typography.headlineSmall,
         )
         Text(
-            text = "Les appels API passent par Tor. Le code SMS peut être reçu via un service " +
-                "SMS en ligne sur le numéro que vous indiquez — l'app n'intercepte pas le SMS localement.",
+            text = "Connexion directe aux serveurs Signal (sans Tor). Le code SMS peut être reçu " +
+                "via un service SMS en ligne — l'app n'intercepte pas le SMS localement.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -172,7 +172,7 @@ fun SignalLoginScreen(
                             accountId = newAccountId
                             when (result) {
                                 is ConnectionResult.Success -> {
-                                    statusMessage = "Connexion Signal via Tor…"
+                                    statusMessage = "Connexion Signal…"
                                 }
                                 is ConnectionResult.Failure -> {
                                     loading = false
@@ -211,7 +211,7 @@ fun SignalLoginScreen(
                     },
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text("Ouvrir le captcha (navigateur / Tor)")
+                    Text("Ouvrir le captcha")
                 }
                 OutlinedTextField(
                     value = captcha,

@@ -114,6 +114,7 @@ fun AccountsScreen(
                 instructions = step.prompt,
                 socksHost = socksHost,
                 socksPort = socksPort,
+                routeViaTor = viewModel.proxyStatus.value.config.torRequired,
                 onContinue = {},
                 onDismiss = {
                     matrixSsoStep = null
@@ -143,6 +144,7 @@ fun AccountsScreen(
             instructions = pending.instructions,
             socksHost = socksHost,
             socksPort = socksPort,
+            routeViaTor = viewModel.proxyStatus.value.config.torRequired,
             onContinue = {
                 val sessionId = pending.sessionId
                 webViewState = null

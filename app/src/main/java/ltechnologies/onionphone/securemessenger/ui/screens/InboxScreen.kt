@@ -13,19 +13,16 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Badge
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ListItem
-import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SearchBar
 import androidx.compose.material3.SearchBarDefaults
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -63,7 +60,6 @@ fun InboxScreen(
     } else {
         allConversations
     }
-    val killswitch by viewModel.killswitchActive.collectAsState()
     val timeFormat = remember { DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT) }
     var query by rememberSaveable { mutableStateOf("") }
     var searchExpanded by rememberSaveable { mutableStateOf(false) }
@@ -124,39 +120,6 @@ fun InboxScreen(
                             )
                         }
                     }
-                }
-            }
-
-            if (killswitch) {
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    color = MaterialTheme.colorScheme.errorContainer,
-                    shape = MaterialTheme.shapes.medium,
-                ) {
-                    ListItem(
-                        colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.errorContainer),
-                        leadingContent = {
-                            Icon(
-                                Icons.Default.Warning,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onErrorContainer,
-                            )
-                        },
-                        headlineContent = {
-                            Text(
-                                "Killswitch actif",
-                                color = MaterialTheme.colorScheme.onErrorContainer,
-                            )
-                        },
-                        supportingContent = {
-                            Text(
-                                "Tor requis mais proxy indisponible — connexions bloquées.",
-                                color = MaterialTheme.colorScheme.onErrorContainer,
-                            )
-                        },
-                    )
                 }
             }
 

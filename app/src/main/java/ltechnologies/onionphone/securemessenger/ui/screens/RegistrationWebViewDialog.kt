@@ -32,9 +32,9 @@ import androidx.webkit.ProxyConfig as WebViewProxyConfig
 import ltechnologies.onionphone.securemessenger.core.model.MatrixSsoRedirect
 
 /**
- * Full-screen WebView used for Matrix UIA / SSO stages. Traffic is force-routed through Tor via
- * [ProxyController]. When [onLoginToken] is set, SSO redirects to [MatrixSsoRedirect.URI]
- * are intercepted and the loginToken is returned automatically.
+ * Full-screen WebView used for Matrix UIA / SSO stages.
+ * When [routeViaTor] is true, traffic is routed through SOCKS via [ProxyController];
+ * otherwise the WebView uses clearnet (default).
  */
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
@@ -46,15 +46,20 @@ fun RegistrationWebViewDialog(
     onContinue: () -> Unit,
     onDismiss: () -> Unit,
     onLoginToken: ((String) -> Unit)? = null,
+    routeViaTor: Boolean = false,
 ) {
-    var proxyReady by remember { mutableStateOf(false) }
+    var proxyReady by remember { mutableStateOf(!routeViaTor) }
     var proxyError by remember { mutableStateOf<String?>(null) }
     val executor = remember { Executor { command -> command.run() } }
 
-    DisposableEffect(socksHost, socksPort) {
-        if (!WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
-            proxyError = "Ce téléphone ne supporte pas le proxy WebView — étape impossible sans risquer " +
-                "de contourner Tor."
+    DisposableEffect(routeViaTor, socksHost, socksPort) {
+        if (!routeViaTor) {
+            proxyReady = true
+            proxyError = null
+        } else if (!WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
+            proxyError = "Ce téléphone ne supporte pas le proxy WebView — activez Tor sur un appareil compatible, " +
+                "ou désactivez le routage Tor."
+            proxyReady = false
         } else {
             val proxyConfig = WebViewProxyConfig.Builder()
                 .addProxyRule("socks5://$socksHost:$socksPort")
@@ -64,7 +69,7 @@ fun RegistrationWebViewDialog(
             }
         }
         onDispose {
-            if (WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
+            if (routeViaTor && WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
                 runCatching { ProxyController.getInstance().clearProxyOverride(executor) {} }
             }
         }

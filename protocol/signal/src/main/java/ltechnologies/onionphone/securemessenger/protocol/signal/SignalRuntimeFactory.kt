@@ -164,12 +164,6 @@ internal object SignalRuntimeFactory {
         )
     }
 
-    fun applyTorProxy(network: Network, proxy: ltechnologies.onionphone.securemessenger.core.model.ProxyConfig) {
-        val host = ltechnologies.onionphone.securemessenger.core.proxy.SocksEndpointResolver
-            .resolveReachableHost(proxy.host, proxy.port)
-        network.setProxy(host, proxy.port)
-    }
-
     private fun websocketFactory(
         network: Network,
         credentials: StaticCredentialsProvider?,

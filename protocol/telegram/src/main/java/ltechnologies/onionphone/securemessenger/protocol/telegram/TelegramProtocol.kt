@@ -150,15 +150,21 @@ class TelegramProtocol @Inject constructor(
                     )
                 }
 
-                val proxyOk = withContext(newSession.dispatcher) {
-                    tdFacade.configureProxy(proxy.host, proxy.port, proxy.username, proxy.password)
-                }
-                if (!proxyOk) {
-                    newSession.close()
-                    _connectionState.value = ConnectionState.ERROR
-                    return@withContext null to ConnectionResult.Failure(
-                        "Tor requis : démarrez Orbot ou InviZible pour Telegram",
-                    )
+                if (proxy.torRequired) {
+                    val proxyOk = withContext(newSession.dispatcher) {
+                        tdFacade.configureProxy(proxy.host, proxy.port, proxy.username, proxy.password)
+                    }
+                    if (!proxyOk) {
+                        newSession.close()
+                        _connectionState.value = ConnectionState.ERROR
+                        return@withContext null to ConnectionResult.Failure(
+                            "Tor activé : démarrez Orbot/InviZible, ou désactivez Tor pour Telegram",
+                        )
+                    }
+                } else {
+                    withContext(newSession.dispatcher) {
+                        tdFacade.disableProxy()
+                    }
                 }
 
                 sessions[account.accountId] = newSession
@@ -362,8 +368,8 @@ class TelegramProtocol @Inject constructor(
                 _lastAuthError.value = null
                 val proxy = session.pendingProxy
                 updateScope.launch {
-                    val proxyOk = if (proxy != null) {
-                        withContext(session.dispatcher) {
+                    if (proxy != null && proxy.torRequired) {
+                        val proxyOk = withContext(session.dispatcher) {
                             session.facade.configureProxy(
                                 proxy.host,
                                 proxy.port,
@@ -371,14 +377,17 @@ class TelegramProtocol @Inject constructor(
                                 proxy.password,
                             )
                         }
+                        if (!proxyOk) {
+                            _lastAuthError.value =
+                                "Tor activé : démarrez Orbot/InviZible, ou désactivez Tor pour Telegram"
+                            _connectionState.value = ConnectionState.ERROR
+                            disconnect(accId)
+                            return@launch
+                        }
                     } else {
-                        true
-                    }
-                    if (!proxyOk) {
-                        _lastAuthError.value = "Tor requis : démarrez Orbot ou InviZible pour Telegram"
-                        _connectionState.value = ConnectionState.ERROR
-                        disconnect(accId)
-                        return@launch
+                        withContext(session.dispatcher) {
+                            session.facade.disableProxy()
+                        }
                     }
                     withContext(session.dispatcher) {
                         session.facade.setParameters(
@@ -509,7 +518,7 @@ class TelegramProtocol @Inject constructor(
                     else -> ConnectionResult.Success
                 }
             } catch (e: NetworkBlockedException) {
-                ConnectionResult.Failure(e.message ?: "Tor requis")
+                ConnectionResult.Failure(e.message ?: "Réseau indisponible")
             }
         }
     }
@@ -522,7 +531,7 @@ class TelegramProtocol @Inject constructor(
                 session.facade.resendCode()?.let { return@withContext ConnectionResult.Failure(it) }
                 ConnectionResult.Success
             } catch (e: NetworkBlockedException) {
-                ConnectionResult.Failure(e.message ?: "Tor requis")
+                ConnectionResult.Failure(e.message ?: "Réseau indisponible")
             }
         }
     }
@@ -626,7 +635,7 @@ class TelegramProtocol @Inject constructor(
                     syncedFromNetwork = remoteRaw > 0,
                 )
                 !syncRemote -> HistoryLoadResult.Failure(
-                    "Tor requis : démarrez Orbot ou InviZible pour charger l'historique",
+                    "Impossible de charger l'historique (réseau / Tor optionnel indisponible)",
                 )
                 remoteRaw == 0 -> HistoryLoadResult.Failure(
                     "Impossible de charger les messages — Tor ne répond pas ou la connexion Telegram a expiré",
@@ -696,7 +705,7 @@ class TelegramProtocol @Inject constructor(
                 session.facade.sendText(chatId, body.value)
                 SendResult.Success("pending")
             } catch (e: NetworkBlockedException) {
-                SendResult.Failure(e.message ?: "Tor requis")
+                SendResult.Failure(e.message ?: "Réseau indisponible")
             }
         }
     }
@@ -727,7 +736,7 @@ class TelegramProtocol @Inject constructor(
                 )
                 if (error != null) SendResult.Failure(error) else SendResult.Success("pending")
             } catch (e: NetworkBlockedException) {
-                SendResult.Failure(e.message ?: "Tor requis")
+                SendResult.Failure(e.message ?: "Réseau indisponible")
             }
         }
     }
@@ -767,11 +776,15 @@ class TelegramProtocol @Inject constructor(
         runCatching { session.close() }
     }
 
-    /** Re-applies Tor proxy to every live Telegram session (e.g. after proxy settings change). */
+    /** Re-applies optional Tor proxy (or disables it) on every live Telegram session. */
     suspend fun reapplyProxy(config: ProxyConfig) {
         sessions.values.forEach { session ->
             withContext(session.dispatcher) {
-                session.facade.configureProxy(config.host, config.port, config.username, config.password)
+                if (config.torRequired) {
+                    session.facade.configureProxy(config.host, config.port, config.username, config.password)
+                } else {
+                    session.facade.disableProxy()
+                }
             }
         }
     }
