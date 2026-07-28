@@ -8,6 +8,7 @@ import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.lifecycleScope
+import dagger.Lazy
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -18,11 +19,17 @@ import ltechnologies.onionphone.securemessenger.core.proxy.ProxyManager
 import ltechnologies.onionphone.securemessenger.core.security.AppLockManager
 import ltechnologies.onionphone.securemessenger.ui.MainActivity
 
+/**
+ * Keeps Tor/proxy-aware connections alive while the app is unlocked.
+ *
+ * Heavy deps ([ConnectionManager], [ProxyManager]) are [Lazy] so Hilt field injection
+ * during [onCreate] does not open Keystore / SQLCipher before [AppLockManager] unlock.
+ */
 @AndroidEntryPoint
 class MessengerForegroundService : LifecycleService() {
 
-    @Inject lateinit var connectionManager: ConnectionManager
-    @Inject lateinit var proxyManager: ProxyManager
+    @Inject lateinit var connectionManager: Lazy<ConnectionManager>
+    @Inject lateinit var proxyManager: Lazy<ProxyManager>
     @Inject lateinit var appLockManager: AppLockManager
 
     override fun onCreate() {
@@ -32,19 +39,24 @@ class MessengerForegroundService : LifecycleService() {
             return
         }
         startForegroundWithNotification()
+        val connections = connectionManager.get()
         lifecycleScope.launch {
-            proxyManager.status
+            proxyManager.get().status
                 .map { status -> status.proxyHealthy to status.config }
                 .distinctUntilChanged()
                 .collect { (healthy, config) ->
                     if (!appLockManager.isUnlocked) return@collect
-                    connectionManager.onProxyStateChanged(healthy, config)
+                    connections.onProxyStateChanged(healthy, config)
                 }
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
+        if (!appLockManager.isUnlocked) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
         startForegroundWithNotification()
         // Do not restart while the process is dead / app locked — Keystore & DB need unlock.
         return START_NOT_STICKY
