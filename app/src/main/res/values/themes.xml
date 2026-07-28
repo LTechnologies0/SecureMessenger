@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- AppCompatActivity requires a Theme.AppCompat* parent (not android:Theme.Material*). -->
+    <!-- Compose-only UI: ComponentActivity accepts platform Material themes.
+         Keep AppCompat parent so any future AppCompat widgets stay safe. -->
     <style name="Theme.SecureMessenger" parent="Theme.AppCompat.DayNight.NoActionBar" />
 </resources>
