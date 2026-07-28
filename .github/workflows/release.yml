@@ -63,7 +63,7 @@ jobs:
 
       - name: Sync Signal vendor (libsignal-service)
         env:
-          SIGNAL_ANDROID_REF: v7.49.0
+          SIGNAL_ANDROID_REF: v8.20.0
         run: |
           chmod +x scripts/sync-signal-vendor.sh
           ./scripts/sync-signal-vendor.sh

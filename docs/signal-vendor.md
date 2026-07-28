@@ -16,7 +16,7 @@ SecureMessenger integrates Signal via:
 Pin a release tag:
 
 ```bash
-SIGNAL_ANDROID_REF=v7.49.0 ./scripts/sync-signal-vendor.sh
+SIGNAL_ANDROID_REF=v8.20.0 ./scripts/sync-signal-vendor.sh
 ```
 
 Synced modules land under `vendor/signal/`:
