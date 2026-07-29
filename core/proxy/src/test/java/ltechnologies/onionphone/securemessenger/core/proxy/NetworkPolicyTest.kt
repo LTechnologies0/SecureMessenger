@@ -7,14 +7,15 @@ import org.junit.Test
 class NetworkPolicyTest {
 
     @Test
-    fun blocksWhenProxyUnhealthy() {
+    fun blocksOnlyWhenTorRequiredAndProxyUnhealthy() {
         assertFalse(evaluateNetworkAllowed(torRequired = true, proxyHealthy = false))
-        assertFalse(evaluateNetworkAllowed(torRequired = false, proxyHealthy = false))
+        assertTrue(evaluateNetworkAllowed(torRequired = false, proxyHealthy = false))
     }
 
     @Test
-    fun allowsWhenProxyHealthy() {
+    fun allowsWhenProxyHealthyOrTorOptional() {
         assertTrue(evaluateNetworkAllowed(torRequired = true, proxyHealthy = true))
         assertTrue(evaluateNetworkAllowed(torRequired = false, proxyHealthy = true))
+        assertTrue(evaluateNetworkAllowed(torRequired = false, proxyHealthy = false))
     }
 }

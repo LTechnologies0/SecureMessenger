@@ -45,7 +45,7 @@ class ProxyManager @Inject constructor(
                 ProxyConfig(
                     host = OrbotConstants.SOCKS_HOST,
                     port = OrbotConstants.SOCKS_PORT,
-                    torRequired = true,
+                    torRequired = false,
                     torProvider = TorProvider.CUSTOM,
                 ),
             ),

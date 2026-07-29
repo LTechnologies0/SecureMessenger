@@ -24,7 +24,7 @@ In scope:
 
 - SecureMessenger application code in this repository
 - Gradle build scripts and GitHub Actions workflows
-- The Tor-only network enforcement layer (`core/network` `NetworkGuard`, killswitch)
+- The optional Tor routing layer (`core/network` `NetworkGuard`, `core/proxy`)
 - Proxy/SOCKS routing (`core/proxy`) for every protocol, including WebView fallback flows
 - Credential storage (`EncryptedCredentialStore`) and account registration flows
 - Protocol adapters (`protocol/*`) as they relate to this app's use of upstream SDKs
@@ -40,7 +40,7 @@ Out of scope:
 
 ## Security Design
 
-- **Tor-only by default**: all protocol traffic (Matrix, XMPP, Telegram, Signal, and any in-app WebView) is routed through a SOCKS5 proxy to Tor. A killswitch blocks all connections if the proxy is unavailable — see `core/network`.
+- **Optional Tor routing**: clearnet by default. Matrix / XMPP / Telegram may opt into SOCKS5 → Tor. Signal always uses clearnet (many Tor exits are blocked by Signal). There is no global killswitch.
 - **No direct DNS**: hostname resolution for the Matrix `.well-known` discovery and XMPP SRV lookups happens through the proxy, not the device's default resolver.
 - **Encrypted credential storage**: account secrets (passwords, tokens, session data) are stored via `EncryptedCredentialStore` (AndroidX Security Crypto / Keystore-backed).
 - **No hardcoded secrets**: signing keys, SDK/NDK paths, and Telegram API credentials are never committed (`keystore.properties`, `local.properties` are gitignored; see `local.properties.example`).

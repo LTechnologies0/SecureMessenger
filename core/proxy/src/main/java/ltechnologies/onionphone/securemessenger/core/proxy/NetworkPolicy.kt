@@ -1,7 +1,11 @@
 package ltechnologies.onionphone.securemessenger.core.proxy
 
 /**
- * Fail-closed: outbound traffic is allowed only when the Tor/SOCKS proxy is healthy.
+ * Network gate used by [ltechnologies.onionphone.securemessenger.core.proxy.ProxyManager].
+ *
+ * Tor routing is optional. When [torRequired] is false, clearnet is always allowed.
+ * When true, traffic that opts into Tor still needs a healthy SOCKS endpoint — but there
+ * is no global killswitch that tears down other protocols.
  */
 fun evaluateNetworkAllowed(torRequired: Boolean, proxyHealthy: Boolean): Boolean =
-    proxyHealthy
+    !torRequired || proxyHealthy

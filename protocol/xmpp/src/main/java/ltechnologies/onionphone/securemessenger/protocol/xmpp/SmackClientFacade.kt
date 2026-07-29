@@ -105,33 +105,35 @@ class SmackClientFacade(
             .setCompressionEnabled(true)
             .setSendPresence(true)
 
-        val socksHost = SocksEndpointResolver.resolveReachableHost(proxy.host, proxy.port)
-        try {
-            java.net.Socket().use { socket ->
-                socket.connect(java.net.InetSocketAddress(socksHost, proxy.port), 3_000)
+        if (proxy.torRequired) {
+            val socksHost = SocksEndpointResolver.resolveReachableHost(proxy.host, proxy.port)
+            try {
+                java.net.Socket().use { socket ->
+                    socket.connect(java.net.InetSocketAddress(socksHost, proxy.port), 3_000)
+                }
+            } catch (e: Exception) {
+                throw IllegalStateException(
+                    "Tor activé : SOCKS $socksHost:${proxy.port} injoignable — démarrez Orbot/InviZible ou désactivez Tor",
+                    e,
+                )
             }
-        } catch (e: Exception) {
-            throw IllegalStateException(
-                "Tor requis : SOCKS $socksHost:${proxy.port} injoignable — démarrez Orbot ou InviZible",
-                e,
+            // Smack's SOCKS5 client always advertises both no-auth (0x00) and
+            // username/password (0x02) methods. Tor's SocksPort commonly selects 0x02
+            // — using the username/password purely as a stream-isolation token, not real
+            // credentials — regardless of whether the caller supplied any. If we leave
+            // these null, Smack has nothing to send once Tor picks 0x02 and the whole
+            // handshake fails with "fail in SOCKS5 proxy" before ever reaching the
+            // destination CONNECT request. Always supply a value (bare JID doubles as a
+            // free per-account circuit isolation key) so the handshake can complete either way.
+            val proxyInfo = org.jivesoftware.smack.proxy.ProxyInfo(
+                org.jivesoftware.smack.proxy.ProxyInfo.ProxyType.SOCKS5,
+                socksHost,
+                proxy.port,
+                proxy.username ?: bareJid.toString(),
+                proxy.password ?: "x",
             )
+            builder.setProxyInfo(proxyInfo)
         }
-        // Smack's SOCKS5 client always advertises both no-auth (0x00) and
-        // username/password (0x02) methods. Tor's SocksPort commonly selects 0x02
-        // — using the username/password purely as a stream-isolation token, not real
-        // credentials — regardless of whether the caller supplied any. If we leave
-        // these null, Smack has nothing to send once Tor picks 0x02 and the whole
-        // handshake fails with "fail in SOCKS5 proxy" before ever reaching the
-        // destination CONNECT request. Always supply a value (bare JID doubles as a
-        // free per-account circuit isolation key) so the handshake can complete either way.
-        val proxyInfo = org.jivesoftware.smack.proxy.ProxyInfo(
-            org.jivesoftware.smack.proxy.ProxyInfo.ProxyType.SOCKS5,
-            socksHost,
-            proxy.port,
-            proxy.username ?: bareJid.toString(),
-            proxy.password ?: "x",
-        )
-        builder.setProxyInfo(proxyInfo)
 
         disconnect()
 

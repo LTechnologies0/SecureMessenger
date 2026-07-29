@@ -113,8 +113,7 @@ fun TelegramLoginScreen(
         delay(60_000)
         if (loading && step == TelegramLoginStep.PHONE) {
             loading = false
-            statusMessage = "Tor n'est pas actif. Ouvrez Orbot ou InviZible, puis réessayez " +
-                "(Paramètres → Proxy)."
+            statusMessage = "Délai dépassé. Vérifiez la connexion (et Tor si activé), puis réessayez."
             accountId?.let { viewModel.cancelTelegramLogin(it) }
             accountId = null
         }

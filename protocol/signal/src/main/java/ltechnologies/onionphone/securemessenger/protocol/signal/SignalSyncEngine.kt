@@ -13,15 +13,15 @@ import org.whispersystems.signalservice.api.websocket.WebSocketUnavailableExcept
 import timber.log.Timber
 
 /**
- * Tor-only websocket message receiver (no FCM). Drains the authenticated websocket queue,
- * decrypts envelopes, and persists conversations/messages locally.
+ * Websocket message receiver (clearnet — Signal blocks many Tor exits).
+ * Drains the authenticated websocket queue, decrypts envelopes, and persists locally.
  */
 internal class SignalSyncEngine(
     private val context: Context,
     private val accountId: String,
     private val session: SignalSessionContext,
     private val repository: MessengerRepository,
-    private val proxy: ProxyConfig,
+    @Suppress("UNUSED_PARAMETER") private val proxy: ProxyConfig,
     private val groupHelper: SignalGroupHelper,
 ) {
     private var job: Job? = null
@@ -44,12 +44,7 @@ internal class SignalSyncEngine(
         job = scope.launch {
             while (isActive) {
                 try {
-                    SignalTor.withSocks(proxy, kotlinx.coroutines.Dispatchers.IO) {
-                        SignalRuntimeFactory.applyTorProxy(session.network, proxy)
-                        kotlinx.coroutines.runBlocking {
-                            drainMessages()
-                        }
-                    }
+                    drainMessages()
                 } catch (e: TimeoutException) {
                     Timber.d("Signal websocket read timeout for $accountId")
                 } catch (e: WebSocketUnavailableException) {

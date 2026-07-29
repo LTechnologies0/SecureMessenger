@@ -111,21 +111,35 @@ class ConnectionManager @Inject constructor(
         bootstrapReady.await()
     }
 
-    /** Resolves the current proxy (with the reachable SOCKS host) or activates the killswitch and returns null. */
-    private suspend fun resolveProxyOrFail(): ProxyConfig? {
+    /**
+     * Resolves proxy settings for a connection.
+     * Clearnet (default): always returns the current config — no Tor killswitch.
+     * Tor opt-in: requires a healthy SOCKS endpoint.
+     * Signal always uses clearnet (Signal blocks many Tor exits).
+     */
+    private suspend fun resolveProxyOrFail(protocolId: ProtocolId? = null): ProxyConfig? {
+        val rawProxy = proxyManager.currentConfig()
+        _killswitchActive.value = false
+
+        // Signal must not be forced through Tor — registration/API fail on many exits.
+        if (protocolId == ProtocolId.SIGNAL) {
+            return rawProxy.copy(torRequired = false)
+        }
+
+        if (!rawProxy.torRequired) {
+            return rawProxy
+        }
+
         if (!proxyManager.ensureProxyReady()) {
-            _killswitchActive.value = true
             return null
         }
-        _killswitchActive.value = false
-        val rawProxy = proxyManager.currentConfig()
         return rawProxy.copy(
             host = SocksEndpointResolver.resolveReachableHost(rawProxy.host, rawProxy.port),
         )
     }
 
     private val proxyRequiredMessage =
-        "Tor requis : démarrez Orbot ou InviZible (Paramètres → Proxy), puis réessayez."
+        "Tor activé mais proxy indisponible : démarrez Orbot/InviZible, ou désactivez Tor (Paramètres → Proxy)."
 
     suspend fun connect(credentials: AccountCredentials): ConnectionResult {
         awaitBootstrap()
@@ -134,7 +148,7 @@ class ConnectionManager @Inject constructor(
                 ProtocolNotEnabledException(credentials.protocol).message ?: "Disabled",
             )
         }
-        val proxy = resolveProxyOrFail() ?: return ConnectionResult.Failure(proxyRequiredMessage)
+        val proxy = resolveProxyOrFail(credentials.protocol) ?: return ConnectionResult.Failure(proxyRequiredMessage)
 
         credentials.secrets.forEach { (key, value) ->
             credentialStore.put(credentials.accountId, key, value)
@@ -185,7 +199,7 @@ class ConnectionManager @Inject constructor(
                 ProtocolNotEnabledException(request.protocol).message ?: "Disabled",
             )
         }
-        val proxy = resolveProxyOrFail() ?: return RegistrationResult.Failure(proxyRequiredMessage)
+        val proxy = resolveProxyOrFail(request.protocol) ?: return RegistrationResult.Failure(proxyRequiredMessage)
         val protocol = protocolRegistry.get(request.protocol)
             ?: return RegistrationResult.Failure("Protocol not found")
 
@@ -205,7 +219,7 @@ class ConnectionManager @Inject constructor(
         fields: Map<String, String>,
     ): RegistrationResult {
         awaitBootstrap()
-        val proxy = resolveProxyOrFail() ?: return RegistrationResult.Failure(proxyRequiredMessage)
+        val proxy = resolveProxyOrFail(protocolId) ?: return RegistrationResult.Failure(proxyRequiredMessage)
         val protocol = protocolRegistry.get(protocolId)
             ?: return RegistrationResult.Failure("Protocol not found")
 
@@ -220,10 +234,9 @@ class ConnectionManager @Inject constructor(
         if (!appLockManager.isUnlocked) return
         awaitBootstrap()
         restoreMutex.withLock {
-            if (!proxyManager.ensureProxyReady()) {
-                Timber.i("Skip account restore: proxy not ready")
-                _killswitchActive.value = true
-                return
+            val config = proxyManager.currentConfig()
+            if (config.torRequired) {
+                proxyManager.refreshStatusAndWait()
             }
             _killswitchActive.value = false
 
@@ -254,6 +267,11 @@ class ConnectionManager @Inject constructor(
                 if (protocolId !in FeatureFlags.enabled) continue
 
                 val existing = cleanedRoomAccounts.firstOrNull { it.id == accountId }
+                val torBound = config.torRequired && protocolId != ProtocolId.SIGNAL
+                if (torBound && !proxyManager.isNetworkAllowed()) {
+                    Timber.i("Skip restore for $accountId ($protocolId): Tor required but SOCKS down")
+                    continue
+                }
                 if (protocolId == ProtocolId.TELEGRAM && existing?.connectionState != ConnectionState.CONNECTED) {
                     credentialStore.removeAccount(accountId)
                     continue
@@ -322,22 +340,28 @@ class ConnectionManager @Inject constructor(
     }
 
     /**
-     * Confirms a proxy-unhealthy reading before tearing down every live session.
-     *
-     * A single failed SOCKS+remote-DNS health probe (over Tor, on Waydroid) can be a transient
-     * blip rather than Tor actually going down — but blindly calling [disconnectAll] on every
-     * such blip was killing perfectly healthy XMPP/Matrix sessions and dropping in-flight
-     * messages. Re-checking after a short delay keeps the kill switch (Tor-only enforcement)
-     * intact for genuine outages while filtering out single-probe noise.
+     * When Tor routing is opted in and SOCKS stays down, disconnect Tor-bound sessions.
+     * Signal (clearnet) and clearnet mode are left alone — no global killswitch.
      */
     private suspend fun disconnectIfStillUnhealthy() {
         kotlinx.coroutines.delay(3_000)
         proxyManager.refreshStatusAndWait()
+        val config = proxyManager.currentConfig()
+        _killswitchActive.value = false
+        if (!config.torRequired) {
+            lastProxyHealthy = true
+            return
+        }
         if (!proxyManager.isNetworkAllowed()) {
-            _killswitchActive.value = true
-            disconnectAll()
+            // Tear down Tor-bound protocols only; Signal keeps clearnet sessions.
+            FeatureFlags.enabled.filter { it != ProtocolId.SIGNAL }.forEach { id ->
+                try {
+                    protocolRegistry.get(id)?.disconnect()
+                } catch (e: Exception) {
+                    Timber.w(e, "Disconnect failed for $id")
+                }
+            }
         } else {
-            _killswitchActive.value = false
             lastProxyHealthy = true
         }
     }
@@ -361,10 +385,11 @@ class ConnectionManager @Inject constructor(
         lastProxyHealthy = healthy
         lastProxyConfig = config
 
-        _killswitchActive.value = !healthy
+        // Killswitch removed: never block the whole app when SOCKS blips.
+        _killswitchActive.value = false
 
         when {
-            !healthy -> disconnectIfStillUnhealthy()
+            !healthy && proxyManager.currentConfig().torRequired -> disconnectIfStillUnhealthy()
             wasHealthy == false && healthy -> restorePersistedAccounts()
             previousConfig != null && isMeaningfulConfigChange(previousConfig, config) -> {
                 Timber.i("Proxy config changed — reconnecting through ${config.host}:${config.port}")

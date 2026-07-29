@@ -57,7 +57,8 @@ data class ProxyConfig(
     val port: Int,
     val username: String? = null,
     val password: String? = null,
-    val torRequired: Boolean = true,
+    /** When false (default), protocols use clearnet. Tor SOCKS is opt-in. */
+    val torRequired: Boolean = false,
     val remoteDns: Boolean = true,
     val torProvider: TorProvider = TorProvider.CUSTOM,
 )

@@ -33,7 +33,6 @@ import ltechnologies.onionphone.securemessenger.core.model.ProtocolId
 import ltechnologies.onionphone.securemessenger.core.model.ProxyConfig
 import ltechnologies.onionphone.securemessenger.core.model.SanitizedText
 import ltechnologies.onionphone.securemessenger.core.model.SendResult
-import ltechnologies.onionphone.securemessenger.core.network.NetworkGuard
 import ltechnologies.onionphone.securemessenger.core.security.EncryptedCredentialStore
 import ltechnologies.onionphone.securemessenger.data.MessengerRepository
 import ltechnologies.onionphone.securemessenger.protocol.api.MessengerProtocol
@@ -51,7 +50,6 @@ import timber.log.Timber
 @Singleton
 class SignalProtocol @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val networkGuard: NetworkGuard,
     private val repository: MessengerRepository,
     private val credentialStore: EncryptedCredentialStore,
     private val trustStore: SignalAndroidTrustStore,
@@ -100,15 +98,14 @@ class SignalProtocol @Inject constructor(
         }
         return withContext(signalDispatcher) {
             try {
-                networkGuard.assertNetworkAllowed()
                 _connectionState.value = ConnectionState.CONNECTING
                 accountId = account.accountId
-                proxyConfig = proxy
+                proxyConfig = proxy.copy(torRequired = false)
                 registrationFlow = SignalRegistrationFlow(trustStore)
 
                 val secrets = account.secrets
                 if (secrets[SignalCredentialKeys.SESSION_READY] == "true") {
-                    return@withContext restoreSession(account, secrets, proxy)
+                    return@withContext restoreSession(account, secrets, proxyConfig!!)
                 }
 
                 val e164 = secrets[SignalCredentialKeys.E164]
@@ -119,11 +116,15 @@ class SignalProtocol @Inject constructor(
                 pendingPassword = password
                 pendingPreKeys = SignalPreKeyMaterial.generate()
 
-                val outcome = SignalTor.withSocks(proxy, signalDispatcher) {
-                    registrationFlow!!.startSession(e164, password)
+                val outcome = registrationFlow!!.startSession(e164, password)
+                val applied = applyRegistrationOutcome(outcome)
+                when (val failed = applied.step as? SignalRegistrationStep.Failed) {
+                    null -> ConnectionResult.Success
+                    else -> {
+                        _connectionState.value = ConnectionState.ERROR
+                        ConnectionResult.Failure(failed.reason)
+                    }
                 }
-                applyRegistrationOutcome(outcome)
-                ConnectionResult.Success
             } catch (e: Exception) {
                 Timber.e(e, "Signal connect failed")
                 _connectionState.value = ConnectionState.ERROR
@@ -143,11 +144,8 @@ class SignalProtocol @Inject constructor(
         if (secrets[SignalCredentialKeys.PASSWORD] == null) return ConnectionResult.Failure("Mot de passe manquant")
 
         return try {
-            SignalTor.withSocks(proxy, signalDispatcher) {
-                session = SignalRuntimeFactory.open(trustStore, credentialStore, account.accountId, secrets)
-                SignalRuntimeFactory.applyTorProxy(session!!.network, proxy)
-            }
-            startSync(account.accountId, proxy)
+            session = SignalRuntimeFactory.open(trustStore, credentialStore, account.accountId, secrets)
+            startSync(account.accountId, proxy.copy(torRequired = false))
             _pendingAuthStep.value = null
             _connectionState.value = ConnectionState.CONNECTED
             ConnectionResult.Success
@@ -162,7 +160,7 @@ class SignalProtocol @Inject constructor(
 
     override suspend fun continueAuthentication(fields: Map<String, String>): ConnectionResult =
         withContext(signalDispatcher) {
-            val proxy = proxyConfig ?: return@withContext ConnectionResult.Failure("Proxy non configuré")
+            if (proxyConfig == null) return@withContext ConnectionResult.Failure("Session Signal non initialisée")
             val e164 = pendingE164 ?: return@withContext ConnectionResult.Failure("Session expirée")
             val password = pendingPassword ?: return@withContext ConnectionResult.Failure("Session expirée")
             val flow = registrationFlow ?: return@withContext ConnectionResult.Failure("Flux d'inscription indisponible")
@@ -174,30 +172,26 @@ class SignalProtocol @Inject constructor(
                     AuthStepKind.SIGNAL_CAPTCHA -> {
                         val token = fields["captcha"]?.trim().orEmpty()
                         if (token.isBlank()) return@withContext ConnectionResult.Failure("Token captcha requis")
-                        SignalTor.withSocks(proxy, signalDispatcher) {
-                            flow.submitCaptcha(e164, password, sessionId, token)
-                        }
+                        flow.submitCaptcha(e164, password, sessionId, token)
                     }
                     AuthStepKind.SIGNAL_SMS_CODE -> {
                         val code = fields["code"]?.trim().orEmpty()
                         if (code.isBlank()) return@withContext ConnectionResult.Failure("Code SMS requis")
-                        SignalTor.withSocks(proxy, signalDispatcher) {
-                            flow.verifySmsCode(e164, password, sessionId, code, preKeys, fields["pin"])
-                        }
+                        flow.verifySmsCode(e164, password, sessionId, code, preKeys, fields["pin"])
                     }
                     AuthStepKind.SIGNAL_PIN -> {
                         val pin = fields["pin"]?.trim()
-                        SignalTor.withSocks(proxy, signalDispatcher) {
-                            flow.registerWithVerifiedSession(e164, password, sessionId, preKeys, pin)
-                        }
+                        flow.registerWithVerifiedSession(e164, password, sessionId, preKeys, pin)
                     }
                     else -> return@withContext ConnectionResult.Failure("Étape d'authentification inconnue")
                 }
-                applyRegistrationOutcome(outcome)
-                if (outcome.step == SignalRegistrationStep.Complete) {
-                    ConnectionResult.Success
-                } else {
-                    ConnectionResult.Success
+                val applied = applyRegistrationOutcome(outcome)
+                when (val failed = applied.step as? SignalRegistrationStep.Failed) {
+                    null -> ConnectionResult.Success
+                    else -> {
+                        _connectionState.value = ConnectionState.ERROR
+                        ConnectionResult.Failure(failed.reason)
+                    }
                 }
             } catch (e: Exception) {
                 ConnectionResult.Failure(e.message ?: "Authentification échouée")
@@ -205,44 +199,46 @@ class SignalProtocol @Inject constructor(
         }
 
     fun resendSmsCode(): ConnectionResult {
-        val proxy = proxyConfig ?: return ConnectionResult.Failure("Proxy non configuré")
+        if (proxyConfig == null) return ConnectionResult.Failure("Session Signal non initialisée")
         val e164 = pendingE164 ?: return ConnectionResult.Failure("Session expirée")
         val password = pendingPassword ?: return ConnectionResult.Failure("Session expirée")
         val sessionId = pendingSessionId ?: return ConnectionResult.Failure("Session ID manquant")
         val flow = registrationFlow ?: return ConnectionResult.Failure("Flux indisponible")
         return try {
             val outcome = kotlinx.coroutines.runBlocking(signalDispatcher) {
-                SignalTor.withSocks(proxy, signalDispatcher) {
-                    flow.requestSms(e164, password, sessionId)
-                }
+                flow.requestSms(e164, password, sessionId)
             }
-            kotlinx.coroutines.runBlocking { applyRegistrationOutcome(outcome) }
-            ConnectionResult.Success
+            val applied = kotlinx.coroutines.runBlocking { applyRegistrationOutcome(outcome) }
+            when (val failed = applied.step as? SignalRegistrationStep.Failed) {
+                null -> ConnectionResult.Success
+                else -> ConnectionResult.Failure(failed.reason)
+            }
         } catch (e: Exception) {
             ConnectionResult.Failure(e.message ?: "Renvoi SMS échoué")
         }
     }
 
     fun requestSmsAfterCaptcha(): ConnectionResult {
-        val proxy = proxyConfig ?: return ConnectionResult.Failure("Proxy non configuré")
+        if (proxyConfig == null) return ConnectionResult.Failure("Session Signal non initialisée")
         val e164 = pendingE164 ?: return ConnectionResult.Failure("Session expirée")
         val password = pendingPassword ?: return ConnectionResult.Failure("Session expirée")
         val sessionId = pendingSessionId ?: return ConnectionResult.Failure("Session ID manquant")
         val flow = registrationFlow ?: return ConnectionResult.Failure("Flux indisponible")
         return try {
             val outcome = kotlinx.coroutines.runBlocking(signalDispatcher) {
-                SignalTor.withSocks(proxy, signalDispatcher) {
-                    flow.requestSms(e164, password, sessionId)
-                }
+                flow.requestSms(e164, password, sessionId)
             }
-            kotlinx.coroutines.runBlocking { applyRegistrationOutcome(outcome) }
-            ConnectionResult.Success
+            val applied = kotlinx.coroutines.runBlocking { applyRegistrationOutcome(outcome) }
+            when (val failed = applied.step as? SignalRegistrationStep.Failed) {
+                null -> ConnectionResult.Success
+                else -> ConnectionResult.Failure(failed.reason)
+            }
         } catch (e: Exception) {
             ConnectionResult.Failure(e.message ?: "Demande SMS échouée")
         }
     }
 
-    private suspend fun applyRegistrationOutcome(outcome: SignalRegistrationOutcome) {
+    private suspend fun applyRegistrationOutcome(outcome: SignalRegistrationOutcome): SignalRegistrationOutcome {
         pendingSessionId = outcome.sessionId
         when (outcome.step) {
             SignalRegistrationStep.CaptchaRequired -> {
@@ -252,25 +248,23 @@ class SignalProtocol @Inject constructor(
                     fields = listOf("captcha"),
                 )
                 _connectionState.value = ConnectionState.CONNECTING
+                return outcome
             }
             SignalRegistrationStep.RequestSms -> {
-                val proxy = proxyConfig
-                if (proxy != null && outcome.sessionId != null) {
-                    val smsOutcome = SignalTor.withSocks(proxy, signalDispatcher) {
-                        registrationFlow!!.requestSms(
-                            pendingE164!!,
-                            pendingPassword!!,
-                            outcome.sessionId,
-                        )
-                    }
-                    applyRegistrationOutcome(smsOutcome)
-                    return
+                if (proxyConfig != null && outcome.sessionId != null) {
+                    val smsOutcome = registrationFlow!!.requestSms(
+                        pendingE164!!,
+                        pendingPassword!!,
+                        outcome.sessionId,
+                    )
+                    return applyRegistrationOutcome(smsOutcome)
                 }
                 _pendingAuthStep.value = AuthStep(
                     kind = AuthStepKind.SIGNAL_SMS_CODE,
                     prompt = outcome.message ?: "Code SMS requis",
                     fields = listOf("code"),
                 )
+                return outcome
             }
             SignalRegistrationStep.SmsCodeRequired -> {
                 _pendingAuthStep.value = AuthStep(
@@ -279,6 +273,7 @@ class SignalProtocol @Inject constructor(
                     fields = listOf("code"),
                 )
                 _connectionState.value = ConnectionState.CONNECTING
+                return outcome
             }
             SignalRegistrationStep.PinRequired -> {
                 _pendingAuthStep.value = AuthStep(
@@ -287,9 +282,10 @@ class SignalProtocol @Inject constructor(
                     fields = listOf("pin"),
                 )
                 _connectionState.value = ConnectionState.CONNECTING
+                return outcome
             }
             SignalRegistrationStep.Complete -> {
-                val creds = outcome.credentials ?: return
+                val creds = outcome.credentials ?: return outcome
                 val accId = accountId ?: UUID.randomUUID().toString()
                 accountId = accId
                 creds.forEach { (k, v) -> credentialStore.put(accId, k, v) }
@@ -312,6 +308,12 @@ class SignalProtocol @Inject constructor(
                 _pendingAuthStep.value = null
                 _connectionState.value = ConnectionState.CONNECTED
                 SignalForegroundService.start(context, accId)
+                return outcome
+            }
+            is SignalRegistrationStep.Failed -> {
+                _pendingAuthStep.value = null
+                _connectionState.value = ConnectionState.ERROR
+                return outcome
             }
         }
     }
@@ -351,30 +353,26 @@ class SignalProtocol @Inject constructor(
         asGroup: Boolean,
     ): SendResult = withContext(signalDispatcher) {
         val accId = accountId ?: this@SignalProtocol.accountId ?: return@withContext SendResult.Failure("Compte non connecté")
-        val proxy = proxyConfig ?: return@withContext SendResult.Failure("Proxy non configuré")
         val activeSession = session ?: return@withContext SendResult.Failure("Session Signal indisponible")
         return@withContext try {
-            SignalTor.withSocks(proxy, signalDispatcher) {
-                SignalRuntimeFactory.applyTorProxy(activeSession.network, proxy)
-                val recipient = resolveSignalAddress(remoteId)
-                val convId = signalConversationId(accId, recipient.identifier)
-                repository.upsertConversation(
-                    Conversation(
-                        id = convId,
-                        protocol = ProtocolId.SIGNAL,
-                        accountId = accId,
-                        remoteId = recipient.identifier,
-                        title = recipient.number.orElse(recipient.identifier),
-                    ),
-                )
-                if (initialMessage != null) {
-                    when (val send = deliverMessage(activeSession, convId, accId, recipient, initialMessage)) {
-                        is SendResult.Failure -> send
-                        else -> SendResult.Success(convId)
-                    }
-                } else {
-                    SendResult.Success(convId)
+            val recipient = resolveSignalAddress(remoteId)
+            val convId = signalConversationId(accId, recipient.identifier)
+            repository.upsertConversation(
+                Conversation(
+                    id = convId,
+                    protocol = ProtocolId.SIGNAL,
+                    accountId = accId,
+                    remoteId = recipient.identifier,
+                    title = recipient.number.orElse(recipient.identifier),
+                ),
+            )
+            if (initialMessage != null) {
+                when (val send = deliverMessage(activeSession, convId, accId, recipient, initialMessage)) {
+                    is SendResult.Failure -> send
+                    else -> SendResult.Success(convId)
                 }
+            } else {
+                SendResult.Success(convId)
             }
         } catch (e: Exception) {
             SendResult.Failure(e.message ?: "Impossible de démarrer la conversation")
@@ -387,28 +385,23 @@ class SignalProtocol @Inject constructor(
         accountId: String?,
     ): SendResult = withContext(signalDispatcher) {
         val accId = accountId ?: this@SignalProtocol.accountId ?: return@withContext SendResult.Failure("Compte non connecté")
-        val proxy = proxyConfig ?: return@withContext SendResult.Failure("Proxy non configuré")
         val activeSession = session ?: return@withContext SendResult.Failure("Session Signal indisponible")
         val remoteId = conversationId.removePrefix("${accId}_")
         if (remoteId == conversationId) {
             return@withContext SendResult.Failure("Conversation Signal invalide")
         }
         return@withContext try {
-            networkGuard.assertNetworkAllowed()
-            SignalTor.withSocks(proxy, signalDispatcher) {
-                SignalRuntimeFactory.applyTorProxy(activeSession.network, proxy)
-                val masterKey = SignalGroupHelper.parseMasterKey(remoteId)
-                if (masterKey != null) {
-                    deliverGroupMessage(
-                        activeSession = activeSession,
-                        conversationId = conversationId,
-                        accId = accId,
-                        masterKeyBytes = masterKey,
-                        body = body,
-                    )
-                } else {
-                    deliverMessage(activeSession, conversationId, accId, resolveSignalAddress(remoteId), body)
-                }
+            val masterKey = SignalGroupHelper.parseMasterKey(remoteId)
+            if (masterKey != null) {
+                deliverGroupMessage(
+                    activeSession = activeSession,
+                    conversationId = conversationId,
+                    accId = accId,
+                    masterKeyBytes = masterKey,
+                    body = body,
+                )
+            } else {
+                deliverMessage(activeSession, conversationId, accId, resolveSignalAddress(remoteId), body)
             }
         } catch (e: Exception) {
             Timber.e(e, "Signal send failed")
@@ -424,7 +417,6 @@ class SignalProtocol @Inject constructor(
     ): SendResult = withContext(signalDispatcher) {
         val accId = accountId ?: this@SignalProtocol.accountId
             ?: return@withContext SendResult.Failure("Compte non connecté")
-        val proxy = proxyConfig ?: return@withContext SendResult.Failure("Proxy non configuré")
         val activeSession = session ?: return@withContext SendResult.Failure("Session Signal indisponible")
         val remoteId = conversationId.removePrefix("${accId}_")
         if (remoteId == conversationId) {
@@ -437,49 +429,45 @@ class SignalProtocol @Inject constructor(
             return@withContext SendResult.Failure("Fichier introuvable")
         }
         return@withContext try {
-            networkGuard.assertNetworkAllowed()
-            SignalTor.withSocks(proxy, signalDispatcher) {
-                SignalRuntimeFactory.applyTorProxy(activeSession.network, proxy)
-                val form = activeSession.pushServiceSocket.attachmentV4UploadForm
-                val uploadSpec = activeSession.pushServiceSocket.getResumableUploadSpec(form)
-                FileInputStream(file).use { input ->
-                    val stream = SignalServiceAttachment.newStreamBuilder()
-                        .withStream(input)
-                        .withContentType(attachment.mimeType)
-                        .withFileName(attachment.fileName ?: file.name)
-                        .withLength(file.length())
-                        .withCaption(caption?.value)
-                        .withResumableUploadSpec(uploadSpec)
-                        .build()
-                    val pointer = activeSession.messageSender.uploadAttachment(stream)
-                    val localAtt = attachment.copy(
-                        remoteRef = pointer.remoteId.toString(),
-                        sizeBytes = file.length(),
-                        state = AttachmentState.READY,
+            val form = activeSession.pushServiceSocket.attachmentV4UploadForm
+            val uploadSpec = activeSession.pushServiceSocket.getResumableUploadSpec(form)
+            FileInputStream(file).use { input ->
+                val stream = SignalServiceAttachment.newStreamBuilder()
+                    .withStream(input)
+                    .withContentType(attachment.mimeType)
+                    .withFileName(attachment.fileName ?: file.name)
+                    .withLength(file.length())
+                    .withCaption(caption?.value)
+                    .withResumableUploadSpec(uploadSpec)
+                    .build()
+                val pointer = activeSession.messageSender.uploadAttachment(stream)
+                val localAtt = attachment.copy(
+                    remoteRef = pointer.remoteId.toString(),
+                    sizeBytes = file.length(),
+                    state = AttachmentState.READY,
+                )
+                val captionBody = caption ?: SanitizedText(attachment.fileName ?: "📎")
+                val masterKey = SignalGroupHelper.parseMasterKey(remoteId)
+                if (masterKey != null) {
+                    deliverGroupMessage(
+                        activeSession = activeSession,
+                        conversationId = conversationId,
+                        accId = accId,
+                        masterKeyBytes = masterKey,
+                        body = captionBody,
+                        attachments = listOf(pointer),
+                        localAttachment = localAtt,
                     )
-                    val captionBody = caption ?: SanitizedText(attachment.fileName ?: "📎")
-                    val masterKey = SignalGroupHelper.parseMasterKey(remoteId)
-                    if (masterKey != null) {
-                        deliverGroupMessage(
-                            activeSession = activeSession,
-                            conversationId = conversationId,
-                            accId = accId,
-                            masterKeyBytes = masterKey,
-                            body = captionBody,
-                            attachments = listOf(pointer),
-                            localAttachment = localAtt,
-                        )
-                    } else {
-                        deliverMessage(
-                            activeSession = activeSession,
-                            conversationId = conversationId,
-                            accId = accId,
-                            recipient = resolveSignalAddress(remoteId),
-                            body = captionBody,
-                            attachments = listOf(pointer),
-                            localAttachment = localAtt,
-                        )
-                    }
+                } else {
+                    deliverMessage(
+                        activeSession = activeSession,
+                        conversationId = conversationId,
+                        accId = accId,
+                        recipient = resolveSignalAddress(remoteId),
+                        body = captionBody,
+                        attachments = listOf(pointer),
+                        localAttachment = localAtt,
+                    )
                 }
             }
         } catch (e: Exception) {

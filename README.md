@@ -1,7 +1,7 @@
 # SecureMessenger
 
 <p align="center">
-  <strong>Tor-only, multi-protocol secure messenger for Android — one app, one killswitch, every chat routed through Tor.</strong>
+  <strong>Multi-protocol secure messenger for Android — Matrix, XMPP, Telegram, and Signal, with optional Tor routing.</strong>
 </p>
 
 <p align="center">
@@ -13,9 +13,9 @@
   <img src="https://img.shields.io/badge/compileSdk-37-green" alt="compileSdk 37">
 </p>
 
-**SecureMessenger** is an open-source Android app that lets you chat over **Matrix, XMPP, Telegram, and Signal** from a single app — with **every byte of network traffic forced through Tor**. Part of the [OnionPhone](https://onionphone.org) app family.
+**SecureMessenger** is an open-source Android app that lets you chat over **Matrix, XMPP, Telegram, and Signal** from a single app. Part of the [OnionPhone](https://onionphone.org) app family.
 
-> If Tor is unreachable, a killswitch blocks all connections. There is no "send over clearnet" fallback — by design.
+> Tor routing is **optional** (off by default). Signal always uses clearnet — Signal blocks many Tor exits. Matrix / XMPP / Telegram can opt into SOCKS5 → Tor from Settings → Proxy.
 
 ---
 
@@ -37,7 +37,7 @@
 | Feature | Description |
 |---------|-------------|
 | **Multi-protocol** | Matrix, XMPP, Telegram, Signal accounts side by side in one app |
-| **Tor-only networking** | Every protocol, including in-app WebViews, is force-routed through a SOCKS5 → Tor proxy; a killswitch blocks traffic if Tor is down |
+| **Optional Tor routing** | Opt-in SOCKS5 → Tor for Matrix / XMPP / Telegram; Signal uses clearnet; no global killswitch |
 | **Account registration** | Create new Matrix accounts (UIA dummy/token stages inline, WebView fallback for captcha/email/terms) and XMPP accounts (XEP-0077 in-band registration with dynamic extra fields) — no browser needed for the common case |
 | **Matrix well-known discovery** | Automatically resolves delegated homeservers via `.well-known/matrix/client` |
 | **Per-account Tor circuit isolation** | XMPP connections use per-account SOCKS5 stream isolation so different accounts don't share a Tor circuit |
@@ -53,10 +53,10 @@ flowchart LR
     CM --> XMPP[protocol:xmpp]
     CM --> TG[protocol:telegram]
     CM --> Signal[protocol:signal]
-    Matrix & XMPP & TG & Signal --> Proxy[core:proxy — SOCKS5 resolver]
-    Proxy --> Guard[core:network — Tor killswitch]
-    Guard -->|Tor reachable| Tor((Tor network))
-    Guard -->|Tor unreachable| Blocked[🚫 all traffic blocked]
+    Matrix & XMPP & TG -->|Tor opt-in| Proxy[core:proxy — SOCKS5]
+    Matrix & XMPP & TG -->|default| Clearnet((Clearnet))
+    Signal --> Clearnet
+    Proxy -->|Tor enabled + healthy| Tor((Tor network))
 ```
 
 ---

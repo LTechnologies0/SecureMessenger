@@ -16,6 +16,7 @@ internal sealed class SignalRegistrationStep {
     data object SmsCodeRequired : SignalRegistrationStep()
     data object PinRequired : SignalRegistrationStep()
     data object Complete : SignalRegistrationStep()
+    data class Failed(val reason: String) : SignalRegistrationStep()
 }
 
 internal data class SignalRegistrationOutcome(
@@ -186,7 +187,7 @@ internal class SignalRegistrationFlow(
             metadata.captchaRequired() -> SignalRegistrationOutcome(
                 step = SignalRegistrationStep.CaptchaRequired,
                 sessionId = sessionId,
-                message = "Résolvez le captcha Signal (via Tor), puis collez le token.",
+                message = "Résolvez le captcha Signal, puis collez le token.",
             )
             metadata.verified && preKeys != null -> registerAccount(
                 registrationApi(e164, password),
@@ -215,7 +216,7 @@ internal class SignalRegistrationFlow(
     }
 
     private fun failure(reason: String) = SignalRegistrationOutcome(
-        step = SignalRegistrationStep.SmsCodeRequired,
+        step = SignalRegistrationStep.Failed(reason),
         message = reason,
     )
 }

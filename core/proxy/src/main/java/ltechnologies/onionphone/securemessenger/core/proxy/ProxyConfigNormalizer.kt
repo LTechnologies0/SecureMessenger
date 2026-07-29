@@ -12,8 +12,7 @@ object ProxyConfigNormalizer {
         return config.copy(
             host = host,
             port = port,
-            torRequired = true,
-            remoteDns = true,
+            remoteDns = if (config.torRequired) true else config.remoteDns,
         )
     }
 
@@ -29,12 +28,14 @@ object ProxyConfigNormalizer {
         resolvedStatus: ProxyConfig,
         username: String? = null,
         password: String? = null,
+        torRequired: Boolean = resolvedStatus.torRequired,
     ): ProxyConfig = when (torProvider) {
         TorProvider.ORBOT -> normalize(
             resolvedStatus.copy(
                 torProvider = TorProvider.ORBOT,
                 username = null,
                 password = null,
+                torRequired = torRequired,
             ),
         )
         TorProvider.INVIZIBLE -> normalize(
@@ -42,6 +43,7 @@ object ProxyConfigNormalizer {
                 torProvider = TorProvider.INVIZIBLE,
                 username = null,
                 password = null,
+                torRequired = torRequired,
             ),
         )
         TorProvider.CUSTOM -> normalize(
@@ -50,8 +52,8 @@ object ProxyConfigNormalizer {
                 port = customPort,
                 username = username?.takeIf { it.isNotBlank() },
                 password = password?.takeIf { it.isNotBlank() },
-                torRequired = true,
-                remoteDns = true,
+                torRequired = torRequired,
+                remoteDns = torRequired,
                 torProvider = TorProvider.CUSTOM,
             ),
         )
