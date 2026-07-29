@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.0-alpha.4
 
 ### Network
 - **Killswitch Tor retiré** : plus de blocage global quand SOCKS est down
@@ -12,6 +12,7 @@
 - Inscription / sync / envoi en clearnet ; UI et messages mis à jour
 - Fix UI : observation des étapes captcha → SMS → PIN pendant tout le flux (plus bloqué après le captcha)
 - Erreurs réseau d’inscription remontées en `ConnectionResult.Failure` (plus confondues avec l’étape SMS)
+- version `1.0.0-alpha.4` (versionCode 4)
 
 ## 1.0.0-alpha.3
 
