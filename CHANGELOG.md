@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.2
+
+### App lock
+- Fix bouton « Déverrouiller » grisé : `MainActivity` est maintenant un
+  `FragmentActivity` (requis par `BiometricPrompt`), comme OnionVPN
+- Fonctionne sur profils privés Android ; prompt PIN / schéma / biométrie
+- Bypass « Continuer sans verrouillage » si Keyguard reporte insecure
+- version `1.0.2` (versionCode 6)
+
 ## 1.0.0-alpha.5
 
 ### UI

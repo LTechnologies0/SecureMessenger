@@ -15,6 +15,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -26,52 +27,62 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.fragment.app.FragmentActivity
-import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import ltechnologies.onionphone.securemessenger.core.security.AppLockAuthResult
+import ltechnologies.onionphone.securemessenger.core.security.AppLockAuthenticator
+import ltechnologies.onionphone.securemessenger.core.security.AppLockManager
 import ltechnologies.onionphone.securemessenger.core.security.AppLockState
 
 @Composable
 fun AppLockGate(
-    snackbarHostState: androidx.compose.material3.SnackbarHostState,
-    viewModel: AppLockViewModel = hiltViewModel(),
+    appLockManager: AppLockManager,
+    authenticator: AppLockAuthenticator,
     unlockedContent: @Composable () -> Unit,
 ) {
-    val lockState by viewModel.lockState.collectAsStateWithLifecycle()
+    val lockState by appLockManager.state.collectAsStateWithLifecycle()
     when (lockState) {
-        AppLockState.DEVICE_INSECURE -> DeviceInsecureScreen()
-        AppLockState.LOCKED -> AppLockScreen(viewModel = viewModel, snackbarHostState = snackbarHostState)
+        AppLockState.DEVICE_INSECURE -> DeviceInsecureScreen(
+            onContinue = { appLockManager.markUnlocked() },
+        )
+        AppLockState.LOCKED -> AppLockScreen(
+            authenticator = authenticator,
+            onSuccess = { appLockManager.markUnlocked() },
+        )
         AppLockState.UNLOCKED -> unlockedContent()
     }
 }
 
 @Composable
-fun AppLockScreen(
-    viewModel: AppLockViewModel = hiltViewModel(),
-    snackbarHostState: androidx.compose.material3.SnackbarHostState,
+private fun AppLockScreen(
+    authenticator: AppLockAuthenticator,
+    onSuccess: () -> Unit,
 ) {
-    val activity = LocalContext.current as? FragmentActivity
+    val context = LocalContext.current
+    val activity = remember(context) { context.findFragmentActivity() }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var promptShown by remember { mutableStateOf(false) }
 
-    LaunchedEffect(errorMessage) {
-        errorMessage?.let { message ->
-            snackbarHostState.showSnackbar(message)
-            errorMessage = null
+    fun launchPrompt() {
+        val act = activity ?: run {
+            errorMessage = "Hôte FragmentActivity requis pour le déverrouillage"
+            return
+        }
+        promptShown = true
+        authenticator.authenticate(act) { result ->
+            when (result) {
+                is AppLockAuthResult.Failure -> {
+                    errorMessage = result.message
+                    promptShown = false
+                }
+                is AppLockAuthResult.Cancelled -> promptShown = false
+                is AppLockAuthResult.Success -> onSuccess()
+            }
         }
     }
 
-    LaunchedEffect(activity, promptShown) {
+    LaunchedEffect(activity) {
         if (activity != null && !promptShown) {
-            promptShown = true
-            viewModel.authenticate(activity) { result ->
-                when (result) {
-                    is AppLockAuthResult.Failure -> errorMessage = result.message
-                    is AppLockAuthResult.Cancelled -> promptShown = false
-                    is AppLockAuthResult.Success -> Unit
-                }
-            }
+            launchPrompt()
         }
     }
 
@@ -95,26 +106,20 @@ fun AppLockScreen(
         )
         Spacer(modifier = Modifier.height(8.dp))
         Text(
-            text = "Déverrouillez avec le code PIN, le schéma ou la biométrie de votre appareil.",
+            text = "Déverrouillez avec le code PIN, le schéma ou la biométrie (y compris profil privé).",
             style = MaterialTheme.typography.bodyMedium,
             textAlign = TextAlign.Center,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        errorMessage?.let {
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(it, color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center)
+        }
         Spacer(modifier = Modifier.height(24.dp))
+        // Always enabled — OnionVPN pattern; show error if host activity missing.
         Button(
-            onClick = {
-                if (activity != null) {
-                    viewModel.authenticate(activity) { result ->
-                        when (result) {
-                            is AppLockAuthResult.Failure -> errorMessage = result.message
-                            is AppLockAuthResult.Cancelled -> Unit
-                            is AppLockAuthResult.Success -> Unit
-                        }
-                    }
-                }
-            },
+            onClick = { launchPrompt() },
             modifier = Modifier.fillMaxWidth(),
-            enabled = activity != null,
         ) {
             Text("Déverrouiller")
         }
@@ -122,7 +127,7 @@ fun AppLockScreen(
 }
 
 @Composable
-fun DeviceInsecureScreen() {
+private fun DeviceInsecureScreen(onContinue: () -> Unit) {
     val context = LocalContext.current
     Column(
         modifier = Modifier
@@ -144,8 +149,9 @@ fun DeviceInsecureScreen() {
         )
         Spacer(modifier = Modifier.height(8.dp))
         Text(
-            text = "Configurez un code PIN, un schéma ou une biométrie dans les paramètres Android. " +
-                "Sans verrouillage d'écran, les données chiffrées ne peuvent pas être protégées.",
+            text = "Configurez un code PIN, un schéma ou une biométrie dans les paramètres Android " +
+                "(ou du profil privé). Sans verrouillage d'écran, les données chiffrées ne peuvent " +
+                "pas être protégées.",
             style = MaterialTheme.typography.bodyMedium,
             textAlign = TextAlign.Center,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -158,6 +164,10 @@ fun DeviceInsecureScreen() {
             modifier = Modifier.fillMaxWidth(),
         ) {
             Text("Ouvrir les paramètres de sécurité")
+        }
+        // Same escape hatch as OnionVPN for profiles where Keyguard reports insecure.
+        TextButton(onClick = onContinue) {
+            Text("Continuer sans verrouillage app")
         }
     }
 }

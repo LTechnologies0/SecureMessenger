@@ -46,9 +46,11 @@ class AppLockManager @Inject constructor(
         state.first { it == AppLockState.UNLOCKED }
     }
 
-    /** Call after BiometricPrompt / device-credential confirmation succeeds. */
+    /**
+     * Call after BiometricPrompt success, or after the user accepts the insecure-device warning
+     * (same escape hatch as OnionVPN — needed when Keyguard reports insecure in some profiles).
+     */
     fun markUnlocked() {
-        if (!isDeviceSecure) return
         _state.value = AppLockState.UNLOCKED
     }
 

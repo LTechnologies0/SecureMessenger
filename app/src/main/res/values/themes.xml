@@ -1,6 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Compose-only UI: ComponentActivity accepts platform Material themes.
-         Keep AppCompat parent so any future AppCompat widgets stay safe. -->
+    <!-- FragmentActivity host (BiometricPrompt). AppCompat parent keeps widgets compatible. -->
     <style name="Theme.SecureMessenger" parent="Theme.AppCompat.DayNight.NoActionBar" />
 </resources>

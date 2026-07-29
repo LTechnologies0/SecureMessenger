@@ -14,32 +14,31 @@ sealed class AppLockAuthResult {
 }
 
 /**
- * Prompts the user with the system lock (PIN / schéma / biométrie).
- * Successful system lock prompt gates [AppLockManager]; encrypted stores open only after unlock.
+ * System lock prompt: BIOMETRIC_STRONG | DEVICE_CREDENTIAL (PIN / schéma / password).
+ * Same pattern as OnionVPN — works in Android private profiles when a screen lock exists.
  */
 @Singleton
 class AppLockAuthenticator @Inject constructor() {
-
-    fun canAuthenticate(activity: FragmentActivity): Int {
-        val manager = BiometricManager.from(activity)
-        return manager.canAuthenticate(
-            BiometricManager.Authenticators.BIOMETRIC_STRONG or
-                BiometricManager.Authenticators.DEVICE_CREDENTIAL,
-        )
-    }
 
     fun authenticate(
         activity: FragmentActivity,
         onResult: (AppLockAuthResult) -> Unit,
     ) {
-        when (canAuthenticate(activity)) {
+        val manager = BiometricManager.from(activity)
+        val authenticators =
+            BiometricManager.Authenticators.BIOMETRIC_STRONG or
+                BiometricManager.Authenticators.DEVICE_CREDENTIAL
+        when (manager.canAuthenticate(authenticators)) {
+            BiometricManager.BIOMETRIC_SUCCESS -> Unit
             BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED,
             BiometricManager.BIOMETRIC_ERROR_NO_HARDWARE,
             BiometricManager.BIOMETRIC_ERROR_HW_UNAVAILABLE,
             -> {
-                onResult(AppLockAuthResult.Failure("Verrouillage système requis"))
+                onResult(AppLockAuthResult.Failure("Configurez un verrouillage d'écran Android d'abord"))
                 return
             }
+            // Private profiles / GrapheneOS may report other statuses; still show the prompt.
+            else -> Unit
         }
 
         val executor = ContextCompat.getMainExecutor(activity)
@@ -53,7 +52,8 @@ class AppLockAuthenticator @Inject constructor() {
 
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
                     if (errorCode == BiometricPrompt.ERROR_USER_CANCELED ||
-                        errorCode == BiometricPrompt.ERROR_NEGATIVE_BUTTON
+                        errorCode == BiometricPrompt.ERROR_NEGATIVE_BUTTON ||
+                        errorCode == BiometricPrompt.ERROR_CANCELED
                     ) {
                         onResult(AppLockAuthResult.Cancelled)
                     } else {
@@ -62,18 +62,15 @@ class AppLockAuthenticator @Inject constructor() {
                 }
 
                 override fun onAuthenticationFailed() {
-                    onResult(AppLockAuthResult.Failure("Authentification échouée"))
+                    // Keep prompt open; user can retry or fall back to PIN.
                 }
             },
         )
 
         val info = BiometricPrompt.PromptInfo.Builder()
             .setTitle("Déverrouiller SecureMessenger")
-            .setSubtitle("Utilisez le verrouillage de votre appareil")
-            .setAllowedAuthenticators(
-                BiometricManager.Authenticators.BIOMETRIC_STRONG or
-                    BiometricManager.Authenticators.DEVICE_CREDENTIAL,
-            )
+            .setSubtitle("Empreinte, visage ou code PIN de l'appareil")
+            .setAllowedAuthenticators(authenticators)
             .build()
 
         prompt.authenticate(info)
