@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.3
+
+### Network / Tor
+- Routage Tor basé sur **OnionVPN PAC** (`http://127.0.0.1:18201/onionvpn.pac`)
+- Fournisseur par défaut `ONIONVPN` : pont SOCKS DNSCrypt→Tor (`:18202`)
+- Orbot / InviZible / Custom restent disponibles
+- version `1.0.3` (versionCode 7)
+
 ## 1.0.2
 
 ### App lock

@@ -139,7 +139,7 @@ class ConnectionManager @Inject constructor(
     }
 
     private val proxyRequiredMessage =
-        "Tor activé mais proxy indisponible : démarrez Orbot/InviZible, ou désactivez Tor (Paramètres → Proxy)."
+        "Tor activé mais proxy indisponible : démarrez OnionVPN, ou désactivez Tor (Paramètres → Proxy)."
 
     suspend fun connect(credentials: AccountCredentials): ConnectionResult {
         awaitBootstrap()

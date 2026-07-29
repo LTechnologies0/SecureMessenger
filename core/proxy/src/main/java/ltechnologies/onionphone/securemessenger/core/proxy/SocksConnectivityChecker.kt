@@ -44,7 +44,7 @@ object SocksConnectivityChecker {
         val normalizedHost = ProxyConfigNormalizer.normalizeHost(proxyHost)
         if (!checkTcpOnly(normalizedHost, proxyPort, timeoutMs.toLong())) {
             return@withContext SocksCheckResult.Failure(
-                "Proxy SOCKS injoignable sur $normalizedHost:$proxyPort (vérifiez qu'Orbot/Tor est démarré)",
+                "Proxy SOCKS injoignable sur $normalizedHost:$proxyPort (vérifiez qu'OnionVPN (PAC) est démarré)",
             )
         }
         if (!remoteDns) {

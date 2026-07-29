@@ -113,7 +113,7 @@ internal class XmppRegistration(private val context: Context) {
                 }
             } catch (e: Exception) {
                 throw IllegalStateException(
-                    "Tor activé : SOCKS $socksHost:${proxy.port} injoignable — démarrez Orbot/InviZible ou désactivez Tor",
+                    "Tor activé : SOCKS $socksHost:${proxy.port} injoignable — démarrez OnionVPN ou désactivez Tor",
                     e,
                 )
             }

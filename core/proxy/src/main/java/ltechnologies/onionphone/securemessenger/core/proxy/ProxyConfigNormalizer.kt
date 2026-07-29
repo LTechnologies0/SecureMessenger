@@ -30,6 +30,17 @@ object ProxyConfigNormalizer {
         password: String? = null,
         torRequired: Boolean = resolvedStatus.torRequired,
     ): ProxyConfig = when (torProvider) {
+        TorProvider.ONIONVPN -> normalize(
+            ProxyConfig(
+                host = OnionVpnConstants.DEFAULT_BRIDGE_HOST,
+                port = OnionVpnConstants.DEFAULT_BRIDGE_PORT,
+                username = null,
+                password = null,
+                torRequired = torRequired,
+                remoteDns = torRequired,
+                torProvider = TorProvider.ONIONVPN,
+            ),
+        )
         TorProvider.ORBOT -> normalize(
             resolvedStatus.copy(
                 torProvider = TorProvider.ORBOT,

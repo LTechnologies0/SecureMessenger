@@ -498,7 +498,7 @@ class TrixnityMatrixEngine(
             }
         } catch (e: Exception) {
             throw IllegalStateException(
-                "Tor requis : SOCKS $socksHost:${proxy.port} injoignable — démarrez Orbot ou InviZible",
+                "Tor requis : SOCKS $socksHost:${proxy.port} injoignable — démarrez OnionVPN",
                 e,
             )
         }

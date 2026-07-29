@@ -40,7 +40,7 @@ internal object MatrixHttpClientFactory {
             false
         }
         if (!ok) {
-            error("Tor requis : SOCKS $host:$port injoignable — démarrez Orbot ou InviZible")
+            error("Tor requis : SOCKS $host:$port injoignable — démarrez OnionVPN")
         }
     }
 }

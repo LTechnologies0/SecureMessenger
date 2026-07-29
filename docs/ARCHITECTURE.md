@@ -76,14 +76,17 @@ Signal GV2 prefers sender keys; if endorsements/certificates are unavailable it 
 ## Network flow (every protocol)
 
 ```
-Protocol adapter (Matrix / XMPP / Telegram / Signal)
+Protocol adapter (Matrix / XMPP / Telegram / Signal*)
         ↓
-core/proxy — SocksEndpointResolver (resolve reachable Tor SOCKS host:port)
+core/proxy — OnionVpnPacClient (GET http://127.0.0.1:18201/onionvpn.pac)
+           → SOCKS5 127.0.0.1:18202 (DNSCrypt→Tor bridge)
         ↓
 core/network — NetworkGuard (blocks only when Tor is opted-in and SOCKS is down)
         ↓
-Tor SOCKS5 proxy → Tor network → destination server
+OnionVPN PAC bridge → Tor → destination
 ```
+
+\* Signal stays clearnet by design. Default Tor provider is OnionVPN; Orbot / InviZible / custom SOCKS remain selectable.
 
 Matrix and XMPP UIA/registration steps that require a browser (captcha, email verification, terms acceptance) open an in-app WebView that is force-routed through the same Tor proxy via `androidx.webkit.ProxyController` — no direct network path ever exists for any component, including the WebView.
 

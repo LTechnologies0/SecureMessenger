@@ -39,7 +39,7 @@ class UnifiedMessengerClient @Inject constructor(
             ?: return ConnectionResult.Failure("Protocol not registered")
         if (!proxyManager.ensureProxyReady()) {
             return ConnectionResult.Failure(
-                "Tor requis : démarrez Orbot ou InviZible (Paramètres → Proxy), puis réessayez.",
+                "Tor requis : démarrez OnionVPN (Paramètres → Proxy), puis réessayez.",
             )
         }
         return impl.connect(account, proxyManager.currentConfig())

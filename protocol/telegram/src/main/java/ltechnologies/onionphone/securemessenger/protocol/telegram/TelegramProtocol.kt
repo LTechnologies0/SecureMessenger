@@ -158,7 +158,7 @@ class TelegramProtocol @Inject constructor(
                         newSession.close()
                         _connectionState.value = ConnectionState.ERROR
                         return@withContext null to ConnectionResult.Failure(
-                            "Tor activé : démarrez Orbot/InviZible, ou désactivez Tor pour Telegram",
+                            "Tor activé : démarrez OnionVPN, ou désactivez Tor pour Telegram",
                         )
                     }
                 } else {
@@ -379,7 +379,7 @@ class TelegramProtocol @Inject constructor(
                         }
                         if (!proxyOk) {
                             _lastAuthError.value =
-                                "Tor activé : démarrez Orbot/InviZible, ou désactivez Tor pour Telegram"
+                                "Tor activé : démarrez OnionVPN, ou désactivez Tor pour Telegram"
                             _connectionState.value = ConnectionState.ERROR
                             disconnect(accId)
                             return@launch
@@ -582,7 +582,7 @@ class TelegramProtocol @Inject constructor(
             }
             if (!isAccountConnected(accId)) {
                 return@withContext HistoryLoadResult.Failure(
-                    "Telegram déconnecté — vérifiez Tor (Orbot/InviZible) puis reconnectez-vous",
+                    "Telegram déconnecté — vérifiez Tor (OnionVPN) puis reconnectez-vous",
                 )
             }
 

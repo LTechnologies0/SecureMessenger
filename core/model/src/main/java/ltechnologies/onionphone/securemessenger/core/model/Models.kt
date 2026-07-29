@@ -44,6 +44,11 @@ data class AccountCredentials(
 )
 
 enum class TorProvider {
+    /**
+     * OnionVPN PAC bridge (`http://127.0.0.1:18201/onionvpn.pac` → SOCKS5 `:18202`).
+     * Preferred: DNS via DNSCrypt, then Tor by IP (no Tor exit DNS).
+     */
+    ONIONVPN,
     /** Guardian Project Orbot (`org.torproject.android`). */
     ORBOT,
     /** InviZible Pro (`pan.alexander.tordnscrypt.*`). */
@@ -60,7 +65,7 @@ data class ProxyConfig(
     /** When false (default), protocols use clearnet. Tor SOCKS is opt-in. */
     val torRequired: Boolean = false,
     val remoteDns: Boolean = true,
-    val torProvider: TorProvider = TorProvider.CUSTOM,
+    val torProvider: TorProvider = TorProvider.ONIONVPN,
 )
 
 enum class AuthStepKind {

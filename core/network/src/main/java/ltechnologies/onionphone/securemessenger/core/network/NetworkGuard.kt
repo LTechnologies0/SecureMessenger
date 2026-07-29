@@ -30,7 +30,7 @@ class NetworkGuard @Inject constructor(
         if (!proxyManager.isNetworkAllowed()) {
             throw NetworkBlockedException(
                 proxyManager.status.value.lastError
-                    ?: "Tor activé mais proxy SOCKS indisponible — désactivez Tor ou démarrez Orbot/InviZible",
+                    ?: "Tor activé mais proxy SOCKS indisponible — désactivez Tor ou démarrez OnionVPN",
             )
         }
     }

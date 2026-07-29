@@ -28,10 +28,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import ltechnologies.onionphone.securemessenger.core.model.TorProvider
+import ltechnologies.onionphone.securemessenger.core.proxy.OnionVpnConstants
 import ltechnologies.onionphone.securemessenger.core.proxy.ProxyConfigNormalizer
 import ltechnologies.onionphone.securemessenger.ui.MainViewModel
 
 private const val DEFAULT_SOCKS_PORT = 9050
+
+private fun TorProvider.label(): String = when (this) {
+    TorProvider.ONIONVPN -> "OnionVPN"
+    TorProvider.ORBOT -> "Orbot"
+    TorProvider.INVIZIBLE -> "InviZible"
+    TorProvider.CUSTOM -> "Custom"
+}
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -87,30 +95,54 @@ fun ProxyScreen(
                 Text("Routage Tor (optionnel)")
                 Text(
                     "Désactivé par défaut (clearnet). Signal utilise toujours le clearnet. " +
-                        "Matrix / XMPP / Telegram peuvent passer par SOCKS5 si vous activez Tor.",
+                        "Matrix / XMPP / Telegram peuvent passer par le pont SOCKS OnionVPN (PAC).",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             Switch(
                 checked = torRequired,
-                onCheckedChange = { torRequired = it },
+                onCheckedChange = { enabled ->
+                    torRequired = enabled
+                    if (enabled && torProvider == TorProvider.CUSTOM &&
+                        host == "127.0.0.1" && (port == "9050" || port.isBlank())
+                    ) {
+                        torProvider = TorProvider.ONIONVPN
+                    }
+                },
             )
         }
 
         if (torRequired) {
-            Text("Fournisseur Tor : ${torProvider.name}")
+            Text("Fournisseur Tor : ${torProvider.label()}")
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 TorProvider.entries.forEach { provider ->
                     FilterChip(
                         selected = torProvider == provider,
                         onClick = { torProvider = provider },
-                        label = { Text(provider.name) },
+                        label = { Text(provider.label()) },
                     )
                 }
             }
 
             when (torProvider) {
+                TorProvider.ONIONVPN -> {
+                    Text("OnionVPN installé : ${proxyStatus.onionVpnInstalled}")
+                    Text("PAC : ${proxyStatus.pacUrl}")
+                    Text(
+                        "SOCKS (DNSCrypt→Tor) : ${savedConfig.host}:${savedConfig.port}",
+                    )
+                    Text("Pont opérationnel : ${proxyStatus.onionVpnRunning}")
+                    proxyStatus.lastCheckLatencyMs?.let {
+                        Text("Dernier test SOCKS+DNS : ${it}ms")
+                    }
+                    Text(
+                        "Le client lit ${OnionVpnConstants.PAC_URL} pour découvrir le SOCKS " +
+                            "(pas d’auth côté app — le pont gère IsolateSOCKSAuth).",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 TorProvider.ORBOT -> {
                     Text("Orbot installé : ${proxyStatus.orbotInstalled}")
                     proxyStatus.orbotStatus?.let { Text("Statut Orbot : $it") }
@@ -127,7 +159,7 @@ fun ProxyScreen(
                     }
                 }
                 TorProvider.CUSTOM -> {
-                    Text("Proxy SOCKS5 personnalisé (Orbot, Tor daemon, etc.)")
+                    Text("Proxy SOCKS5 personnalisé (daemon Tor, etc.)")
                 }
             }
 
@@ -195,6 +227,7 @@ fun ProxyScreen(
                 onClick = { viewModel.requestTorStart() },
                 modifier = Modifier.fillMaxWidth(),
                 enabled = when (torProvider) {
+                    TorProvider.ONIONVPN -> true
                     TorProvider.ORBOT -> proxyStatus.orbotInstalled
                     TorProvider.INVIZIBLE -> proxyStatus.invizibleInstalled
                     TorProvider.CUSTOM -> true
@@ -202,11 +235,22 @@ fun ProxyScreen(
             ) {
                 Text(
                     when (torProvider) {
+                        TorProvider.ONIONVPN ->
+                            if (proxyStatus.onionVpnInstalled) "Ouvrir OnionVPN" else "Installer OnionVPN"
                         TorProvider.ORBOT -> "Interroger Orbot"
                         TorProvider.INVIZIBLE -> "Ouvrir InviZible"
                         TorProvider.CUSTOM -> "Rafraîchir le test proxy"
                     },
                 )
+            }
+
+            if (torProvider == TorProvider.ONIONVPN && !proxyStatus.onionVpnInstalled) {
+                Button(
+                    onClick = { viewModel.openOnionVpnReleases() },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Télécharger OnionVPN")
+                }
             }
 
             if (torProvider == TorProvider.INVIZIBLE && !proxyStatus.invizibleInstalled) {

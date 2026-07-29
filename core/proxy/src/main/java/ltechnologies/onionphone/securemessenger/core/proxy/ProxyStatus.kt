@@ -6,6 +6,9 @@ import ltechnologies.onionphone.securemessenger.core.model.TorProvider
 data class ProxyStatus(
     val config: ProxyConfig,
     val torProvider: TorProvider = config.torProvider,
+    val onionVpnInstalled: Boolean = false,
+    val onionVpnRunning: Boolean = false,
+    val pacUrl: String = OnionVpnConstants.PAC_URL,
     val orbotInstalled: Boolean = false,
     val orbotTorOn: Boolean = false,
     val orbotStatus: String? = null,

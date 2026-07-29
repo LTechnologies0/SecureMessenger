@@ -6,8 +6,6 @@ import android.content.Intent
 import android.content.IntentFilter
 import androidx.core.content.ContextCompat
 import dagger.hilt.android.qualifiers.ApplicationContext
-import java.net.InetSocketAddress
-import java.net.Socket
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CompletableDeferred
@@ -24,7 +22,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
 import ltechnologies.onionphone.securemessenger.core.model.ProxyConfig
 import ltechnologies.onionphone.securemessenger.core.model.TorProvider
 import timber.log.Timber
@@ -33,6 +30,7 @@ import timber.log.Timber
 class ProxyManager @Inject constructor(
     @ApplicationContext private val context: Context,
     private val invizibleHelper: InvizibleHelper,
+    private val onionVpnHelper: OnionVpnHelper,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val refreshMutex = Mutex()
@@ -43,12 +41,13 @@ class ProxyManager @Inject constructor(
         ProxyStatus(
             config = ProxyConfigNormalizer.normalize(
                 ProxyConfig(
-                    host = OrbotConstants.SOCKS_HOST,
-                    port = OrbotConstants.SOCKS_PORT,
+                    host = OnionVpnConstants.DEFAULT_BRIDGE_HOST,
+                    port = OnionVpnConstants.DEFAULT_BRIDGE_PORT,
                     torRequired = false,
-                    torProvider = TorProvider.CUSTOM,
+                    torProvider = TorProvider.ONIONVPN,
                 ),
             ),
+            pacUrl = OnionVpnConstants.PAC_URL,
         ),
     )
     val status: StateFlow<ProxyStatus> = _status.asStateFlow()
@@ -57,7 +56,12 @@ class ProxyManager @Inject constructor(
 
     init {
         registerOrbotReceiver()
-        _status.update { it.copy(orbotInstalled = isOrbotInstalled()) }
+        _status.update {
+            it.copy(
+                orbotInstalled = isOrbotInstalled(),
+                onionVpnInstalled = onionVpnHelper.isInstalled(),
+            )
+        }
         if (isOrbotInstalled()) {
             OrbotHelper.requestStatusBroadcast(context)
         }
@@ -65,9 +69,13 @@ class ProxyManager @Inject constructor(
     }
 
     fun updateConfig(config: ProxyConfig) {
-        val resolved = resolveConfigForProvider(ProxyConfigNormalizer.normalize(config))
-        _status.update { it.copy(config = resolved, torProvider = resolved.torProvider) }
-        refreshStatus()
+        scope.launch {
+            refreshMutex.withLock {
+                val resolved = resolveConfigForProvider(ProxyConfigNormalizer.normalize(config))
+                _status.update { it.copy(config = resolved, torProvider = resolved.torProvider) }
+                runHealthCheck(requestOrbotStatus = false)
+            }
+        }
     }
 
     fun setTorProvider(provider: TorProvider) {
@@ -115,6 +123,12 @@ class ProxyManager @Inject constructor(
 
     suspend fun requestTorStart(): Boolean = withContext(Dispatchers.IO) {
         when (_status.value.config.torProvider) {
+            TorProvider.ONIONVPN -> {
+                onionVpnHelper.openAppOrReleases()
+                delay(800)
+                refreshStatusAndWait()
+                _status.value.proxyHealthy
+            }
             TorProvider.ORBOT -> requestOrbotStart()
             TorProvider.INVIZIBLE -> requestInvizibleTorUi()
             TorProvider.CUSTOM -> {
@@ -141,6 +155,7 @@ class ProxyManager @Inject constructor(
         val config = _status.value.config
         val orbotInstalled = isOrbotInstalled()
         val invizibleInstalled = invizibleHelper.isInstalled()
+        val onionVpnInstalled = onionVpnHelper.isInstalled()
 
         if (requestOrbotStatus && orbotInstalled && config.torProvider == TorProvider.ORBOT) {
             OrbotHelper.requestStatusBroadcast(context)
@@ -159,6 +174,9 @@ class ProxyManager @Inject constructor(
             it.copy(
                 config = resolved.copy(host = endpointHost),
                 torProvider = resolved.torProvider,
+                onionVpnInstalled = onionVpnInstalled,
+                onionVpnRunning = healthy && resolved.torProvider == TorProvider.ONIONVPN,
+                pacUrl = OnionVpnConstants.PAC_URL,
                 orbotInstalled = orbotInstalled,
                 orbotTorOn = orbot?.torRunning == true,
                 orbotStatus = orbot?.status,
@@ -200,14 +218,21 @@ class ProxyManager @Inject constructor(
     ): String {
         val base = (check as? SocksCheckResult.Failure)?.reason
             ?: "SOCKS proxy unreachable at ${config.host}:${config.port}"
-        return when {
-            config.torProvider == TorProvider.ORBOT && orbot != null && !orbot.torRunning ->
-                "Orbot n'est pas démarré (statut ${orbot.status}). Ouvrez Orbot et activez Tor."
-            config.torProvider == TorProvider.ORBOT && orbot != null ->
-                "SOCKS Orbot ${orbot.socksHost}:${orbot.socksPort} injoignable — $base"
-            config.torProvider == TorProvider.CUSTOM ->
+        return when (config.torProvider) {
+            TorProvider.ONIONVPN ->
+                "OnionVPN SOCKS ${config.host}:${config.port} injoignable — " +
+                    "démarrez le tunnel OnionVPN ($base). PAC : ${OnionVpnConstants.PAC_URL}"
+            TorProvider.ORBOT -> when {
+                orbot != null && !orbot.torRunning ->
+                    "Orbot n'est pas démarré (statut ${orbot.status}). Ouvrez Orbot et activez Tor."
+                orbot != null ->
+                    "SOCKS Orbot ${orbot.socksHost}:${orbot.socksPort} injoignable — $base"
+                else -> base
+            }
+            TorProvider.INVIZIBLE ->
+                "SOCKS InviZible ${config.host}:${config.port} — $base"
+            TorProvider.CUSTOM ->
                 "SOCKS CUSTOM ${config.host}:${config.port} — $base"
-            else -> base
         }
     }
 
@@ -217,6 +242,24 @@ class ProxyManager @Inject constructor(
     fun isOrbotInstalled(): Boolean = OrbotHelper.isInstalled(context)
 
     private fun resolveConfigForProvider(config: ProxyConfig): ProxyConfig = when (config.torProvider) {
+        TorProvider.ONIONVPN -> {
+            val endpoint = OnionVpnPacClient.resolveSocksEndpoint().getOrElse {
+                Timber.d(it, "OnionVPN PAC resolve failed; using fallback")
+                OnionVpnSocksEndpoint(
+                    host = OnionVpnConstants.DEFAULT_BRIDGE_HOST,
+                    port = OnionVpnConstants.DEFAULT_BRIDGE_PORT,
+                    fromPac = false,
+                )
+            }
+            ProxyConfigNormalizer.normalize(
+                config.copy(
+                    host = endpoint.host,
+                    port = endpoint.port,
+                    username = null,
+                    password = null,
+                ),
+            )
+        }
         TorProvider.ORBOT -> {
             val orbot = lastOrbotStatus
             ProxyConfigNormalizer.normalize(

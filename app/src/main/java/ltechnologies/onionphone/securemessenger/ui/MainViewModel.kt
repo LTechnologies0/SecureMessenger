@@ -27,6 +27,7 @@ import ltechnologies.onionphone.securemessenger.core.model.RegistrationRequest
 import ltechnologies.onionphone.securemessenger.core.model.RegistrationResult
 import ltechnologies.onionphone.securemessenger.core.model.SanitizedText
 import ltechnologies.onionphone.securemessenger.core.proxy.InvizibleHelper
+import ltechnologies.onionphone.securemessenger.core.proxy.OnionVpnHelper
 import ltechnologies.onionphone.securemessenger.core.proxy.ProxyManager
 import ltechnologies.onionphone.securemessenger.core.proxy.ProxyStatus
 import ltechnologies.onionphone.securemessenger.core.proxy.SocksEndpointResolver
@@ -41,6 +42,7 @@ class MainViewModel @Inject constructor(
     private val connectionManager: ConnectionManager,
     private val proxyManager: ProxyManager,
     private val invizibleHelper: InvizibleHelper,
+    private val onionVpnHelper: OnionVpnHelper,
 ) : ViewModel() {
 
     val conversations: StateFlow<List<Conversation>> = repository.observeConversations()
@@ -322,6 +324,10 @@ class MainViewModel @Inject constructor(
 
     fun openInvizibleStore() {
         invizibleHelper.openStoreListing()
+    }
+
+    fun openOnionVpnReleases() {
+        onionVpnHelper.openAppOrReleases()
     }
 
     /** Reachable SOCKS host/port for the current proxy — used by the registration WebView fallback. */
