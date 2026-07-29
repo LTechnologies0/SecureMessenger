@@ -81,8 +81,8 @@ fun SignalLoginScreen(
         }
     }
 
-    LaunchedEffect(accountId, step) {
-        if (accountId == null || step != SignalLoginStep.PHONE) return@LaunchedEffect
+    LaunchedEffect(accountId) {
+        val id = accountId ?: return@LaunchedEffect
         val protocol = viewModel.signalProtocol() ?: return@LaunchedEffect
         protocol.observePendingAuthStep().collectLatest { authStep ->
             if (authStep == null) return@collectLatest

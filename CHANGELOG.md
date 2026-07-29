@@ -10,6 +10,8 @@
 ### Signal
 - **Accès Signal sans Tor** : plus de `SignalTor` / SOCKS / `Network.setProxy` (Signal bloque beaucoup d’exits Tor)
 - Inscription / sync / envoi en clearnet ; UI et messages mis à jour
+- Fix UI : observation des étapes captcha → SMS → PIN pendant tout le flux (plus bloqué après le captcha)
+- Erreurs réseau d’inscription remontées en `ConnectionResult.Failure` (plus confondues avec l’étape SMS)
 
 ## 1.0.0-alpha.3
 

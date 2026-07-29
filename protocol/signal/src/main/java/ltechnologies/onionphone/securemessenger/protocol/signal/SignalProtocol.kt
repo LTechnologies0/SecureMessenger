@@ -117,8 +117,14 @@ class SignalProtocol @Inject constructor(
                 pendingPreKeys = SignalPreKeyMaterial.generate()
 
                 val outcome = registrationFlow!!.startSession(e164, password)
-                applyRegistrationOutcome(outcome)
-                ConnectionResult.Success
+                val applied = applyRegistrationOutcome(outcome)
+                when (val failed = applied.step as? SignalRegistrationStep.Failed) {
+                    null -> ConnectionResult.Success
+                    else -> {
+                        _connectionState.value = ConnectionState.ERROR
+                        ConnectionResult.Failure(failed.reason)
+                    }
+                }
             } catch (e: Exception) {
                 Timber.e(e, "Signal connect failed")
                 _connectionState.value = ConnectionState.ERROR
@@ -179,11 +185,13 @@ class SignalProtocol @Inject constructor(
                     }
                     else -> return@withContext ConnectionResult.Failure("Étape d'authentification inconnue")
                 }
-                applyRegistrationOutcome(outcome)
-                if (outcome.step == SignalRegistrationStep.Complete) {
-                    ConnectionResult.Success
-                } else {
-                    ConnectionResult.Success
+                val applied = applyRegistrationOutcome(outcome)
+                when (val failed = applied.step as? SignalRegistrationStep.Failed) {
+                    null -> ConnectionResult.Success
+                    else -> {
+                        _connectionState.value = ConnectionState.ERROR
+                        ConnectionResult.Failure(failed.reason)
+                    }
                 }
             } catch (e: Exception) {
                 ConnectionResult.Failure(e.message ?: "Authentification échouée")
@@ -200,8 +208,11 @@ class SignalProtocol @Inject constructor(
             val outcome = kotlinx.coroutines.runBlocking(signalDispatcher) {
                 flow.requestSms(e164, password, sessionId)
             }
-            kotlinx.coroutines.runBlocking { applyRegistrationOutcome(outcome) }
-            ConnectionResult.Success
+            val applied = kotlinx.coroutines.runBlocking { applyRegistrationOutcome(outcome) }
+            when (val failed = applied.step as? SignalRegistrationStep.Failed) {
+                null -> ConnectionResult.Success
+                else -> ConnectionResult.Failure(failed.reason)
+            }
         } catch (e: Exception) {
             ConnectionResult.Failure(e.message ?: "Renvoi SMS échoué")
         }
@@ -217,14 +228,17 @@ class SignalProtocol @Inject constructor(
             val outcome = kotlinx.coroutines.runBlocking(signalDispatcher) {
                 flow.requestSms(e164, password, sessionId)
             }
-            kotlinx.coroutines.runBlocking { applyRegistrationOutcome(outcome) }
-            ConnectionResult.Success
+            val applied = kotlinx.coroutines.runBlocking { applyRegistrationOutcome(outcome) }
+            when (val failed = applied.step as? SignalRegistrationStep.Failed) {
+                null -> ConnectionResult.Success
+                else -> ConnectionResult.Failure(failed.reason)
+            }
         } catch (e: Exception) {
             ConnectionResult.Failure(e.message ?: "Demande SMS échouée")
         }
     }
 
-    private suspend fun applyRegistrationOutcome(outcome: SignalRegistrationOutcome) {
+    private suspend fun applyRegistrationOutcome(outcome: SignalRegistrationOutcome): SignalRegistrationOutcome {
         pendingSessionId = outcome.sessionId
         when (outcome.step) {
             SignalRegistrationStep.CaptchaRequired -> {
@@ -234,6 +248,7 @@ class SignalProtocol @Inject constructor(
                     fields = listOf("captcha"),
                 )
                 _connectionState.value = ConnectionState.CONNECTING
+                return outcome
             }
             SignalRegistrationStep.RequestSms -> {
                 if (proxyConfig != null && outcome.sessionId != null) {
@@ -242,14 +257,14 @@ class SignalProtocol @Inject constructor(
                         pendingPassword!!,
                         outcome.sessionId,
                     )
-                    applyRegistrationOutcome(smsOutcome)
-                    return
+                    return applyRegistrationOutcome(smsOutcome)
                 }
                 _pendingAuthStep.value = AuthStep(
                     kind = AuthStepKind.SIGNAL_SMS_CODE,
                     prompt = outcome.message ?: "Code SMS requis",
                     fields = listOf("code"),
                 )
+                return outcome
             }
             SignalRegistrationStep.SmsCodeRequired -> {
                 _pendingAuthStep.value = AuthStep(
@@ -258,6 +273,7 @@ class SignalProtocol @Inject constructor(
                     fields = listOf("code"),
                 )
                 _connectionState.value = ConnectionState.CONNECTING
+                return outcome
             }
             SignalRegistrationStep.PinRequired -> {
                 _pendingAuthStep.value = AuthStep(
@@ -266,9 +282,10 @@ class SignalProtocol @Inject constructor(
                     fields = listOf("pin"),
                 )
                 _connectionState.value = ConnectionState.CONNECTING
+                return outcome
             }
             SignalRegistrationStep.Complete -> {
-                val creds = outcome.credentials ?: return
+                val creds = outcome.credentials ?: return outcome
                 val accId = accountId ?: UUID.randomUUID().toString()
                 accountId = accId
                 creds.forEach { (k, v) -> credentialStore.put(accId, k, v) }
@@ -291,6 +308,12 @@ class SignalProtocol @Inject constructor(
                 _pendingAuthStep.value = null
                 _connectionState.value = ConnectionState.CONNECTED
                 SignalForegroundService.start(context, accId)
+                return outcome
+            }
+            is SignalRegistrationStep.Failed -> {
+                _pendingAuthStep.value = null
+                _connectionState.value = ConnectionState.ERROR
+                return outcome
             }
         }
     }
