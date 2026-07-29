@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.0-alpha.5
+
+### UI
+- « Ajouter un compte » : liste **scrollable**, **Signal en premier**, libellés explicites
+  (Signal était hors écran sous Telegram — pas de scroll)
+
+### Network / Signal
+- Hérité de 1.0.0-alpha.4 (Signal clearnet, Tor optionnel, killswitch retiré)
+- version `1.0.0-alpha.5` (versionCode 5)
+
 ## 1.0.0-alpha.4
 
 ### Network
