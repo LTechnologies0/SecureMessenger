@@ -47,7 +47,7 @@ object SocksEndpointResolver {
      */
     fun resolveReachableHost(configuredHost: String, port: Int = DEFAULT_SOCKS_PORT): String {
         val normalized = ProxyConfigNormalizer.normalizeHost(configuredHost)
-        if (normalized != InvizibleConstants.LOOPBACK) return normalized
+        if (normalized != OnionVpnConstants.LOOPBACK) return normalized
 
         val cacheKey = "$normalized:$port"
         val now = System.currentTimeMillis()
@@ -89,7 +89,7 @@ object SocksEndpointResolver {
     /** Host-side Tor bridges (emulator alias, Waydroid gateway, loopback). */
     fun isHostBridgeEndpoint(host: String): Boolean {
         val normalized = ProxyConfigNormalizer.normalizeHost(host)
-        if (normalized == InvizibleConstants.LOOPBACK) return true
+        if (normalized == OnionVpnConstants.LOOPBACK) return true
         if (normalized == EMULATOR_HOST_ALIAS) return true
         if (normalized == WAYDROID_BRIDGE) return true
         readDefaultGateway()?.let { if (normalized == it) return true }

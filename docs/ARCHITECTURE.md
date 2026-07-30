@@ -86,7 +86,7 @@ core/network — NetworkGuard (blocks only when Tor is opted-in and SOCKS is dow
 OnionVPN PAC bridge → Tor → destination
 ```
 
-\* Signal stays clearnet by design. Default Tor provider is OnionVPN; Orbot / InviZible / custom SOCKS remain selectable.
+\* Default Tor provider is OnionVPN PAC (`:18201` / SOCKS `:18202`). Custom SOCKS remains selectable. Orbot / InviZible removed. When Tor is on, Signal uses `SignalSocksHolder` like other protocols.
 
 Matrix and XMPP UIA/registration steps that require a browser (captcha, email verification, terms acceptance) open an in-app WebView that is force-routed through the same Tor proxy via `androidx.webkit.ProxyController` — no direct network path ever exists for any component, including the WebView.
 

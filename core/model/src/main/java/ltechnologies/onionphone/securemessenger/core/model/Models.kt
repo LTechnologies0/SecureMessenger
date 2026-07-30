@@ -46,15 +46,22 @@ data class AccountCredentials(
 enum class TorProvider {
     /**
      * OnionVPN PAC bridge (`http://127.0.0.1:18201/onionvpn.pac` → SOCKS5 `:18202`).
-     * Preferred: DNS via DNSCrypt, then Tor by IP (no Tor exit DNS).
+     * DNS via DNSCrypt, then Tor by IP (no Tor exit DNS).
      */
     ONIONVPN,
-    /** Guardian Project Orbot (`org.torproject.android`). */
-    ORBOT,
-    /** InviZible Pro (`pan.alexander.tordnscrypt.*`). */
-    INVIZIBLE,
     /** Manual SOCKS5 endpoint (any Tor client). */
     CUSTOM,
+    ;
+
+    companion object {
+        /** Maps legacy Orbot/InviZible prefs to OnionVPN. */
+        fun fromStored(name: String?): TorProvider = when (name?.uppercase()) {
+            "ORBOT", "INVIZIBLE" -> ONIONVPN
+            "CUSTOM" -> CUSTOM
+            "ONIONVPN" -> ONIONVPN
+            else -> runCatching { valueOf(name ?: "") }.getOrDefault(ONIONVPN)
+        }
+    }
 }
 
 data class ProxyConfig(
@@ -78,6 +85,8 @@ enum class AuthStepKind {
     SIGNAL_SMS_CODE,
     SIGNAL_CAPTCHA,
     SIGNAL_PIN,
+    /** Secondary device link: [AuthStep.url] holds the `sgnl://linkdevice?...` QR payload. */
+    SIGNAL_DEVICE_LINK,
 }
 
 data class AuthStep(

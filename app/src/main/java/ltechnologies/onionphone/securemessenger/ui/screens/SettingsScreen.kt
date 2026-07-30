@@ -48,6 +48,7 @@ fun SettingsScreen(
 ) {
     val lockState by appLockManager.state.collectAsState()
     val accounts = viewModel?.accounts?.collectAsState()?.value.orEmpty()
+    val proxyStatus = viewModel?.proxyStatus?.collectAsState()?.value
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
@@ -99,7 +100,13 @@ fun SettingsScreen(
                 leadingContent = { Icon(Icons.Default.VpnKey, contentDescription = null) },
                 headlineContent = { Text("Proxy / Tor") },
                 supportingContent = {
-                    Text("Tout le trafic passe exclusivement par Tor (fail-closed)")
+                    Text(
+                        if (proxyStatus?.config?.torRequired == true) {
+                            "Tor via OnionVPN PAC (tous protocoles)"
+                        } else {
+                            "Clearnet (Tor désactivé)"
+                        },
+                    )
                 },
                 trailingContent = {
                     TextButton(onClick = onOpenProxy) { Text("Ouvrir") }

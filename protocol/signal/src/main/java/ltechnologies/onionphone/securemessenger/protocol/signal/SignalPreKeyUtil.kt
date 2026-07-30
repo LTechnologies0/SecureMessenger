@@ -19,7 +19,7 @@ internal data class SignalPreKeyMaterial(
     val aciPreKeys: PreKeyCollection,
     val pniPreKeys: PreKeyCollection,
 ) {
-    fun toSecrets(password: String, pin: String?): Map<String, String> = mapOf(
+    fun toSecrets(password: String, pin: String?, deviceId: String = "1"): Map<String, String> = mapOf(
         SignalCredentialKeys.ACI_IDENTITY to Base64.encodeToString(aciIdentity.serialize(), Base64.NO_WRAP),
         SignalCredentialKeys.PNI_IDENTITY to Base64.encodeToString(pniIdentity.serialize(), Base64.NO_WRAP),
         SignalCredentialKeys.ACI_REGISTRATION_ID to aciRegistrationId.toString(),
@@ -29,7 +29,7 @@ internal data class SignalPreKeyMaterial(
         SignalCredentialKeys.ACI_KYBER_PREKEY to Base64.encodeToString(aciPreKeys.lastResortKyberPreKey.serialize(), Base64.NO_WRAP),
         SignalCredentialKeys.PNI_KYBER_PREKEY to Base64.encodeToString(pniPreKeys.lastResortKyberPreKey.serialize(), Base64.NO_WRAP),
         SignalCredentialKeys.PASSWORD to password,
-        SignalCredentialKeys.DEVICE_ID to "1",
+        SignalCredentialKeys.DEVICE_ID to deviceId,
         SignalCredentialKeys.SESSION_READY to "true",
     ) + if (pin != null) mapOf(SignalCredentialKeys.REGISTRATION_PIN to pin) else emptyMap()
 
@@ -60,10 +60,29 @@ internal data class SignalPreKeyMaterial(
         )
     }
 
+    fun buildDeviceAttributes(deviceName: String): org.whispersystems.signalservice.api.account.DeviceAttributes =
+        org.whispersystems.signalservice.api.account.DeviceAttributes(
+            fetchesMessages = true,
+            registrationId = aciRegistrationId,
+            pniRegistrationId = pniRegistrationId,
+            name = deviceName,
+            capabilities = AccountAttributes.Capabilities(
+                storage = true,
+                versionedExpirationTimer = true,
+                attachmentBackfill = true,
+                spqr = true,
+                usernameChangeSyncMessage = true,
+            ),
+        )
+
     companion object {
         fun generate(): SignalPreKeyMaterial {
             val aciIdentity = IdentityKeyPair.generate()
             val pniIdentity = IdentityKeyPair.generate()
+            return fromIdentities(aciIdentity, pniIdentity)
+        }
+
+        fun fromIdentities(aciIdentity: IdentityKeyPair, pniIdentity: IdentityKeyPair): SignalPreKeyMaterial {
             val aciRegistrationId = KeyHelper.generateRegistrationId(false)
             val pniRegistrationId = KeyHelper.generateRegistrationId(false)
             val aciSigned = generateSignedPreKey(aciIdentity, 1)

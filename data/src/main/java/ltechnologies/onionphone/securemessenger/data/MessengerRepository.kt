@@ -48,8 +48,7 @@ class MessengerRepository @Inject constructor(
                         username = it.username,
                         torRequired = it.torRequired,
                         remoteDns = it.remoteDns,
-                        torProvider = runCatching { TorProvider.valueOf(it.torProvider) }
-                            .getOrDefault(TorProvider.ONIONVPN),
+                        torProvider = TorProvider.fromStored(it.torProvider),
                     )
                 }
             },

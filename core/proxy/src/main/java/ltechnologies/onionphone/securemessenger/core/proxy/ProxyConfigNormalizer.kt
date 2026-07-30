@@ -17,7 +17,7 @@ object ProxyConfigNormalizer {
     }
 
     fun normalizeHost(host: String): String = when (host.trim().lowercase()) {
-        "", "localhost", "::1" -> OrbotConstants.SOCKS_HOST
+        "", "localhost", "::1" -> OnionVpnConstants.LOOPBACK
         else -> host.trim()
     }
 
@@ -39,22 +39,6 @@ object ProxyConfigNormalizer {
                 torRequired = torRequired,
                 remoteDns = torRequired,
                 torProvider = TorProvider.ONIONVPN,
-            ),
-        )
-        TorProvider.ORBOT -> normalize(
-            resolvedStatus.copy(
-                torProvider = TorProvider.ORBOT,
-                username = null,
-                password = null,
-                torRequired = torRequired,
-            ),
-        )
-        TorProvider.INVIZIBLE -> normalize(
-            resolvedStatus.copy(
-                torProvider = TorProvider.INVIZIBLE,
-                username = null,
-                password = null,
-                torRequired = torRequired,
             ),
         )
         TorProvider.CUSTOM -> normalize(

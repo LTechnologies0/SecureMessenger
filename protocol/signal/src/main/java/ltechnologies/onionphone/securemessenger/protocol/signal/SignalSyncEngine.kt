@@ -13,7 +13,7 @@ import org.whispersystems.signalservice.api.websocket.WebSocketUnavailableExcept
 import timber.log.Timber
 
 /**
- * Websocket message receiver (clearnet — Signal blocks many Tor exits).
+ * Websocket message receiver (honors Tor via SignalSocksHolder when enabled).
  * Drains the authenticated websocket queue, decrypts envelopes, and persists locally.
  */
 internal class SignalSyncEngine(

@@ -12,14 +12,10 @@ import ltechnologies.onionphone.securemessenger.core.model.ProxyConfig
 import ltechnologies.onionphone.securemessenger.core.proxy.SocksEndpointResolver
 import okhttp3.OkHttpClient
 
-/** Builds a SOCKS-proxied Ktor HTTP client for raw Matrix CS API calls (login, register, ...). */
+/** Builds a Ktor HTTP client for Matrix CS API; SOCKS only when [ProxyConfig.torRequired]. */
 internal object MatrixHttpClientFactory {
     fun create(proxy: ProxyConfig): HttpClient {
-        val socksHost = SocksEndpointResolver.resolveReachableHost(proxy.host, proxy.port)
-        requireSocksReachable(socksHost, proxy.port)
-        val okhttp = OkHttpClient.Builder()
-            .proxy(Proxy(Proxy.Type.SOCKS, InetSocketAddress(socksHost, proxy.port)))
-            .build()
+        val okhttp = buildOkHttp(proxy)
         return HttpClient(OkHttp) {
             engine { preconfigured = okhttp }
             install(ContentNegotiation) {
@@ -28,6 +24,16 @@ internal object MatrixHttpClientFactory {
                 json(Json { ignoreUnknownKeys = true; encodeDefaults = true })
             }
         }
+    }
+
+    fun buildOkHttp(proxy: ProxyConfig): OkHttpClient {
+        val builder = OkHttpClient.Builder()
+        if (proxy.torRequired) {
+            val socksHost = SocksEndpointResolver.resolveReachableHost(proxy.host, proxy.port)
+            requireSocksReachable(socksHost, proxy.port)
+            builder.proxy(Proxy(Proxy.Type.SOCKS, InetSocketAddress(socksHost, proxy.port)))
+        }
+        return builder.build()
     }
 
     private fun requireSocksReachable(host: String, port: Int) {

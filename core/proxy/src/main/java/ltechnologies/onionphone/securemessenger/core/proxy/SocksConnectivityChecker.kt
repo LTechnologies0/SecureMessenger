@@ -36,9 +36,9 @@ object SocksConnectivityChecker {
         proxyPort: Int,
         username: String? = null,
         password: String? = null,
-        dnsHost: String = InvizibleConstants.DNS_PROBE_HOST,
-        dnsPort: Int = InvizibleConstants.DNS_PROBE_PORT,
-        timeoutMs: Int = InvizibleConstants.CONNECT_TIMEOUT_MS,
+        dnsHost: String = OnionVpnConstants.DNS_PROBE_HOST,
+        dnsPort: Int = OnionVpnConstants.DNS_PROBE_PORT,
+        timeoutMs: Int = OnionVpnConstants.SOCKS_CHECK_TIMEOUT_MS,
         remoteDns: Boolean = true,
     ): SocksCheckResult = withContext(Dispatchers.IO) {
         val normalizedHost = ProxyConfigNormalizer.normalizeHost(proxyHost)

@@ -32,12 +32,10 @@ import ltechnologies.onionphone.securemessenger.core.proxy.OnionVpnConstants
 import ltechnologies.onionphone.securemessenger.core.proxy.ProxyConfigNormalizer
 import ltechnologies.onionphone.securemessenger.ui.MainViewModel
 
-private const val DEFAULT_SOCKS_PORT = 9050
+private const val DEFAULT_CUSTOM_SOCKS_PORT = 9050
 
 private fun TorProvider.label(): String = when (this) {
     TorProvider.ONIONVPN -> "OnionVPN"
-    TorProvider.ORBOT -> "Orbot"
-    TorProvider.INVIZIBLE -> "InviZible"
     TorProvider.CUSTOM -> "Custom"
 }
 
@@ -94,8 +92,8 @@ fun ProxyScreen(
             Column(modifier = Modifier.weight(1f)) {
                 Text("Routage Tor (optionnel)")
                 Text(
-                    "Désactivé par défaut (clearnet). Signal utilise toujours le clearnet. " +
-                        "Matrix / XMPP / Telegram peuvent passer par le pont SOCKS OnionVPN (PAC).",
+                    "Désactivé par défaut (clearnet). Activé : tous les protocoles " +
+                        "(Signal inclus) passent par le pont SOCKS OnionVPN (PAC).",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -129,9 +127,7 @@ fun ProxyScreen(
                 TorProvider.ONIONVPN -> {
                     Text("OnionVPN installé : ${proxyStatus.onionVpnInstalled}")
                     Text("PAC : ${proxyStatus.pacUrl}")
-                    Text(
-                        "SOCKS (DNSCrypt→Tor) : ${savedConfig.host}:${savedConfig.port}",
-                    )
+                    Text("SOCKS (DNSCrypt→Tor) : ${savedConfig.host}:${savedConfig.port}")
                     Text("Pont opérationnel : ${proxyStatus.onionVpnRunning}")
                     proxyStatus.lastCheckLatencyMs?.let {
                         Text("Dernier test SOCKS+DNS : ${it}ms")
@@ -142,21 +138,6 @@ fun ProxyScreen(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                }
-                TorProvider.ORBOT -> {
-                    Text("Orbot installé : ${proxyStatus.orbotInstalled}")
-                    proxyStatus.orbotStatus?.let { Text("Statut Orbot : $it") }
-                    Text("SOCKS Orbot : ${savedConfig.host}:${savedConfig.port}")
-                    Text("Tor actif (Orbot) : ${proxyStatus.orbotTorOn}")
-                    Text("SOCKS opérationnel : ${proxyStatus.orbotRunning}")
-                }
-                TorProvider.INVIZIBLE -> {
-                    Text("InviZible installé : ${proxyStatus.invizibleInstalled}")
-                    Text("SOCKS InviZible : ${savedConfig.host}:${savedConfig.port}")
-                    Text("SOCKS opérationnel : ${proxyStatus.invizibleRunning}")
-                    proxyStatus.lastCheckLatencyMs?.let {
-                        Text("Dernier test SOCKS+DNS : ${it}ms")
-                    }
                 }
                 TorProvider.CUSTOM -> {
                     Text("Proxy SOCKS5 personnalisé (daemon Tor, etc.)")
@@ -178,7 +159,7 @@ fun ProxyScreen(
                     value = port,
                     onValueChange = { port = it },
                     label = { Text("Port SOCKS5") },
-                    placeholder = { Text(DEFAULT_SOCKS_PORT.toString()) },
+                    placeholder = { Text(DEFAULT_CUSTOM_SOCKS_PORT.toString()) },
                     modifier = Modifier.fillMaxWidth(),
                 )
                 OutlinedTextField(
@@ -209,7 +190,7 @@ fun ProxyScreen(
                 val config = ProxyConfigNormalizer.configForSave(
                     torProvider = torProvider,
                     customHost = host,
-                    customPort = port.toIntOrNull() ?: DEFAULT_SOCKS_PORT,
+                    customPort = port.toIntOrNull() ?: DEFAULT_CUSTOM_SOCKS_PORT,
                     resolvedStatus = savedConfig,
                     username = username,
                     password = password.ifBlank { savedConfig.password },
@@ -226,19 +207,11 @@ fun ProxyScreen(
             Button(
                 onClick = { viewModel.requestTorStart() },
                 modifier = Modifier.fillMaxWidth(),
-                enabled = when (torProvider) {
-                    TorProvider.ONIONVPN -> true
-                    TorProvider.ORBOT -> proxyStatus.orbotInstalled
-                    TorProvider.INVIZIBLE -> proxyStatus.invizibleInstalled
-                    TorProvider.CUSTOM -> true
-                },
             ) {
                 Text(
                     when (torProvider) {
                         TorProvider.ONIONVPN ->
                             if (proxyStatus.onionVpnInstalled) "Ouvrir OnionVPN" else "Installer OnionVPN"
-                        TorProvider.ORBOT -> "Interroger Orbot"
-                        TorProvider.INVIZIBLE -> "Ouvrir InviZible"
                         TorProvider.CUSTOM -> "Rafraîchir le test proxy"
                     },
                 )
@@ -250,15 +223,6 @@ fun ProxyScreen(
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text("Télécharger OnionVPN")
-                }
-            }
-
-            if (torProvider == TorProvider.INVIZIBLE && !proxyStatus.invizibleInstalled) {
-                Button(
-                    onClick = { viewModel.openInvizibleStore() },
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text("Installer InviZible")
                 }
             }
 

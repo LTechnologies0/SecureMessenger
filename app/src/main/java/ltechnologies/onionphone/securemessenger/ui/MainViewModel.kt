@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.flow.MutableStateFlow
 import ltechnologies.onionphone.securemessenger.core.model.AccountCredentials
 import ltechnologies.onionphone.securemessenger.core.model.ConnectionResult
 import ltechnologies.onionphone.securemessenger.core.model.ConnectionState
@@ -26,7 +27,6 @@ import ltechnologies.onionphone.securemessenger.core.model.ProxyConfig
 import ltechnologies.onionphone.securemessenger.core.model.RegistrationRequest
 import ltechnologies.onionphone.securemessenger.core.model.RegistrationResult
 import ltechnologies.onionphone.securemessenger.core.model.SanitizedText
-import ltechnologies.onionphone.securemessenger.core.proxy.InvizibleHelper
 import ltechnologies.onionphone.securemessenger.core.proxy.OnionVpnHelper
 import ltechnologies.onionphone.securemessenger.core.proxy.ProxyManager
 import ltechnologies.onionphone.securemessenger.core.proxy.ProxyStatus
@@ -41,7 +41,6 @@ class MainViewModel @Inject constructor(
     private val repository: MessengerRepository,
     private val connectionManager: ConnectionManager,
     private val proxyManager: ProxyManager,
-    private val invizibleHelper: InvizibleHelper,
     private val onionVpnHelper: OnionVpnHelper,
 ) : ViewModel() {
 
@@ -205,12 +204,6 @@ class MainViewModel @Inject constructor(
         }
     }
 
-    fun requestOrbot() {
-        viewModelScope.launch {
-            proxyManager.requestOrbotStart()
-        }
-    }
-
     fun requestTorStart() {
         viewModelScope.launch {
             proxyManager.requestTorStart()
@@ -272,6 +265,51 @@ class MainViewModel @Inject constructor(
         }
     }
 
+    fun startSignalDeviceLink(
+        deviceName: String = "SecureMessenger",
+        onResult: (ConnectionResult) -> Unit,
+    ) {
+        viewModelScope.launch {
+            val proxy = proxyManager.currentConfig().let { config ->
+                if (config.torRequired && !proxyManager.ensureProxyReady()) {
+                    onResult(ConnectionResult.Failure(
+                        "Tor activé mais OnionVPN indisponible — démarrez le tunnel ou désactivez Tor.",
+                    ))
+                    return@launch
+                }
+                if (config.torRequired) {
+                    config.copy(
+                        host = SocksEndpointResolver.resolveReachableHost(config.host, config.port),
+                    )
+                } else {
+                    config
+                }
+            }
+            val protocol = connectionManager.protocolFor(ProtocolId.SIGNAL) as?
+                ltechnologies.onionphone.securemessenger.protocol.signal.SignalProtocol
+            if (protocol == null) {
+                onResult(ConnectionResult.Failure("Signal non disponible"))
+                return@launch
+            }
+            onResult(protocol.startDeviceLink(deviceName, proxy))
+        }
+    }
+
+    fun cancelSignalDeviceLink() {
+        viewModelScope.launch {
+            (connectionManager.protocolFor(ProtocolId.SIGNAL)
+                as? ltechnologies.onionphone.securemessenger.protocol.signal.SignalProtocol)
+                ?.cancelDeviceLink()
+        }
+    }
+
+    fun observeSignalDeviceLinkUrl(): StateFlow<String?> {
+        val protocol = connectionManager.protocolFor(ProtocolId.SIGNAL)
+            as? ltechnologies.onionphone.securemessenger.protocol.signal.SignalProtocol
+        return protocol?.observeDeviceLinkUrl()
+            ?: MutableStateFlow(null)
+    }
+
     fun disconnectAccount(accountId: String, onResult: (Boolean) -> Unit = {}) {
         viewModelScope.launch {
             connectionManager.disconnectAccount(accountId)
@@ -320,10 +358,6 @@ class MainViewModel @Inject constructor(
                     onResult(null)
             }
         }
-    }
-
-    fun openInvizibleStore() {
-        invizibleHelper.openStoreListing()
     }
 
     fun openOnionVpnReleases() {

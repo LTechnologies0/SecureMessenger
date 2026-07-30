@@ -39,6 +39,7 @@ import ltechnologies.onionphone.securemessenger.protocol.api.MessengerProtocol
 import ltechnologies.onionphone.securemessenger.protocol.api.ProtocolNotEnabledException
 import org.signal.core.models.ServiceId.ACI
 import org.signal.core.models.ServiceId.PNI
+import org.signal.core.util.SignalSocksHolder
 import org.whispersystems.signalservice.api.crypto.ContentHint
 import org.whispersystems.signalservice.api.crypto.SealedSenderAccess
 import org.whispersystems.signalservice.api.messages.SignalServiceAttachment
@@ -46,6 +47,9 @@ import org.whispersystems.signalservice.api.messages.SignalServiceDataMessage
 import org.whispersystems.signalservice.api.push.SignalServiceAddress
 import org.whispersystems.signalservice.api.SignalServiceMessageSender
 import timber.log.Timber
+import java.net.InetSocketAddress
+import java.net.Proxy
+import ltechnologies.onionphone.securemessenger.core.proxy.SocksEndpointResolver
 
 @Singleton
 class SignalProtocol @Inject constructor(
@@ -80,6 +84,8 @@ class SignalProtocol @Inject constructor(
     private var accountId: String? = null
     private var proxyConfig: ProxyConfig? = null
     private var registrationFlow: SignalRegistrationFlow? = null
+    private var linkFlow: SignalLinkFlow? = null
+    private var linkCloseable: java.io.Closeable? = null
     private var pendingE164: String? = null
     private var pendingPassword: String? = null
     private var pendingSessionId: String? = null
@@ -87,6 +93,9 @@ class SignalProtocol @Inject constructor(
     private var session: SignalSessionContext? = null
     private var syncEngine: SignalSyncEngine? = null
     private var groupHelper: SignalGroupHelper? = null
+
+    private val _deviceLinkUrl = MutableStateFlow<String?>(null)
+    fun observeDeviceLinkUrl(): StateFlow<String?> = _deviceLinkUrl.asStateFlow()
 
     val isEnabled: Boolean get() = ProtocolId.SIGNAL in FeatureFlags.enabled
 
@@ -100,12 +109,13 @@ class SignalProtocol @Inject constructor(
             try {
                 _connectionState.value = ConnectionState.CONNECTING
                 accountId = account.accountId
-                proxyConfig = proxy.copy(torRequired = false)
+                proxyConfig = proxy
+                applySignalSocks(proxy)
                 registrationFlow = SignalRegistrationFlow(trustStore)
 
                 val secrets = account.secrets
                 if (secrets[SignalCredentialKeys.SESSION_READY] == "true") {
-                    return@withContext restoreSession(account, secrets, proxyConfig!!)
+                    return@withContext restoreSession(account, secrets, proxy)
                 }
 
                 val e164 = secrets[SignalCredentialKeys.E164]
@@ -144,8 +154,9 @@ class SignalProtocol @Inject constructor(
         if (secrets[SignalCredentialKeys.PASSWORD] == null) return ConnectionResult.Failure("Mot de passe manquant")
 
         return try {
+            applySignalSocks(proxy)
             session = SignalRuntimeFactory.open(trustStore, credentialStore, account.accountId, secrets)
-            startSync(account.accountId, proxy.copy(torRequired = false))
+            startSync(account.accountId, proxy)
             _pendingAuthStep.value = null
             _connectionState.value = ConnectionState.CONNECTED
             ConnectionResult.Success
@@ -153,6 +164,76 @@ class SignalProtocol @Inject constructor(
             Timber.e(e, "Signal session restore failed")
             _connectionState.value = ConnectionState.ERROR
             ConnectionResult.Failure(e.message ?: "Session restore failed")
+        }
+    }
+
+    /**
+     * Classic secondary-device link: shows a QR (`sgnl://linkdevice?...`) for the primary Signal app to scan.
+     */
+    suspend fun startDeviceLink(
+        deviceName: String = "SecureMessenger",
+        proxy: ProxyConfig,
+    ): ConnectionResult = withContext(signalDispatcher) {
+        if (!isEnabled) {
+            return@withContext ConnectionResult.Failure(
+                ProtocolNotEnabledException(id).message ?: "Signal not enabled",
+            )
+        }
+        try {
+            cancelDeviceLinkLocked()
+            _connectionState.value = ConnectionState.CONNECTING
+            accountId = UUID.randomUUID().toString()
+            proxyConfig = proxy
+            applySignalSocks(proxy)
+            linkFlow = SignalLinkFlow(trustStore)
+            _deviceLinkUrl.value = null
+            _pendingAuthStep.value = AuthStep(
+                kind = AuthStepKind.SIGNAL_DEVICE_LINK,
+                prompt = "Scannez ce QR depuis Signal (appareil principal) → Paramètres → Appareils liés",
+                fields = emptyList(),
+                url = null,
+            )
+            linkCloseable = linkFlow!!.start(
+                deviceName = deviceName,
+                onProvisioningUrl = { url ->
+                    _deviceLinkUrl.value = url
+                    _pendingAuthStep.value = AuthStep(
+                        kind = AuthStepKind.SIGNAL_DEVICE_LINK,
+                        prompt = "Scannez ce QR depuis Signal (appareil principal) → Paramètres → Appareils liés",
+                        fields = emptyList(),
+                        url = url,
+                    )
+                },
+                onOutcome = { outcome ->
+                    ioScope.launch(signalDispatcher) {
+                        applyRegistrationOutcome(outcome)
+                    }
+                },
+            )
+            ConnectionResult.Success
+        } catch (e: Exception) {
+            Timber.e(e, "Signal device link failed to start")
+            _connectionState.value = ConnectionState.ERROR
+            ConnectionResult.Failure(e.message ?: "Impossible de démarrer le lien")
+        }
+    }
+
+    fun cancelDeviceLink() {
+        ioScope.launch(signalDispatcher) {
+            cancelDeviceLinkLocked()
+            if (_connectionState.value != ConnectionState.CONNECTED) {
+                _connectionState.value = ConnectionState.DISCONNECTED
+            }
+        }
+    }
+
+    private fun cancelDeviceLinkLocked() {
+        runCatching { linkCloseable?.close() }
+        linkCloseable = null
+        linkFlow = null
+        _deviceLinkUrl.value = null
+        if (_pendingAuthStep.value?.kind == AuthStepKind.SIGNAL_DEVICE_LINK) {
+            _pendingAuthStep.value = null
         }
     }
 
@@ -288,19 +369,27 @@ class SignalProtocol @Inject constructor(
                 val creds = outcome.credentials ?: return outcome
                 val accId = accountId ?: UUID.randomUUID().toString()
                 accountId = accId
+                val displayName = outcome.displayName
+                    ?: creds[SignalCredentialKeys.E164]
+                    ?: pendingE164
+                    ?: "Signal"
+                runCatching { linkCloseable?.close() }
+                linkCloseable = null
+                linkFlow = null
+                _deviceLinkUrl.value = null
                 creds.forEach { (k, v) -> credentialStore.put(accId, k, v) }
-                credentialStore.putAccountMeta(accId, ProtocolId.SIGNAL.name, outcome.displayName ?: pendingE164!!)
+                credentialStore.putAccountMeta(accId, ProtocolId.SIGNAL.name, displayName)
                 repository.upsertAccount(
                     ltechnologies.onionphone.securemessenger.core.model.Account(
                         id = accId,
                         protocol = ProtocolId.SIGNAL,
-                        displayName = outcome.displayName ?: pendingE164!!,
+                        displayName = displayName,
                         connectionState = ConnectionState.CONNECTED,
                     ),
                 )
                 proxyConfig?.let { proxy ->
                     restoreSession(
-                        AccountCredentials(ProtocolId.SIGNAL, accId, outcome.displayName ?: pendingE164!!, creds),
+                        AccountCredentials(ProtocolId.SIGNAL, accId, displayName, creds),
                         creds,
                         proxy,
                     )
@@ -319,6 +408,7 @@ class SignalProtocol @Inject constructor(
     }
 
     private fun startSync(accId: String, proxy: ProxyConfig) {
+        applySignalSocks(proxy)
         syncEngine?.stop()
         val activeSession = session ?: return
         val helper = SignalGroupHelper(context, accId, credentialStore).also { groupHelper = it }
@@ -330,6 +420,16 @@ class SignalProtocol @Inject constructor(
             proxy = proxy,
             groupHelper = helper,
         ).also { it.start(ioScope) }
+    }
+
+    /** Routes Signal OkHttp/WebSocket through OnionVPN SOCKS when Tor is enabled. */
+    private fun applySignalSocks(proxy: ProxyConfig) {
+        if (proxy.torRequired) {
+            val host = SocksEndpointResolver.resolveReachableHost(proxy.host, proxy.port)
+            SignalSocksHolder.set(Proxy(Proxy.Type.SOCKS, InetSocketAddress(host, proxy.port)))
+        } else {
+            SignalSocksHolder.clear()
+        }
     }
 
     override fun observeConversations(): Flow<List<Conversation>> {
@@ -621,6 +721,7 @@ class SignalProtocol @Inject constructor(
                 session = null
                 groupHelper = null
                 registrationFlow = null
+                cancelDeviceLinkLocked()
                 pendingE164 = null
                 pendingPassword = null
                 pendingSessionId = null
@@ -628,6 +729,7 @@ class SignalProtocol @Inject constructor(
                 _pendingAuthStep.value = null
                 this@SignalProtocol.accountId = null
                 proxyConfig = null
+                SignalSocksHolder.clear()
                 _connectionState.value = ConnectionState.DISCONNECTED
                 SignalForegroundService.stop(context)
             }

@@ -2,6 +2,7 @@ package ltechnologies.onionphone.securemessenger.ui.screens
 
 import android.content.Intent
 import android.net.Uri
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -9,6 +10,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -20,14 +22,18 @@ import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -44,12 +50,15 @@ import ltechnologies.onionphone.securemessenger.core.model.ConnectionState
 import ltechnologies.onionphone.securemessenger.core.model.ProtocolId
 import ltechnologies.onionphone.securemessenger.protocol.signal.SignalServiceEnvironment
 import ltechnologies.onionphone.securemessenger.ui.MainViewModel
+import ltechnologies.onionphone.securemessenger.ui.util.qrImageBitmap
 
 private enum class SignalLoginStep {
+    CHOICE,
     PHONE,
     CAPTCHA,
     CODE,
     PIN,
+    LINK_QR,
 }
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
@@ -60,7 +69,7 @@ fun SignalLoginScreen(
     onClose: () -> Unit,
     onConnected: (accountId: String) -> Unit,
 ) {
-    var step by rememberSaveable { mutableStateOf(SignalLoginStep.PHONE) }
+    var step by rememberSaveable { mutableStateOf(SignalLoginStep.CHOICE) }
     var phone by rememberSaveable { mutableStateOf("") }
     var captcha by rememberSaveable { mutableStateOf("") }
     var code by rememberSaveable { mutableStateOf("") }
@@ -68,9 +77,18 @@ fun SignalLoginScreen(
     var accountId by rememberSaveable { mutableStateOf<String?>(null) }
     var statusMessage by rememberSaveable { mutableStateOf<String?>(null) }
     var loading by rememberSaveable { mutableStateOf(false) }
+    var linkUrl by remember { mutableStateOf<String?>(null) }
 
     val accounts by viewModel.accounts.collectAsState()
     val context = LocalContext.current
+    val deviceLinkUrl by viewModel.observeSignalDeviceLinkUrl().collectAsState()
+
+    LaunchedEffect(deviceLinkUrl) {
+        if (!deviceLinkUrl.isNullOrBlank()) {
+            linkUrl = deviceLinkUrl
+            loading = false
+        }
+    }
 
     LaunchedEffect(accounts, accountId) {
         val id = accountId ?: return@LaunchedEffect
@@ -79,6 +97,16 @@ fun SignalLoginScreen(
             loading = false
             onConnected(id)
         }
+    }
+
+    // Also detect connect after device link (account id may change on complete).
+    LaunchedEffect(accounts, step) {
+        if (step != SignalLoginStep.LINK_QR) return@LaunchedEffect
+        val connected = accounts.firstOrNull {
+            it.protocol == ProtocolId.SIGNAL && it.connectionState == ConnectionState.CONNECTED
+        } ?: return@LaunchedEffect
+        loading = false
+        onConnected(connected.id)
     }
 
     LaunchedEffect(accountId) {
@@ -100,6 +128,13 @@ fun SignalLoginScreen(
                     step = SignalLoginStep.PIN
                     statusMessage = authStep.prompt
                 }
+                AuthStepKind.SIGNAL_DEVICE_LINK -> {
+                    step = SignalLoginStep.LINK_QR
+                    statusMessage = authStep.prompt
+                    if (!authStep.url.isNullOrBlank()) {
+                        linkUrl = authStep.url
+                    }
+                }
                 else -> Unit
             }
         }
@@ -116,8 +151,24 @@ fun SignalLoginScreen(
         }
     }
 
+    LaunchedEffect(step, linkUrl) {
+        if (step != SignalLoginStep.LINK_QR || linkUrl == null) return@LaunchedEffect
+        delay(90_000)
+        if (step == SignalLoginStep.LINK_QR) {
+            statusMessage = "QR expiré — régénérez un nouveau code."
+            loading = false
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            viewModel.cancelSignalDeviceLink()
+        }
+    }
+
     fun handleClose() {
         accountId?.let { viewModel.cancelSignalLogin(it) }
+        viewModel.cancelSignalDeviceLink()
         onClose()
     }
 
@@ -137,19 +188,126 @@ fun SignalLoginScreen(
             },
         )
 
-        Text(
-            text = "Inscription Signal",
-            style = MaterialTheme.typography.headlineSmall,
-        )
-        Text(
-            text = "Connexion directe aux serveurs Signal (sans Tor). Le code SMS peut être reçu " +
-                "via un service SMS en ligne — l'app n'intercepte pas le SMS localement.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-
         when (step) {
+            SignalLoginStep.CHOICE -> {
+                Text(
+                    text = "Connexion Signal",
+                    style = MaterialTheme.typography.headlineSmall,
+                )
+                Text(
+                    text = "Créez un nouveau compte (SMS) ou liez un compte existant en scannant " +
+                        "le QR depuis votre Signal principal (Paramètres → Appareils liés).",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Button(
+                    onClick = { step = SignalLoginStep.PHONE },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Nouveau numéro (SMS)")
+                }
+                OutlinedButton(
+                    onClick = {
+                        step = SignalLoginStep.LINK_QR
+                        loading = true
+                        statusMessage = "Génération du QR…"
+                        linkUrl = null
+                        viewModel.startSignalDeviceLink { result ->
+                            when (result) {
+                                is ConnectionResult.Success -> {
+                                    statusMessage = "Scannez le QR depuis Signal"
+                                }
+                                is ConnectionResult.Failure -> {
+                                    loading = false
+                                    statusMessage = result.reason
+                                    step = SignalLoginStep.CHOICE
+                                }
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Lier un compte existant (QR)")
+                }
+            }
+
+            SignalLoginStep.LINK_QR -> {
+                Text(
+                    text = "Lier cet appareil",
+                    style = MaterialTheme.typography.headlineSmall,
+                )
+                Text(
+                    text = "Sur votre téléphone Signal principal : Paramètres → Appareils liés → " +
+                        "Lier un nouvel appareil, puis scannez ce QR.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                val url = linkUrl
+                if (url != null) {
+                    val qr = remember(url) { qrImageBitmap(url) }
+                    Image(
+                        bitmap = qr,
+                        contentDescription = "QR de liaison Signal",
+                        modifier = Modifier
+                            .size(280.dp)
+                            .align(Alignment.CenterHorizontally),
+                    )
+                    Text(
+                        text = "Valide ~90 s",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.align(Alignment.CenterHorizontally),
+                    )
+                } else if (loading) {
+                    CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
+                }
+                Button(
+                    onClick = {
+                        loading = true
+                        statusMessage = "Nouveau QR…"
+                        linkUrl = null
+                        viewModel.startSignalDeviceLink { result ->
+                            when (result) {
+                                is ConnectionResult.Success ->
+                                    statusMessage = "Scannez le nouveau QR"
+                                is ConnectionResult.Failure -> {
+                                    loading = false
+                                    statusMessage = result.reason
+                                }
+                            }
+                        }
+                    },
+                    enabled = !loading || linkUrl != null,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Régénérer le QR")
+                }
+                TextButton(
+                    onClick = {
+                        viewModel.cancelSignalDeviceLink()
+                        step = SignalLoginStep.CHOICE
+                        loading = false
+                        linkUrl = null
+                        statusMessage = null
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Retour")
+                }
+            }
+
             SignalLoginStep.PHONE -> {
+                Text(
+                    text = "Inscription Signal",
+                    style = MaterialTheme.typography.headlineSmall,
+                )
+                Text(
+                    text = "Le code SMS peut être reçu via un service SMS en ligne — l'app " +
+                        "n'intercepte pas le SMS localement. Si Tor est activé, le trafic " +
+                        "passe par OnionVPN.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 OutlinedTextField(
                     value = phone,
                     onValueChange = { phone = it },
@@ -190,6 +348,16 @@ fun SignalLoginScreen(
                     } else {
                         Text("Continuer")
                     }
+                }
+                TextButton(
+                    onClick = {
+                        accountId?.let { viewModel.cancelSignalLogin(it) }
+                        accountId = null
+                        step = SignalLoginStep.CHOICE
+                        loading = false
+                    },
+                ) {
+                    Text("Retour")
                 }
             }
 
@@ -355,7 +523,7 @@ fun SignalLoginScreen(
             )
         }
 
-        if (loading && step != SignalLoginStep.PHONE) {
+        if (loading && step != SignalLoginStep.PHONE && step != SignalLoginStep.LINK_QR && step != SignalLoginStep.CHOICE) {
             Spacer(Modifier.height(8.dp))
             Column(
                 modifier = Modifier.fillMaxWidth(),

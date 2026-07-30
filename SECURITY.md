@@ -40,7 +40,7 @@ Out of scope:
 
 ## Security Design
 
-- **Optional Tor routing**: clearnet by default. Matrix / XMPP / Telegram may opt into SOCKS5 → Tor. Signal always uses clearnet (many Tor exits are blocked by Signal). There is no global killswitch.
+- **Optional Tor routing**: clearnet by default. When enabled, all protocols (including Signal) use OnionVPN PAC → SOCKS5 `:18202`. Custom SOCKS is available; Orbot / InviZible are not. There is no global killswitch.
 - **No direct DNS**: hostname resolution for the Matrix `.well-known` discovery and XMPP SRV lookups happens through the proxy, not the device's default resolver.
 - **Encrypted credential storage**: account secrets (passwords, tokens, session data) are stored via `EncryptedCredentialStore` (AndroidX Security Crypto / Keystore-backed).
 - **No hardcoded secrets**: signing keys, SDK/NDK paths, and Telegram API credentials are never committed (`keystore.properties`, `local.properties` are gitignored; see `local.properties.example`).

@@ -4,8 +4,6 @@ import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.http.ContentType
 import io.ktor.http.Url
 import java.io.File
-import java.net.InetSocketAddress
-import java.net.Proxy
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -24,7 +22,6 @@ import ltechnologies.onionphone.securemessenger.core.model.Message
 import ltechnologies.onionphone.securemessenger.core.model.MessageDirection
 import ltechnologies.onionphone.securemessenger.core.model.ProtocolId
 import ltechnologies.onionphone.securemessenger.core.model.ProxyConfig
-import ltechnologies.onionphone.securemessenger.core.proxy.SocksEndpointResolver
 import ltechnologies.onionphone.securemessenger.data.MessengerRepository
 import net.folivo.trixnity.client.MatrixClient
 import net.folivo.trixnity.client.flattenValues
@@ -490,22 +487,8 @@ class TrixnityMatrixEngine(
         client = null
     }
 
-    private fun proxiedOkHttp(proxy: ProxyConfig): OkHttpClient {
-        val socksHost = SocksEndpointResolver.resolveReachableHost(proxy.host, proxy.port)
-        try {
-            java.net.Socket().use { socket ->
-                socket.connect(InetSocketAddress(socksHost, proxy.port), 3_000)
-            }
-        } catch (e: Exception) {
-            throw IllegalStateException(
-                "Tor requis : SOCKS $socksHost:${proxy.port} injoignable — démarrez OnionVPN",
-                e,
-            )
-        }
-        return OkHttpClient.Builder()
-            .proxy(Proxy(Proxy.Type.SOCKS, InetSocketAddress(socksHost, proxy.port)))
-            .build()
-    }
+    private fun proxiedOkHttp(proxy: ProxyConfig): OkHttpClient =
+        MatrixHttpClientFactory.buildOkHttp(proxy)
 
     companion object {
         fun wipeAccountStore(filesDir: File, accountId: String) {

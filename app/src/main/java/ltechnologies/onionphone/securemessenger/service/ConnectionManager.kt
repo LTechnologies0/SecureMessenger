@@ -114,17 +114,11 @@ class ConnectionManager @Inject constructor(
     /**
      * Resolves proxy settings for a connection.
      * Clearnet (default): always returns the current config — no Tor killswitch.
-     * Tor opt-in: requires a healthy SOCKS endpoint.
-     * Signal always uses clearnet (Signal blocks many Tor exits).
+     * Tor opt-in: requires a healthy SOCKS endpoint (OnionVPN PAC bridge) for all protocols.
      */
     private suspend fun resolveProxyOrFail(protocolId: ProtocolId? = null): ProxyConfig? {
         val rawProxy = proxyManager.currentConfig()
         _killswitchActive.value = false
-
-        // Signal must not be forced through Tor — registration/API fail on many exits.
-        if (protocolId == ProtocolId.SIGNAL) {
-            return rawProxy.copy(torRequired = false)
-        }
 
         if (!rawProxy.torRequired) {
             return rawProxy
@@ -267,8 +261,7 @@ class ConnectionManager @Inject constructor(
                 if (protocolId !in FeatureFlags.enabled) continue
 
                 val existing = cleanedRoomAccounts.firstOrNull { it.id == accountId }
-                val torBound = config.torRequired && protocolId != ProtocolId.SIGNAL
-                if (torBound && !proxyManager.isNetworkAllowed()) {
+                if (config.torRequired && !proxyManager.isNetworkAllowed()) {
                     Timber.i("Skip restore for $accountId ($protocolId): Tor required but SOCKS down")
                     continue
                 }
@@ -341,7 +334,7 @@ class ConnectionManager @Inject constructor(
 
     /**
      * When Tor routing is opted in and SOCKS stays down, disconnect Tor-bound sessions.
-     * Signal (clearnet) and clearnet mode are left alone — no global killswitch.
+     * Clearnet mode is left alone — no global killswitch.
      */
     private suspend fun disconnectIfStillUnhealthy() {
         kotlinx.coroutines.delay(3_000)
@@ -353,8 +346,7 @@ class ConnectionManager @Inject constructor(
             return
         }
         if (!proxyManager.isNetworkAllowed()) {
-            // Tear down Tor-bound protocols only; Signal keeps clearnet sessions.
-            FeatureFlags.enabled.filter { it != ProtocolId.SIGNAL }.forEach { id ->
+            FeatureFlags.enabled.forEach { id ->
                 try {
                     protocolRegistry.get(id)?.disconnect()
                 } catch (e: Exception) {

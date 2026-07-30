@@ -33,6 +33,13 @@ object OnionVpnConstants {
 
     const val CONNECT_TIMEOUT_MS = 3_000
 
+    /** SOCKS health-check timeout (TCP + optional remote-DNS probe). */
+    const val SOCKS_CHECK_TIMEOUT_MS = 5_000
+
+    /** DNS endpoint for remote-DNS probe through SOCKS (resolved by Tor, not on-device). */
+    const val DNS_PROBE_HOST = "94.140.14.41"
+    const val DNS_PROBE_PORT = 53
+
     /** Regex for `SOCKS5 host:port` lines in the PAC script. */
     val SOCKS5_IN_PAC = Regex("""SOCKS5\s+([^\s;:]+):(\d+)""", RegexOption.IGNORE_CASE)
 }

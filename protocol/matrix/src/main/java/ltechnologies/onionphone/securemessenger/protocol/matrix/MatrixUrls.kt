@@ -55,7 +55,7 @@ internal object MatrixUrls {
             }
 
             // Many deployments delegate CS API to matrix.<domain> but block or omit
-            // `.well-known` over Tor/Orbot. Probe the common subdomain before falling
+            // `.well-known` over Tor/OnionVPN. Probe the common subdomain before falling
             // back to the marketing host (which often 404s on /_matrix/client/v3/login).
             val hostname = hostnameFrom(normalizedServer)
             if (!hostname.startsWith("matrix.")) {

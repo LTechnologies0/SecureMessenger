@@ -1,11 +1,22 @@
 # Changelog
 
+## 1.0.4
+
+### Network / Tor
+- Orbot / InviZible **retirés** ; Tor via OnionVPN PAC uniquement
+  (`http://127.0.0.1:18201/onionvpn.pac` → SOCKS `:18202`) ; `CUSTOM` pour SOCKS manuel
+- Migration prefs `ORBOT`/`INVIZIBLE` → `ONIONVPN`
+- Quand Tor est activé : **tous** les protocoles (Signal inclus) passent par le pont SOCKS
+
+### Signal
+- Lien d’appareil secondaire (**QR**) : scannable depuis Signal principal
+  (Paramètres → Appareils liés) ; inscription SMS inchangée
+- version `1.0.4` (versionCode 8)
+
 ## 1.0.3
 
 ### Network / Tor
-- Routage Tor basé sur **OnionVPN PAC** (`http://127.0.0.1:18201/onionvpn.pac`)
-- Fournisseur par défaut `ONIONVPN` : pont SOCKS DNSCrypt→Tor (`:18202`)
-- Orbot / InviZible / Custom restent disponibles
+- Routage Tor par défaut via **OnionVPN PAC** (`http://127.0.0.1:18201/onionvpn.pac` → `:18202`)
 - version `1.0.3` (versionCode 7)
 
 ## 1.0.2

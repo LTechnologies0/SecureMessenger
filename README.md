@@ -15,7 +15,9 @@
 
 **SecureMessenger** is an open-source Android app that lets you chat over **Matrix, XMPP, Telegram, and Signal** from a single app. Part of the [OnionPhone](https://onionphone.org) app family.
 
-> Tor routing is **optional** (off by default). Signal always uses clearnet — Signal blocks many Tor exits. Matrix / XMPP / Telegram can opt into SOCKS5 → Tor from Settings → Proxy.
+> Tor routing is **optional** (off by default). When enabled, all protocols (including Signal)
+> use the [OnionVPN](https://github.com/LTechnologies0/OnionVPN) PAC bridge
+> (`http://127.0.0.1:18201/onionvpn.pac` → SOCKS5 `127.0.0.1:18202`). Orbot / InviZible are not used.
 
 ---
 
@@ -37,7 +39,8 @@
 | Feature | Description |
 |---------|-------------|
 | **Multi-protocol** | Matrix, XMPP, Telegram, Signal accounts side by side in one app |
-| **Optional Tor routing** | Opt-in SOCKS5 → Tor for Matrix / XMPP / Telegram; Signal uses clearnet; no global killswitch |
+| **Optional Tor routing** | Opt-in SOCKS5 via OnionVPN PAC for all protocols; custom SOCKS optional; no global killswitch |
+| **Signal link (QR)** | Register by SMS or link an existing account as a secondary device |
 | **Account registration** | Create new Matrix accounts (UIA dummy/token stages inline, WebView fallback for captcha/email/terms) and XMPP accounts (XEP-0077 in-band registration with dynamic extra fields) — no browser needed for the common case |
 | **Matrix well-known discovery** | Automatically resolves delegated homeservers via `.well-known/matrix/client` |
 | **Per-account Tor circuit isolation** | XMPP connections use per-account SOCKS5 stream isolation so different accounts don't share a Tor circuit |
