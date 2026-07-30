@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -23,22 +22,24 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.ErrorOutline
-import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -54,21 +55,29 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import java.io.File
 import java.text.DateFormat
 import java.util.Date
 import java.util.UUID
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import ltechnologies.onionphone.securemessenger.core.model.Attachment
 import ltechnologies.onionphone.securemessenger.core.model.AttachmentState
 import ltechnologies.onionphone.securemessenger.core.model.DeliveryState
 import ltechnologies.onionphone.securemessenger.core.model.HistoryLoadResult
 import ltechnologies.onionphone.securemessenger.core.model.Message
 import ltechnologies.onionphone.securemessenger.core.model.MessageDirection
+import ltechnologies.onionphone.securemessenger.core.model.MessageKind
+import ltechnologies.onionphone.securemessenger.core.model.OutgoingContent
 import ltechnologies.onionphone.securemessenger.core.model.ProtocolId
+import ltechnologies.onionphone.securemessenger.core.security.MessageSanitizer
 import ltechnologies.onionphone.securemessenger.ui.MainViewModel
+import ltechnologies.onionphone.securemessenger.ui.components.protocolAccentColor
 import ltechnologies.onionphone.securemessenger.ui.components.protocolShortPrefix
+import org.json.JSONObject
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -83,12 +92,28 @@ fun ChatScreen(
     val capabilities = remember(protocol) { viewModel.capabilitiesFor(protocol) }
     val messagesFlow = remember(conversationId) { viewModel.messagesFor(conversationId) }
     val messages by messagesFlow.collectAsState()
+    val typingUsers by remember(conversationId, protocol) {
+        if (capabilities.typingIndicators) {
+            viewModel.observeTyping(conversationId, protocol)
+        } else {
+            MutableStateFlow(emptyList())
+        }
+    }.collectAsState()
     var draft by remember { mutableStateOf("") }
     var sendError by remember { mutableStateOf<String?>(null) }
     var loadingHistory by remember(conversationId) { mutableStateOf(true) }
     var historyError by remember(conversationId) { mutableStateOf<String?>(null) }
+    var dialog by remember { mutableStateOf(ComposerDialog.NONE) }
+    var showAttachSheet by remember { mutableStateOf(false) }
+    var pendingPick by remember { mutableStateOf(ComposerPickKind.IMAGE) }
     val timeFormat = remember { DateFormat.getTimeInstance(DateFormat.SHORT) }
     val listState = rememberLazyListState()
+    val snackbarHostState = remember { SnackbarHostState() }
+    val accent = protocolAccentColor(protocol)
+
+    val hasAttachOptions = capabilities.mediaSend || capabilities.gifs || capabilities.voiceNotes ||
+        capabilities.locationShare || capabilities.polls || capabilities.contactShare ||
+        capabilities.ephemeralMessages
 
     LaunchedEffect(conversationId, protocol) {
         loadingHistory = true
@@ -107,68 +132,138 @@ fun ChatScreen(
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) {
             listState.animateScrollToItem(messages.lastIndex)
+            if (capabilities.readReceipts) {
+                val lastIncoming = messages.lastOrNull { it.direction == MessageDirection.INCOMING }
+                viewModel.markRead(conversationId, protocol, lastIncoming?.id)
+            }
         }
+    }
+
+    LaunchedEffect(draft, conversationId, protocol) {
+        if (!capabilities.typingIndicators) return@LaunchedEffect
+        if (draft.isBlank()) {
+            viewModel.setTyping(conversationId, protocol, false)
+            return@LaunchedEffect
+        }
+        viewModel.setTyping(conversationId, protocol, true)
+        delay(2_000)
+        viewModel.setTyping(conversationId, protocol, false)
+    }
+
+    LaunchedEffect(sendError) {
+        val err = sendError ?: return@LaunchedEffect
+        snackbarHostState.showSnackbar(err)
+        sendError = null
     }
 
     DisposableEffect(conversationId, protocol) {
         onDispose {
+            if (capabilities.typingIndicators) {
+                viewModel.setTyping(conversationId, protocol, false)
+            }
             viewModel.closeConversation(conversationId, protocol)
         }
     }
 
     val context = LocalContext.current
-    val pickAttachment = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri == null) return@rememberLauncherForActivityResult
-        if (!capabilities.mediaSend) {
-            sendError = "Médias non supportés pour ce protocole"
-            return@rememberLauncherForActivityResult
-        }
+
+    fun copyUriToCache(uri: android.net.Uri, prefix: String): Pair<File, String>? {
         val mime = context.contentResolver.getType(uri) ?: "application/octet-stream"
         val fileName = uri.lastPathSegment ?: "attachment"
-        val dest = File(context.cacheDir, "out_${UUID.randomUUID()}_$fileName")
-        runCatching {
+        val dest = File(context.cacheDir, "${prefix}_${UUID.randomUUID()}_$fileName")
+        return runCatching {
             context.contentResolver.openInputStream(uri)?.use { input ->
                 dest.outputStream().use { output -> input.copyTo(output) }
             }
-        }.onSuccess {
-            val attachment = Attachment(
-                id = UUID.randomUUID().toString(),
-                mimeType = mime,
-                fileName = fileName,
-                localPath = dest.absolutePath,
-                sizeBytes = dest.length(),
-                state = AttachmentState.READY,
-            )
-            viewModel.sendMedia(conversationId, protocol, attachment, draft.takeIf { it.isNotBlank() }) { ok ->
-                if (ok) {
-                    draft = ""
-                    sendError = null
-                } else {
-                    sendError = "Envoi média échoué"
-                }
-            }
-        }.onFailure {
-            sendError = it.message ?: "Lecture du fichier impossible"
+            dest to mime
+        }.getOrNull()
+    }
+
+    fun sendAttachmentResult(ok: Boolean, failureLabel: String) {
+        if (ok) {
+            draft = ""
+            sendError = null
+        } else {
+            sendError = failureLabel
         }
+    }
+
+    val pickAttachment = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val kind = pendingPick
+        val copied = copyUriToCache(uri, "out") ?: run {
+            sendError = "Lecture du fichier impossible"
+            return@rememberLauncherForActivityResult
+        }
+        val (dest, mime) = copied
+        val attachment = Attachment(
+            id = UUID.randomUUID().toString(),
+            mimeType = mime,
+            fileName = dest.name,
+            localPath = dest.absolutePath,
+            sizeBytes = dest.length(),
+            state = AttachmentState.READY,
+        )
+        when (kind) {
+            ComposerPickKind.VOICE -> {
+                viewModel.sendContent(
+                    conversationId,
+                    protocol,
+                    OutgoingContent.VoiceNote(attachment = attachment),
+                ) { ok -> sendAttachmentResult(ok, "Envoi vocal échoué") }
+            }
+            ComposerPickKind.IMAGE, ComposerPickKind.GIF, ComposerPickKind.FILE -> {
+                val messageKind = when (kind) {
+                    ComposerPickKind.IMAGE -> MessageKind.IMAGE
+                    ComposerPickKind.GIF -> MessageKind.GIF
+                    else -> MessageKind.FILE
+                }
+                val caption = draft.takeIf { it.isNotBlank() }?.let { MessageSanitizer.sanitize(it) }
+                viewModel.sendContent(
+                    conversationId,
+                    protocol,
+                    OutgoingContent.Media(attachment = attachment, caption = caption, kind = messageKind),
+                ) { ok -> sendAttachmentResult(ok, "Envoi média échoué") }
+            }
+        }
+    }
+
+    fun launchPick(kind: ComposerPickKind) {
+        pendingPick = kind
+        val mime = when (kind) {
+            ComposerPickKind.IMAGE -> "image/*"
+            ComposerPickKind.GIF -> "image/gif"
+            ComposerPickKind.VOICE -> "audio/*"
+            ComposerPickKind.FILE -> "*/*"
+        }
+        pickAttachment.launch(mime)
+    }
+
+    val typingLabel = when {
+        typingUsers.isEmpty() -> null
+        typingUsers.size == 1 -> "${typingUsers.first()} écrit…"
+        else -> "${typingUsers.joinToString(", ")} écrivent…"
     }
 
     Scaffold(
         modifier = modifier
             .fillMaxSize()
             .imePadding(),
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
                 title = {
                     Column {
-                        Text(title, maxLines = 1)
+                        Text(title, maxLines = 1, style = MaterialTheme.typography.titleLarge)
                         Row(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Text(
                                 protocolShortPrefix(protocol),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = accent,
+                                fontWeight = FontWeight.SemiBold,
                             )
                             if (capabilities.endToEndEncryption) {
                                 AssistChip(
@@ -179,14 +274,21 @@ fun ChatScreen(
                                         Icon(
                                             Icons.Default.Lock,
                                             contentDescription = null,
-                                            modifier = Modifier.size(16.dp),
+                                            modifier = Modifier.size(14.dp),
                                         )
                                     },
                                 )
                             }
-                            if (capabilities.readReceipts) {
+                            if (typingLabel != null) {
                                 Text(
-                                    "accusés de lecture",
+                                    typingLabel,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    maxLines = 1,
+                                )
+                            } else if (capabilities.readReceipts) {
+                                Text(
+                                    "Accusés de lecture",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
@@ -208,25 +310,14 @@ fun ChatScreen(
                     .navigationBarsPadding()
                     .padding(horizontal = 8.dp, vertical = 8.dp),
             ) {
-                sendError?.let {
-                    Text(
-                        text = it,
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.padding(bottom = 4.dp),
-                    )
-                }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                     verticalAlignment = Alignment.Bottom,
                 ) {
-                    if (capabilities.mediaSend) {
-                        IconButton(onClick = { pickAttachment.launch("image/*") }) {
-                            Icon(Icons.Default.Image, contentDescription = "Joindre une image")
-                        }
-                        IconButton(onClick = { pickAttachment.launch("*/*") }) {
-                            Icon(Icons.Default.AttachFile, contentDescription = "Joindre un fichier")
+                    if (hasAttachOptions) {
+                        IconButton(onClick = { showAttachSheet = true }) {
+                            Icon(Icons.Default.Add, contentDescription = "Joindre")
                         }
                     }
                     OutlinedTextField(
@@ -240,7 +331,11 @@ fun ChatScreen(
                     FilledIconButton(
                         onClick = {
                             if (draft.isNotBlank()) {
-                                viewModel.sendMessage(conversationId, protocol, draft) { ok ->
+                                viewModel.sendContent(
+                                    conversationId,
+                                    protocol,
+                                    OutgoingContent.Text(MessageSanitizer.sanitize(draft)),
+                                ) { ok ->
                                     if (ok) {
                                         draft = ""
                                         sendError = null
@@ -303,9 +398,89 @@ fun ChatScreen(
                             showReadReceipts = capabilities.readReceipts,
                         )
                     }
+                    if (typingLabel != null) {
+                        item(key = "typing") {
+                            Text(
+                                text = typingLabel,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                            )
+                        }
+                    }
                 }
             }
         }
+    }
+
+    if (showAttachSheet) {
+        ComposerAttachSheet(
+            capabilities = capabilities,
+            onDismiss = { showAttachSheet = false },
+            onPickMedia = { kind -> launchPick(kind) },
+            onOpenDialog = { dialog = it },
+        )
+    }
+
+    when (dialog) {
+        ComposerDialog.NONE -> Unit
+        ComposerDialog.LOCATION -> LocationComposerDialog(
+            onDismiss = { dialog = ComposerDialog.NONE },
+            onSend = { lat, lon ->
+                viewModel.sendContent(
+                    conversationId,
+                    protocol,
+                    OutgoingContent.Location(latitude = lat, longitude = lon),
+                ) { ok ->
+                    dialog = ComposerDialog.NONE
+                    sendAttachmentResult(ok, "Envoi lieu échoué")
+                }
+            },
+        )
+        ComposerDialog.POLL -> PollComposerDialog(
+            onDismiss = { dialog = ComposerDialog.NONE },
+            onSend = { question, options ->
+                viewModel.sendContent(
+                    conversationId,
+                    protocol,
+                    OutgoingContent.Poll(question = question, options = options),
+                ) { ok ->
+                    dialog = ComposerDialog.NONE
+                    sendAttachmentResult(ok, "Envoi sondage échoué")
+                }
+            },
+        )
+        ComposerDialog.CONTACT -> ContactComposerDialog(
+            onDismiss = { dialog = ComposerDialog.NONE },
+            onSend = { first, last, phone ->
+                viewModel.sendContent(
+                    conversationId,
+                    protocol,
+                    OutgoingContent.ContactCard(firstName = first, lastName = last, phone = phone),
+                ) { ok ->
+                    dialog = ComposerDialog.NONE
+                    sendAttachmentResult(ok, "Envoi contact échoué")
+                }
+            },
+        )
+        ComposerDialog.EPHEMERAL -> EphemeralComposerDialog(
+            initialBody = draft,
+            onDismiss = { dialog = ComposerDialog.NONE },
+            onSend = { body, seconds ->
+                viewModel.sendContent(
+                    conversationId,
+                    protocol,
+                    OutgoingContent.Ephemeral(
+                        body = MessageSanitizer.sanitize(body),
+                        expireSeconds = seconds,
+                    ),
+                ) { ok ->
+                    dialog = ComposerDialog.NONE
+                    if (ok) draft = ""
+                    sendAttachmentResult(ok, "Envoi éphémère échoué")
+                }
+            },
+        )
     }
 }
 
@@ -344,10 +519,14 @@ private fun MessageBubble(
             modifier = Modifier.widthIn(max = 320.dp),
         ) {
             Column(modifier = Modifier.padding(12.dp)) {
+                KindChip(message.kind, message.expireSeconds)
                 message.attachments.forEach { attachment ->
                     AttachmentContent(attachment)
                 }
-                if (message.body.isNotBlank()) {
+                StructuredPayload(message)
+                if (message.body.isNotBlank() && message.kind != MessageKind.LOCATION &&
+                    message.kind != MessageKind.POLL && message.kind != MessageKind.CONTACT
+                ) {
                     Text(
                         text = message.body,
                         style = MaterialTheme.typography.bodyLarge,
@@ -383,6 +562,120 @@ private fun MessageBubble(
 }
 
 @Composable
+private fun KindChip(kind: MessageKind, expireSeconds: Int?) {
+    val label = when (kind) {
+        MessageKind.TEXT -> null
+        MessageKind.IMAGE -> "Image"
+        MessageKind.VIDEO -> "Vidéo"
+        MessageKind.FILE -> "Fichier"
+        MessageKind.GIF -> "GIF"
+        MessageKind.STICKER -> "Sticker"
+        MessageKind.VOICE -> "Vocal"
+        MessageKind.LOCATION -> "Lieu"
+        MessageKind.POLL -> "Sondage"
+        MessageKind.CONTACT -> "Contact"
+        MessageKind.SYSTEM -> "Système"
+        MessageKind.UNKNOWN -> null
+    }
+    if (label == null && expireSeconds == null) return
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        modifier = Modifier.padding(bottom = 4.dp),
+    ) {
+        label?.let {
+            FilterChip(
+                selected = false,
+                onClick = {},
+                enabled = false,
+                label = { Text(it, style = MaterialTheme.typography.labelSmall) },
+            )
+        }
+        expireSeconds?.let { sec ->
+            AssistChip(
+                onClick = {},
+                enabled = false,
+                label = { Text("${sec}s", style = MaterialTheme.typography.labelSmall) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun StructuredPayload(message: Message) {
+    val json = message.payloadJson ?: return
+    val parsed = runCatching { JSONObject(json) }.getOrNull() ?: return
+    when (message.kind) {
+        MessageKind.LOCATION -> {
+            val lat = parsed.optDouble("latitude", Double.NaN)
+            val lon = parsed.optDouble("longitude", Double.NaN)
+            if (!lat.isNaN() && !lon.isNaN()) {
+                Surface(
+                    color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f),
+                    shape = MaterialTheme.shapes.small,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 4.dp),
+                ) {
+                    Column(Modifier.padding(8.dp)) {
+                        Text("Lieu partagé", style = MaterialTheme.typography.labelMedium)
+                        Text(
+                            "%.5f, %.5f".format(lat, lon),
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                }
+            }
+        }
+        MessageKind.POLL -> {
+            val question = parsed.optString("question").ifBlank { message.body }
+            Surface(
+                color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.45f),
+                shape = MaterialTheme.shapes.small,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 4.dp),
+            ) {
+                Column(Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(question, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                    val options = parsed.optJSONArray("options")
+                    if (options != null) {
+                        for (i in 0 until options.length()) {
+                            AssistChip(
+                                onClick = {},
+                                enabled = false,
+                                label = { Text(options.optString(i)) },
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        MessageKind.CONTACT -> {
+            val name = listOf(
+                parsed.optString("firstName"),
+                parsed.optString("lastName"),
+            ).filter { it.isNotBlank() }.joinToString(" ").ifBlank { message.body }
+            val phone = parsed.optString("phone").takeIf { it.isNotBlank() }
+            Surface(
+                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f),
+                shape = MaterialTheme.shapes.small,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 4.dp),
+            ) {
+                Column(Modifier.padding(8.dp)) {
+                    Text(name, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Medium)
+                    phone?.let {
+                        Text(it, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+            }
+        }
+        else -> Unit
+    }
+}
+
+@Composable
 private fun AttachmentContent(attachment: Attachment) {
     when (attachment.state) {
         AttachmentState.PENDING, AttachmentState.DOWNLOADING -> {
@@ -412,6 +705,13 @@ private fun AttachmentContent(attachment: Attachment) {
                             .fillMaxWidth()
                             .height(180.dp),
                         contentScale = ContentScale.Crop,
+                    )
+                }
+                attachment.mimeType.startsWith("audio/") -> {
+                    Text(
+                        text = "🎤 ${attachment.fileName ?: "Vocal"}",
+                        style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier.padding(bottom = 4.dp),
                     )
                 }
                 else -> {

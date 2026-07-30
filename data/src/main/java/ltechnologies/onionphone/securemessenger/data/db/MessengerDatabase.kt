@@ -46,6 +46,21 @@ data class MessageEntity(
     val deliveryState: String,
     val senderDisplayName: String?,
     val attachmentsJson: String = "[]",
+    val kind: String = "TEXT",
+    val payloadJson: String? = null,
+    val expireSeconds: Int? = null,
+)
+
+@Entity(tableName = "contacts")
+data class ContactEntity(
+    @PrimaryKey val id: String,
+    val protocol: String,
+    val accountId: String,
+    val remoteId: String,
+    val displayName: String,
+    val handle: String? = null,
+    val phone: String? = null,
+    val avatarLocalPath: String? = null,
 )
 
 @Entity(tableName = "proxy_settings")
@@ -113,14 +128,27 @@ interface ProxySettingsDao {
     suspend fun upsert(settings: ProxySettingsEntity)
 }
 
+@Dao
+interface ContactDao {
+    @Query("SELECT * FROM contacts WHERE accountId = :accountId ORDER BY displayName COLLATE NOCASE ASC")
+    fun observeForAccount(accountId: String): Flow<List<ContactEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertAll(contacts: List<ContactEntity>)
+
+    @Query("DELETE FROM contacts WHERE accountId = :accountId")
+    suspend fun deleteForAccount(accountId: String)
+}
+
 @Database(
     entities = [
         AccountEntity::class,
         ConversationEntity::class,
         MessageEntity::class,
         ProxySettingsEntity::class,
+        ContactEntity::class,
     ],
-    version = 3,
+    version = 4,
     exportSchema = true,
 )
 abstract class MessengerDatabase : RoomDatabase() {
@@ -128,6 +156,7 @@ abstract class MessengerDatabase : RoomDatabase() {
     abstract fun conversationDao(): ConversationDao
     abstract fun messageDao(): MessageDao
     abstract fun proxySettingsDao(): ProxySettingsDao
+    abstract fun contactDao(): ContactDao
 }
 
 fun AccountEntity.toDomain() = ltechnologies.onionphone.securemessenger.core.model.Account(
@@ -158,6 +187,22 @@ fun MessageEntity.toDomain() = ltechnologies.onionphone.securemessenger.core.mod
     deliveryState = DeliveryState.valueOf(deliveryState),
     senderDisplayName = senderDisplayName,
     attachments = AttachmentConverters.toAttachments(attachmentsJson),
+    kind = runCatching {
+        ltechnologies.onionphone.securemessenger.core.model.MessageKind.valueOf(kind)
+    }.getOrDefault(ltechnologies.onionphone.securemessenger.core.model.MessageKind.TEXT),
+    payloadJson = payloadJson,
+    expireSeconds = expireSeconds,
+)
+
+fun ContactEntity.toDomain() = ltechnologies.onionphone.securemessenger.core.model.Contact(
+    id = id,
+    protocol = ProtocolId.valueOf(protocol),
+    accountId = accountId,
+    remoteId = remoteId,
+    displayName = displayName,
+    handle = handle,
+    phone = phone,
+    avatarLocalPath = avatarLocalPath,
 )
 
 fun ltechnologies.onionphone.securemessenger.core.model.Account.toEntity() = AccountEntity(
@@ -188,4 +233,18 @@ fun ltechnologies.onionphone.securemessenger.core.model.Message.toEntity() = Mes
     deliveryState = deliveryState.name,
     senderDisplayName = senderDisplayName,
     attachmentsJson = AttachmentConverters.fromAttachments(attachments),
+    kind = kind.name,
+    payloadJson = payloadJson,
+    expireSeconds = expireSeconds,
+)
+
+fun ltechnologies.onionphone.securemessenger.core.model.Contact.toEntity() = ContactEntity(
+    id = id,
+    protocol = protocol.name,
+    accountId = accountId,
+    remoteId = remoteId,
+    displayName = displayName,
+    handle = handle,
+    phone = phone,
+    avatarLocalPath = avatarLocalPath,
 )

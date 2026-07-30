@@ -12,13 +12,16 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Contacts
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LargeFlexibleTopAppBar
@@ -51,6 +54,7 @@ import ltechnologies.onionphone.securemessenger.core.model.ProtocolId
 import ltechnologies.onionphone.securemessenger.ui.MainViewModel
 import ltechnologies.onionphone.securemessenger.ui.components.accountRailLabel
 import ltechnologies.onionphone.securemessenger.ui.components.connectionIndicatorColor
+import ltechnologies.onionphone.securemessenger.ui.components.connectionStateLabel
 import ltechnologies.onionphone.securemessenger.ui.components.protocolAccentColor
 import ltechnologies.onionphone.securemessenger.ui.components.protocolIcon
 import ltechnologies.onionphone.securemessenger.ui.components.protocolShortPrefix
@@ -73,6 +77,7 @@ private enum class ShellOverlay {
     SETTINGS,
     PROXY,
     NEW_CHAT,
+    CONTACTS,
 }
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
@@ -82,6 +87,7 @@ fun MessengerShellScreen(
     viewModel: MainViewModel,
 ) {
     val accounts by viewModel.accounts.collectAsState()
+    val conversations by viewModel.conversations.collectAsState()
     var selectedAccountId by rememberSaveable { mutableStateOf<String?>(null) }
     var openConversationId by rememberSaveable { mutableStateOf<String?>(null) }
     var openConversationTitle by rememberSaveable { mutableStateOf("") }
@@ -101,6 +107,9 @@ fun MessengerShellScreen(
 
     val selectedAccount = accounts.firstOrNull { it.id == selectedAccountId }
     val protocolIndices = rememberAccountProtocolIndices(accounts)
+    val unreadForSelected = conversations
+        .filter { it.accountId == selectedAccountId }
+        .sumOf { it.unreadCount }
 
     when (overlay) {
         ShellOverlay.ADD_ACCOUNT_PICKER -> {
@@ -198,6 +207,27 @@ fun MessengerShellScreen(
             }
             return
         }
+        ShellOverlay.CONTACTS -> {
+            val account = selectedAccount
+            if (account != null) {
+                Scaffold { padding ->
+                    ContactsScreen(
+                        modifier = Modifier.padding(padding),
+                        viewModel = viewModel,
+                        accountId = account.id,
+                        protocol = account.protocol,
+                        onBack = { overlay = ShellOverlay.NONE },
+                        onStarted = { convId, title, protocol ->
+                            overlay = ShellOverlay.NONE
+                            openConversationId = convId
+                            openConversationTitle = title
+                            openConversationProtocol = protocol.name
+                        },
+                    )
+                }
+                return
+            }
+        }
         ShellOverlay.NONE -> Unit
     }
 
@@ -206,12 +236,19 @@ fun MessengerShellScreen(
             accounts = accounts,
             selectedAccountId = selectedAccountId,
             protocolIndices = protocolIndices,
+            contactsSelected = false,
+            settingsSelected = false,
+            unreadCount = unreadForSelected,
             onSelectAccount = {
                 selectedAccountId = it
                 openConversationId = null
             },
             onAddAccount = { overlay = ShellOverlay.ADD_ACCOUNT_PICKER },
+            onOpenContacts = { overlay = ShellOverlay.CONTACTS },
             onOpenSettings = { overlay = ShellOverlay.SETTINGS },
+            contactsEnabled = selectedAccount?.let {
+                viewModel.capabilitiesFor(it.protocol).contacts
+            } == true,
         )
 
         VerticalDivider()
@@ -233,6 +270,7 @@ fun MessengerShellScreen(
             },
             onBackFromChat = { openConversationId = null },
             onNewChat = { overlay = ShellOverlay.NEW_CHAT },
+            onOpenContacts = { overlay = ShellOverlay.CONTACTS },
             onAddAccount = { overlay = ShellOverlay.ADD_ACCOUNT_PICKER },
         )
     }
@@ -243,9 +281,14 @@ private fun AccountNavigationRail(
     accounts: List<Account>,
     selectedAccountId: String?,
     protocolIndices: Map<String, Int>,
+    contactsSelected: Boolean,
+    settingsSelected: Boolean,
+    unreadCount: Int,
     onSelectAccount: (String) -> Unit,
     onAddAccount: () -> Unit,
+    onOpenContacts: () -> Unit,
     onOpenSettings: () -> Unit,
+    contactsEnabled: Boolean,
 ) {
     NavigationRail(modifier = Modifier.fillMaxHeight()) {
         Spacer(Modifier.height(12.dp))
@@ -257,11 +300,19 @@ private fun AccountNavigationRail(
                 selected = selected,
                 onClick = { onSelectAccount(account.id) },
                 icon = {
-                    AccountRailAvatar(
-                        account = account,
-                        accent = accent,
-                        selected = selected,
-                    )
+                    BadgedBox(
+                        badge = {
+                            if (selected && unreadCount > 0) {
+                                Badge { Text(unreadCount.coerceAtMost(99).toString()) }
+                            }
+                        },
+                    ) {
+                        AccountRailAvatar(
+                            account = account,
+                            accent = accent,
+                            selected = selected,
+                        )
+                    }
                 },
                 label = {
                     Text(
@@ -289,15 +340,25 @@ private fun AccountNavigationRail(
                     }
                 }
             },
-            label = { Text("+", style = MaterialTheme.typography.labelSmall) },
+            label = { Text("Ajouter", style = MaterialTheme.typography.labelSmall) },
         )
+        if (contactsEnabled) {
+            NavigationRailItem(
+                selected = contactsSelected,
+                onClick = onOpenContacts,
+                icon = {
+                    Icon(Icons.Default.Contacts, contentDescription = "Contacts")
+                },
+                label = { Text("Contacts", style = MaterialTheme.typography.labelSmall) },
+            )
+        }
         NavigationRailItem(
-            selected = false,
+            selected = settingsSelected,
             onClick = onOpenSettings,
             icon = {
                 Icon(Icons.Default.Settings, contentDescription = "Paramètres")
             },
-            label = { Text("Settings", style = MaterialTheme.typography.labelSmall) },
+            label = { Text("Paramètres", style = MaterialTheme.typography.labelSmall) },
         )
         Spacer(Modifier.height(8.dp))
     }
@@ -332,7 +393,7 @@ private fun AccountRailAvatar(
                 .size(12.dp)
                 .clip(CircleShape)
                 .background(connectionIndicatorColor(account.connectionState))
-                .border(1.dp, MaterialTheme.colorScheme.surface, CircleShape),
+                .border(1.5.dp, MaterialTheme.colorScheme.surface, CircleShape),
         )
     }
 }
@@ -350,6 +411,7 @@ private fun MainContentPane(
     onConversationClick: (String, String, ProtocolId) -> Unit,
     onBackFromChat: () -> Unit,
     onNewChat: () -> Unit,
+    onOpenContacts: () -> Unit,
     onAddAccount: () -> Unit,
 ) {
     openConversationId?.let { convId ->
@@ -372,7 +434,9 @@ private fun MainContentPane(
         return
     }
 
+    val caps = viewModel.capabilitiesFor(selectedAccount.protocol)
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
+    val accent = protocolAccentColor(selectedAccount.protocol)
     Scaffold(
         modifier = modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
@@ -384,17 +448,28 @@ private fun MainContentPane(
                             style = MaterialTheme.typography.headlineMedium,
                             fontWeight = FontWeight.SemiBold,
                         )
-                        Text(
-                            text = buildString {
-                                append(selectedAccountLabel ?: selectedAccount.displayName)
-                                append(" · ")
-                                append(selectedAccount.connectionState.name)
-                                val caps = viewModel.capabilitiesFor(selectedAccount.protocol)
-                                if (caps.endToEndEncryption) append(" · E2EE")
-                            },
-                            style = MaterialTheme.typography.labelLarge,
-                            color = protocolAccentColor(selectedAccount.protocol),
-                        )
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = buildString {
+                                    append(selectedAccountLabel ?: protocolShortPrefix(selectedAccount.protocol))
+                                    append(" · ")
+                                    append(connectionStateLabel(selectedAccount.connectionState))
+                                    if (caps.endToEndEncryption) append(" · E2EE")
+                                },
+                                style = MaterialTheme.typography.labelLarge,
+                                color = accent,
+                            )
+                        }
+                    }
+                },
+                actions = {
+                    if (caps.contacts) {
+                        IconButton(onClick = onOpenContacts) {
+                            Icon(Icons.Default.Contacts, contentDescription = "Contacts")
+                        }
                     }
                 },
                 scrollBehavior = scrollBehavior,
@@ -437,16 +512,9 @@ private fun EmptyShellPlaceholder(
             textAlign = TextAlign.Center,
         )
         Spacer(Modifier.height(24.dp))
-        Surface(
-            onClick = onAddAccount,
-            shape = RoundedCornerShape(20.dp),
-            color = MaterialTheme.colorScheme.primaryContainer,
-        ) {
-            Text(
-                text = "Ajouter un compte",
-                modifier = Modifier.padding(horizontal = 24.dp, vertical = 14.dp),
-                style = MaterialTheme.typography.labelLarge,
-            )
+        FilledTonalButton(onClick = onAddAccount) {
+            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.padding(end = 8.dp))
+            Text("Ajouter un compte")
         }
     }
 }

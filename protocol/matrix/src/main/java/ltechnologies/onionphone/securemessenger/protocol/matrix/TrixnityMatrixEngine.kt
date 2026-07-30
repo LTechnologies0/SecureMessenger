@@ -9,17 +9,23 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import ltechnologies.onionphone.securemessenger.core.model.Attachment
 import ltechnologies.onionphone.securemessenger.core.model.AttachmentState
+import ltechnologies.onionphone.securemessenger.core.model.Contact
 import ltechnologies.onionphone.securemessenger.core.model.Conversation
 import ltechnologies.onionphone.securemessenger.core.model.DeliveryState
 import ltechnologies.onionphone.securemessenger.core.model.Message
 import ltechnologies.onionphone.securemessenger.core.model.MessageDirection
+import ltechnologies.onionphone.securemessenger.core.model.MessageKind
 import ltechnologies.onionphone.securemessenger.core.model.ProtocolId
 import ltechnologies.onionphone.securemessenger.core.model.ProxyConfig
 import ltechnologies.onionphone.securemessenger.data.MessengerRepository
@@ -31,19 +37,27 @@ import net.folivo.trixnity.client.loginWithPassword
 import net.folivo.trixnity.client.loginWithToken
 import net.folivo.trixnity.client.media.MediaService
 import net.folivo.trixnity.client.media.okio.createOkioMediaStoreModule
+import net.folivo.trixnity.client.room.GetTimelineEventsConfig
 import net.folivo.trixnity.client.room.RoomService
+import net.folivo.trixnity.client.room.message.audio
 import net.folivo.trixnity.client.room.message.file
 import net.folivo.trixnity.client.room.message.image
 import net.folivo.trixnity.client.room.message.text
+import net.folivo.trixnity.client.room.message.video
+import net.folivo.trixnity.client.store.TimelineEvent
 import net.folivo.trixnity.client.store.eventId
 import net.folivo.trixnity.client.store.originTimestamp
 import net.folivo.trixnity.client.store.repository.exposed.createExposedRepositoriesModule
 import net.folivo.trixnity.client.store.roomId
 import net.folivo.trixnity.client.store.sender
+import net.folivo.trixnity.client.user.UserService
 import net.folivo.trixnity.clientserverapi.model.authentication.IdentifierType
 import net.folivo.trixnity.clientserverapi.model.media.FileTransferProgress
+import net.folivo.trixnity.clientserverapi.model.rooms.GetEvents
+import net.folivo.trixnity.core.model.EventId
 import net.folivo.trixnity.core.model.RoomId
 import net.folivo.trixnity.core.model.UserId
+import net.folivo.trixnity.core.model.events.m.ReceiptType
 import net.folivo.trixnity.core.model.events.m.room.EncryptedFile
 import net.folivo.trixnity.core.model.events.m.room.RoomMessageEventContent
 import okhttp3.OkHttpClient
@@ -52,6 +66,8 @@ import org.jetbrains.exposed.sql.Database
 import org.koin.core.component.get
 import org.koin.core.module.Module
 import timber.log.Timber
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.time.Duration.Companion.seconds
 
 class TrixnityMatrixEngine(
     private val repository: MessengerRepository,
@@ -60,6 +76,12 @@ class TrixnityMatrixEngine(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var client: MatrixClient? = null
     private var observeJob: Job? = null
+
+    /** conversationId → display names / user ids currently typing. */
+    private val typingFlows = ConcurrentHashMap<String, MutableStateFlow<List<String>>>()
+
+    fun observeTyping(conversationId: String): StateFlow<List<String>> =
+        typingFlows.getOrPut(conversationId) { MutableStateFlow(emptyList()) }.asStateFlow()
 
     suspend fun loginWithPassword(
         accountId: String,
@@ -257,6 +279,8 @@ class TrixnityMatrixEngine(
     private fun startObserving(accountId: String, matrixClient: MatrixClient) {
         observeJob?.cancel()
         val roomService = matrixClient.di.get<RoomService>()
+        val userService = matrixClient.di.get<UserService>()
+        val self = matrixClient.userId
         observeJob = scope.launch {
             launch {
                 try {
@@ -283,50 +307,241 @@ class TrixnityMatrixEngine(
             launch {
                 try {
                     roomService.getTimelineEventsFromNowOn().collect { event ->
-                        val parsed = parseRoomMessage(event.content?.getOrNull()) ?: return@collect
-                        val roomId = event.roomId
-                        val convId = MatrixProtocol.conversationIdFor(accountId, roomId.full)
-                        val attachments = downloadAttachments(matrixClient, accountId, parsed.attachments)
-                        val message = Message(
-                            id = event.eventId.full,
-                            conversationId = convId,
-                            protocol = ProtocolId.MATRIX,
-                            body = parsed.body,
-                            timestamp = event.originTimestamp,
-                            direction = if (event.sender == matrixClient.userId) {
-                                MessageDirection.OUTGOING
-                            } else {
-                                MessageDirection.INCOMING
-                            },
-                            deliveryState = DeliveryState.DELIVERED,
-                            senderDisplayName = event.sender.full,
-                            attachments = attachments,
-                        )
-                        repository.upsertMessage(message)
-                        repository.upsertConversation(
-                            Conversation(
-                                id = convId,
-                                protocol = ProtocolId.MATRIX,
-                                accountId = accountId,
-                                remoteId = roomId.full,
-                                title = roomId.full,
-                                lastMessagePreview = parsed.preview.take(100),
-                                lastMessageAt = event.originTimestamp,
-                            ),
-                        )
+                        persistTimelineEvent(accountId, matrixClient, event, downloadMedia = true)
                     }
                 } catch (e: Exception) {
                     Timber.w(e, "Trixnity timeline observe failed")
                 }
             }
+            launch {
+                try {
+                    roomService.usersTyping.collect { typingByRoom ->
+                        val activeConvIds = mutableSetOf<String>()
+                        for ((roomId, content) in typingByRoom) {
+                            val convId = MatrixProtocol.conversationIdFor(accountId, roomId.full)
+                            activeConvIds.add(convId)
+                            val flow = typingFlows.getOrPut(convId) { MutableStateFlow(emptyList()) }
+                            val labels = mutableListOf<String>()
+                            for (userId in content.users) {
+                                if (userId == self) continue
+                                val name = runCatching {
+                                    userService.getById(roomId, userId).firstOrNull()
+                                        ?.name
+                                        ?.takeIf { it.isNotBlank() }
+                                }.getOrNull()
+                                labels.add(name ?: userId.full)
+                            }
+                            flow.value = labels
+                        }
+                        for ((convId, flow) in typingFlows) {
+                            if (convId !in activeConvIds && flow.value.isNotEmpty()) {
+                                flow.value = emptyList()
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    Timber.w(e, "Trixnity typing observe failed")
+                }
+            }
         }
     }
 
-    private fun parseRoomMessage(content: Any?): ParsedRoomMessage? = when (content) {
+    /**
+     * Backfills older timeline events for [roomIdFull] via Trixnity
+     * [RoomService.fillTimelineGaps], [RoomService.getLastTimelineEvents], and
+     * [RoomService.getTimelineEvents] (BACKWARDS).
+     * Returns the number of room-message events persisted.
+     */
+    suspend fun loadHistory(accountId: String, roomIdFull: String, limit: Int = 50): Int =
+        withContext(Dispatchers.IO) {
+            val matrixClient = client ?: return@withContext 0
+            val roomService = matrixClient.di.get<RoomService>()
+            val roomId = RoomId(roomIdFull)
+            val pageSize = limit.coerceIn(1, 100).toLong()
+            val room = roomService.getById(roomId).firstOrNull()
+            val startFrom = room?.lastEventId ?: room?.lastRelevantEventId
+            if (startFrom != null) {
+                runCatching { roomService.fillTimelineGaps(roomId, startFrom, pageSize) }
+                    .onFailure { Timber.w(it, "Matrix fillTimelineGaps failed for $roomIdFull") }
+            }
+            val config: GetTimelineEventsConfig.() -> Unit = {
+                maxSize = pageSize
+                fetchSize = pageSize
+                decryptionTimeout = 15.seconds
+            }
+            val eventsFlow = roomService.getLastTimelineEvents(roomId, config).firstOrNull()
+                ?: startFrom?.let {
+                    roomService.getTimelineEvents(
+                        roomId = roomId,
+                        startFrom = it,
+                        direction = GetEvents.Direction.BACKWARDS,
+                        config = config,
+                    )
+                }
+                ?: return@withContext 0
+            val messages = mutableListOf<Message>()
+            eventsFlow.collect { eventFlow ->
+                val event = eventFlow.first { it.content != null }
+                toMessage(accountId, matrixClient, event, downloadMedia = false)?.let { messages.add(it) }
+            }
+            if (messages.isNotEmpty()) {
+                repository.upsertMessages(messages)
+            }
+            messages.size
+        }
+
+    /**
+     * Builds contacts from members of joined rooms (DMs and groups), excluding self.
+     * Returns how many contacts were written.
+     */
+    suspend fun refreshContactsFromDmRooms(accountId: String): Int = withContext(Dispatchers.IO) {
+        val matrixClient = client ?: return@withContext 0
+        val roomService = matrixClient.di.get<RoomService>()
+        val userService = matrixClient.di.get<UserService>()
+        val self = matrixClient.userId
+        val rooms = roomService.getAll().flattenValues().first()
+        val contacts = linkedMapOf<String, Contact>()
+        for (room in rooms) {
+            val roomId = room.roomId
+            runCatching { userService.loadMembers(roomId, false) }
+            val members = userService.getAll(roomId).first()
+            for ((userId, userFlow) in members) {
+                if (userId == self) continue
+                val roomUser = userFlow.firstOrNull() ?: continue
+                val remote = userId.full
+                val existing = contacts[remote]
+                val displayName = roomUser.name.ifBlank { remote }
+                // Prefer a non-blank display name from a DM when already seen in a group.
+                if (existing == null || (room.isDirect && displayName != remote)) {
+                    contacts[remote] = Contact(
+                        id = "${accountId}_$remote",
+                        protocol = ProtocolId.MATRIX,
+                        accountId = accountId,
+                        remoteId = remote,
+                        displayName = displayName,
+                        handle = remote,
+                    )
+                }
+            }
+        }
+        val list = contacts.values.toList()
+        repository.replaceContacts(accountId, list)
+        list.size
+    }
+
+    suspend fun setTyping(roomIdFull: String, typing: Boolean): Result<Unit> = withContext(Dispatchers.IO) {
+        val matrixClient = client
+            ?: return@withContext Result.failure(IllegalStateException("Not connected"))
+        runCatching {
+            matrixClient.api.room.setTyping(
+                roomId = RoomId(roomIdFull),
+                userId = matrixClient.userId,
+                typing = typing,
+                timeout = if (typing) 30_000L else null,
+            ).getOrThrow()
+        }
+    }
+
+    suspend fun markRead(roomIdFull: String, eventIdFull: String?): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            val matrixClient = client
+                ?: return@withContext Result.failure(IllegalStateException("Not connected"))
+            runCatching {
+                val roomId = RoomId(roomIdFull)
+                val roomService = matrixClient.di.get<RoomService>()
+                val eventId = eventIdFull?.takeIf { it.isNotBlank() }?.let { EventId(it) }
+                    ?: roomService.getById(roomId).firstOrNull()?.lastEventId
+                    ?: roomService.getById(roomId).firstOrNull()?.lastRelevantEventId
+                    ?: error("No event to mark read in $roomIdFull")
+                matrixClient.api.room.setReadMarkers(
+                    roomId = roomId,
+                    fullyRead = eventId,
+                    read = eventId,
+                ).getOrThrow()
+                matrixClient.api.room.setReceipt(
+                    roomId = roomId,
+                    eventId = eventId,
+                    receiptType = ReceiptType.Read,
+                ).getOrThrow()
+            }
+        }
+
+    suspend fun setDisplayName(displayName: String): Result<Unit> = withContext(Dispatchers.IO) {
+        val matrixClient = client
+            ?: return@withContext Result.failure(IllegalStateException("Not connected"))
+        matrixClient.setDisplayName(displayName.trim().ifBlank { null })
+    }
+
+    fun currentDisplayName(): String? = client?.displayName?.value
+
+    fun currentUserId(): String? = client?.userId?.full
+
+    private suspend fun persistTimelineEvent(
+        accountId: String,
+        matrixClient: MatrixClient,
+        event: TimelineEvent,
+        downloadMedia: Boolean,
+    ) {
+        val message = toMessage(accountId, matrixClient, event, downloadMedia) ?: return
+        repository.upsertMessage(message)
+        val parsed = parseRoomMessage(event.eventId.full, event.content?.getOrNull()) ?: return
+        repository.upsertConversation(
+            Conversation(
+                id = message.conversationId,
+                protocol = ProtocolId.MATRIX,
+                accountId = accountId,
+                remoteId = event.roomId.full,
+                title = event.roomId.full,
+                lastMessagePreview = parsed.preview.take(100),
+                lastMessageAt = event.originTimestamp,
+            ),
+        )
+    }
+
+    private suspend fun toMessage(
+        accountId: String,
+        matrixClient: MatrixClient,
+        event: TimelineEvent,
+        downloadMedia: Boolean,
+    ): Message? {
+        val parsed = parseRoomMessage(event.eventId.full, event.content?.getOrNull()) ?: return null
+        val attachments = if (downloadMedia) {
+            downloadAttachments(matrixClient, accountId, parsed.attachments)
+        } else {
+            parsed.attachments.map { it.attachment }
+        }
+        return Message(
+            id = event.eventId.full,
+            conversationId = MatrixProtocol.conversationIdFor(accountId, event.roomId.full),
+            protocol = ProtocolId.MATRIX,
+            body = parsed.body,
+            timestamp = event.originTimestamp,
+            direction = if (event.sender == matrixClient.userId) {
+                MessageDirection.OUTGOING
+            } else {
+                MessageDirection.INCOMING
+            },
+            deliveryState = DeliveryState.DELIVERED,
+            senderDisplayName = event.sender.full,
+            attachments = attachments,
+            kind = parsed.kind,
+            payloadJson = parsed.payloadJson,
+        )
+    }
+
+    private fun parseRoomMessage(eventId: String, content: Any?): ParsedRoomMessage? = when (content) {
         is RoomMessageEventContent.FileBased.Image -> {
+            val mime = content.info?.mimeType ?: "image/*"
+            val kind = if (mime.equals("image/gif", ignoreCase = true) ||
+                content.fileName?.endsWith(".gif", ignoreCase = true) == true
+            ) {
+                MessageKind.GIF
+            } else {
+                MessageKind.IMAGE
+            }
             val attachment = attachmentFromFileContent(
-                eventSuffix = "image",
-                mimeType = content.info?.mimeType ?: "image/*",
+                attachmentId = "${eventId}_image",
+                mimeType = mime,
                 fileName = content.fileName,
                 remoteRef = content.url ?: content.file?.url?.toString(),
                 sizeBytes = content.info?.size ?: 0L,
@@ -335,12 +550,45 @@ class TrixnityMatrixEngine(
             ParsedRoomMessage(
                 body = content.body,
                 preview = content.body.ifBlank { content.fileName ?: "Image" },
+                kind = kind,
+                attachments = listOf(attachment),
+            )
+        }
+        is RoomMessageEventContent.FileBased.Video -> {
+            val attachment = attachmentFromFileContent(
+                attachmentId = "${eventId}_video",
+                mimeType = content.info?.mimeType ?: "video/*",
+                fileName = content.fileName,
+                remoteRef = content.url ?: content.file?.url?.toString(),
+                sizeBytes = content.info?.size ?: 0L,
+                encryptedFile = content.file,
+            )
+            ParsedRoomMessage(
+                body = content.body,
+                preview = content.body.ifBlank { content.fileName ?: "Video" },
+                kind = MessageKind.VIDEO,
+                attachments = listOf(attachment),
+            )
+        }
+        is RoomMessageEventContent.FileBased.Audio -> {
+            val attachment = attachmentFromFileContent(
+                attachmentId = "${eventId}_audio",
+                mimeType = content.info?.mimeType ?: "audio/*",
+                fileName = content.fileName,
+                remoteRef = content.url ?: content.file?.url?.toString(),
+                sizeBytes = content.info?.size ?: 0L,
+                encryptedFile = content.file,
+            )
+            ParsedRoomMessage(
+                body = content.body,
+                preview = content.body.ifBlank { content.fileName ?: "Audio" },
+                kind = MessageKind.VOICE,
                 attachments = listOf(attachment),
             )
         }
         is RoomMessageEventContent.FileBased.File -> {
             val attachment = attachmentFromFileContent(
-                eventSuffix = "file",
+                attachmentId = "${eventId}_file",
                 mimeType = content.info?.mimeType ?: "application/octet-stream",
                 fileName = content.fileName,
                 remoteRef = content.url ?: content.file?.url?.toString(),
@@ -350,11 +598,48 @@ class TrixnityMatrixEngine(
             ParsedRoomMessage(
                 body = content.body,
                 preview = content.body.ifBlank { content.fileName ?: "File" },
+                kind = MessageKind.FILE,
                 attachments = listOf(attachment),
             )
         }
+        is RoomMessageEventContent.Location -> {
+            val geo = content.geoUri
+            val coords = geo.removePrefix("geo:").substringBefore(';').split(',')
+            val lat = coords.getOrNull(0)?.toDoubleOrNull()
+            val lon = coords.getOrNull(1)?.toDoubleOrNull()
+            val payload = buildString {
+                append('{')
+                append("\"geoUri\":")
+                append('"').append(geo.replace("\"", "\\\"")).append('"')
+                if (lat != null && lon != null) {
+                    append(",\"lat\":").append(lat)
+                    append(",\"lon\":").append(lon)
+                }
+                append('}')
+            }
+            ParsedRoomMessage(
+                body = content.body.ifBlank { geo },
+                preview = content.body.ifBlank { "Location" },
+                kind = MessageKind.LOCATION,
+                attachments = emptyList(),
+                payloadJson = payload,
+            )
+        }
+        is RoomMessageEventContent.TextBased -> {
+            ParsedRoomMessage(
+                body = content.body,
+                preview = content.body,
+                kind = MessageKind.TEXT,
+                attachments = emptyList(),
+            )
+        }
         is RoomMessageEventContent -> {
-            ParsedRoomMessage(body = content.body, preview = content.body, attachments = emptyList())
+            ParsedRoomMessage(
+                body = content.body,
+                preview = content.body,
+                kind = MessageKind.UNKNOWN,
+                attachments = emptyList(),
+            )
         }
         else -> null
     }
@@ -365,7 +650,7 @@ class TrixnityMatrixEngine(
     )
 
     private fun attachmentFromFileContent(
-        eventSuffix: String,
+        attachmentId: String,
         mimeType: String,
         fileName: String?,
         remoteRef: String?,
@@ -373,7 +658,7 @@ class TrixnityMatrixEngine(
         encryptedFile: EncryptedFile? = null,
     ): AttachmentSeed = AttachmentSeed(
         attachment = Attachment(
-            id = "${eventSuffix}_${System.nanoTime()}",
+            id = attachmentId,
             mimeType = mimeType,
             fileName = fileName,
             remoteRef = remoteRef,
@@ -425,7 +710,9 @@ class TrixnityMatrixEngine(
     private data class ParsedRoomMessage(
         val body: String,
         val preview: String,
+        val kind: MessageKind,
         val attachments: List<AttachmentSeed>,
+        val payloadJson: String? = null,
     )
 
     suspend fun sendText(roomId: String, body: String) {
@@ -442,6 +729,7 @@ class TrixnityMatrixEngine(
         mimeType: String,
         fileName: String?,
         caption: String?,
+        kind: MessageKind = MessageKind.FILE,
     ): Result<Unit> = withContext(Dispatchers.IO) {
         val matrixClient = client ?: return@withContext Result.failure(IllegalStateException("Not connected"))
         val file = File(localPath)
@@ -450,28 +738,122 @@ class TrixnityMatrixEngine(
         }
         val roomService = matrixClient.di.get<RoomService>()
         val bytes = file.readBytes()
-        val contentType = runCatching { ContentType.parse(mimeType) }.getOrDefault(ContentType.Application.OctetStream)
         val displayName = fileName ?: file.name
         val body = caption?.takeIf { it.isNotBlank() } ?: displayName
+        val normalizedMime = when {
+            kind == MessageKind.GIF ||
+                mimeType.equals("image/gif", ignoreCase = true) ||
+                displayName.endsWith(".gif", ignoreCase = true) -> "image/gif"
+            else -> mimeType
+        }
+        val contentType = runCatching { ContentType.parse(normalizedMime) }
+            .getOrDefault(ContentType.Application.OctetStream)
         return@withContext runCatching {
             roomService.sendMessage(RoomId(roomId)) {
-                if (mimeType.startsWith("image/")) {
-                    image(
-                        body = body,
-                        image = flowOf(bytes),
-                        fileName = displayName,
-                        type = contentType,
-                        size = file.length(),
-                    )
-                } else {
-                    file(
-                        body = body,
-                        file = flowOf(bytes),
-                        fileName = displayName,
-                        type = contentType,
-                        size = file.length(),
-                    )
+                when {
+                    kind == MessageKind.VIDEO || normalizedMime.startsWith("video/") -> {
+                        video(
+                            body = body,
+                            video = flowOf(bytes),
+                            fileName = displayName,
+                            type = contentType,
+                            size = file.length(),
+                        )
+                    }
+                    kind == MessageKind.VOICE || normalizedMime.startsWith("audio/") -> {
+                        audio(
+                            body = body,
+                            audio = flowOf(bytes),
+                            fileName = displayName,
+                            type = contentType,
+                            size = file.length(),
+                        )
+                    }
+                    kind == MessageKind.IMAGE ||
+                        kind == MessageKind.GIF ||
+                        normalizedMime.startsWith("image/") -> {
+                        image(
+                            body = body,
+                            image = flowOf(bytes),
+                            fileName = displayName,
+                            type = contentType,
+                            size = file.length(),
+                        )
+                    }
+                    else -> {
+                        file(
+                            body = body,
+                            file = flowOf(bytes),
+                            fileName = displayName,
+                            type = contentType,
+                            size = file.length(),
+                        )
+                    }
                 }
+            }
+            Unit
+        }
+    }
+
+    suspend fun sendVoiceNote(
+        roomId: String,
+        localPath: String,
+        mimeType: String,
+        fileName: String?,
+        durationMs: Int,
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        val matrixClient = client ?: return@withContext Result.failure(IllegalStateException("Not connected"))
+        val file = File(localPath)
+        if (!file.exists()) {
+            return@withContext Result.failure(IllegalStateException("File not found"))
+        }
+        val roomService = matrixClient.di.get<RoomService>()
+        val bytes = file.readBytes()
+        val displayName = fileName ?: file.name
+        val audioMime = mimeType.ifBlank { "audio/ogg" }
+        val contentType = runCatching { ContentType.parse(audioMime) }
+            .getOrDefault(ContentType.parse("audio/ogg"))
+        return@withContext runCatching {
+            roomService.sendMessage(RoomId(roomId)) {
+                audio(
+                    body = displayName,
+                    audio = flowOf(bytes),
+                    fileName = displayName,
+                    type = contentType,
+                    size = file.length(),
+                    duration = durationMs.takeIf { it > 0 }?.toLong(),
+                )
+            }
+            Unit
+        }
+    }
+
+    suspend fun sendLocation(
+        roomId: String,
+        latitude: Double,
+        longitude: Double,
+        horizontalAccuracy: Double = 0.0,
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        val matrixClient = client ?: return@withContext Result.failure(IllegalStateException("Not connected"))
+        val roomService = matrixClient.di.get<RoomService>()
+        val geoUri = buildString {
+            append("geo:")
+            append(latitude)
+            append(',')
+            append(longitude)
+            if (horizontalAccuracy > 0.0) {
+                append(";u=")
+                append(horizontalAccuracy)
+            }
+        }
+        return@withContext runCatching {
+            roomService.sendMessage(RoomId(roomId)) {
+                content(
+                    RoomMessageEventContent.Location(
+                        body = geoUri,
+                        geoUri = geoUri,
+                    ),
+                )
             }
             Unit
         }
@@ -480,6 +862,8 @@ class TrixnityMatrixEngine(
     fun close() {
         observeJob?.cancel()
         observeJob = null
+        typingFlows.values.forEach { it.value = emptyList() }
+        typingFlows.clear()
         try {
             client?.close()
         } catch (_: Exception) {

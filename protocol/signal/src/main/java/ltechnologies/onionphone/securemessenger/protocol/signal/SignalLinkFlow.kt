@@ -30,12 +30,12 @@ internal class SignalLinkFlow(
 
     /**
      * Starts the provisioning socket. Invokes [onProvisioningUrl] when the QR payload is ready,
-     * then [onOutcome] when linking finishes or fails.
-     * @return closeable that cancels the socket.
+     * [onProgress] for post-scan status, then [onOutcome] when linking finishes or fails.
      */
     fun start(
         deviceName: String,
         onProvisioningUrl: (String) -> Unit,
+        onProgress: (String) -> Unit = {},
         onOutcome: (SignalRegistrationOutcome) -> Unit,
     ): Closeable {
         val ephemeralIdentity = IdentityKeyPair.generate()
@@ -64,12 +64,16 @@ internal class SignalLinkFlow(
             },
         ) { socket ->
             val url = socket.getProvisioningUrl()
+            Timber.i("Signal link: provisioning URL ready")
             onProvisioningUrl(url)
             when (val decrypted = socket.getProvisioningMessageDecryptResult()) {
                 is SecondaryProvisioningCipher.ProvisioningDecryptResult.Success -> {
+                    Timber.i("Signal link: provision message decrypted — registering secondary device")
+                    onProgress("Provision reçu — finalisation sur cet appareil…")
                     finish(completeLink(decrypted.message, deviceName))
                 }
                 is SecondaryProvisioningCipher.ProvisioningDecryptResult.Error -> {
+                    Timber.w("Signal link: provision decrypt failed")
                     finish(
                         SignalRegistrationOutcome(
                             step = SignalRegistrationStep.Failed("Message de provisionnement invalide"),
@@ -110,11 +114,13 @@ internal class SignalLinkFlow(
         val password = generateSignalPassword()
         val preKeys = SignalPreKeyMaterial.fromIdentities(aciIdentity, pniIdentity)
         val api = registrationApi(e164, password)
+        val attributes = preKeys.buildDeviceAttributes(deviceName, aciIdentity)
 
+        Timber.i("Signal link: PUT /v1/devices/link for %s", e164)
         return when (
             val result = api.registerAsSecondaryDevice(
                 verificationCode = provisioningCode,
-                attributes = preKeys.buildDeviceAttributes(deviceName),
+                attributes = attributes,
                 aciPreKeys = preKeys.aciPreKeys,
                 pniPreKeys = preKeys.pniPreKeys,
                 fcmToken = null,
@@ -123,18 +129,23 @@ internal class SignalLinkFlow(
             is NetworkResult.Success -> {
                 val deviceId = result.result.deviceId?.takeIf { it.isNotBlank() }
                     ?: return failure("deviceId manquant dans la réponse")
-                val aci = result.result.uuid?.let { ACI.from(it) }
-                    ?: message.aci?.let { runCatching { ACI.parseOrThrow(it) }.getOrNull() }
+                val aci = resolveAci(message, result.result.uuid)
                     ?: return failure("ACI manquant")
-                val pni = result.result.pni?.let { PNI.from(it) }
-                    ?: message.pni?.let { runCatching { PNI.parseOrThrow(it) }.getOrNull() }
+                val pni = resolvePni(message, result.result.pni)
                     ?: return failure("PNI manquant")
                 val secrets = buildMap {
                     put(SignalCredentialKeys.E164, e164)
                     put(SignalCredentialKeys.ACI, aci.toString())
                     put(SignalCredentialKeys.PNI, pni.toString())
                     putAll(preKeys.toSecrets(password, pin = null, deviceId = deviceId))
+                    message.profileKey?.takeIf { it.size > 0 }?.let { pk ->
+                        put(
+                            SignalCredentialKeys.PROFILE_KEY,
+                            android.util.Base64.encodeToString(pk.toByteArray(), android.util.Base64.NO_WRAP),
+                        )
+                    }
                 }
+                Timber.i("Signal link: success deviceId=%s", deviceId)
                 SignalRegistrationOutcome(
                     step = SignalRegistrationStep.Complete,
                     message = "Appareil lié ($deviceName)",
@@ -142,13 +153,35 @@ internal class SignalLinkFlow(
                     displayName = e164,
                 )
             }
-            is NetworkResult.StatusCodeError ->
+            is NetworkResult.StatusCodeError -> {
+                Timber.e(result.exception, "Signal link refused HTTP %s", result.code)
                 failure(result.exception.message ?: "Lien refusé (${result.code})")
-            is NetworkResult.NetworkError ->
+            }
+            is NetworkResult.NetworkError -> {
+                Timber.e(result.exception, "Signal link network error")
                 failure(result.exception.message ?: "Erreur réseau pendant le lien")
-            is NetworkResult.ApplicationError ->
+            }
+            is NetworkResult.ApplicationError -> {
+                Timber.e(result.throwable, "Signal link application error")
                 failure(result.throwable.message ?: "Erreur de lien")
+            }
         }
+    }
+
+    private fun resolveAci(message: ProvisionMessage, responseUuid: java.util.UUID?): ACI? {
+        responseUuid?.let { return ACI.from(it) }
+        message.aciBinary?.takeIf { it.size > 0 }?.let { bytes ->
+            runCatching { ACI.parseOrThrow(bytes.toByteArray()) }.getOrNull()?.let { return it }
+        }
+        return message.aci?.let { runCatching { ACI.parseOrThrow(it) }.getOrNull() }
+    }
+
+    private fun resolvePni(message: ProvisionMessage, responseUuid: java.util.UUID?): PNI? {
+        responseUuid?.let { return PNI.from(it) }
+        message.pniBinary?.takeIf { it.size > 0 }?.let { bytes ->
+            runCatching { PNI.parseOrThrow(bytes.toByteArray()) }.getOrNull()?.let { return it }
+        }
+        return message.pni?.let { runCatching { PNI.parseOrThrow(it) }.getOrNull() }
     }
 
     private fun registrationApi(e164: String, password: String): RegistrationApi {
@@ -172,7 +205,8 @@ internal class SignalLinkFlow(
         if (publicKey == null || privateKey == null) return null
         return runCatching {
             IdentityKeyPair(IdentityKey(publicKey), ECPrivateKey(privateKey))
-        }.getOrNull()
+        }.onFailure { Timber.w(it, "Failed to parse provision identity keys") }
+            .getOrNull()
     }
 
     private fun failure(reason: String) = SignalRegistrationOutcome(

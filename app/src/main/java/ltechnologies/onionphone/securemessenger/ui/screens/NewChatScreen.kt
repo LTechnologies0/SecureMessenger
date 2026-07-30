@@ -14,15 +14,21 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -32,6 +38,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import ltechnologies.onionphone.securemessenger.core.model.ProtocolId
 import ltechnologies.onionphone.securemessenger.ui.MainViewModel
+import ltechnologies.onionphone.securemessenger.ui.components.CapabilityChipRow
+import ltechnologies.onionphone.securemessenger.ui.components.ProtocolAccentChip
+import ltechnologies.onionphone.securemessenger.ui.components.capabilityLabels
+import ltechnologies.onionphone.securemessenger.ui.components.protocolDisplayName
 import ltechnologies.onionphone.securemessenger.ui.components.protocolShortPrefix
 
 @OptIn(
@@ -58,9 +68,56 @@ fun NewChatScreen(
     var asGroup by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
     val capabilities = remember(protocol) { viewModel.capabilitiesFor(protocol) }
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    LaunchedEffect(status) {
+        val msg = status ?: return@LaunchedEffect
+        snackbarHostState.showSnackbar(msg)
+    }
+
+    val remoteHint = when {
+        protocol == ProtocolId.XMPP && asGroup ->
+            "JID salle (room@conference.domain)"
+        protocol == ProtocolId.XMPP -> "JID (user@domain)"
+        protocol == ProtocolId.MATRIX && asGroup ->
+            "Room ID (!abc:server)"
+        protocol == ProtocolId.MATRIX -> "Room ID ou @user:server"
+        protocol == ProtocolId.TELEGRAM && asGroup ->
+            "Chat ID groupe / @channel"
+        protocol == ProtocolId.TELEGRAM ->
+            "Chat ID, @username ou téléphone (+33…)"
+        protocol == ProtocolId.SIGNAL && asGroup ->
+            "Identifiant gv2:… (groupe existant)"
+        protocol == ProtocolId.SIGNAL -> "Numéro E.164 (+33…) ou ACI"
+        else -> "Identifiant distant"
+    }
+
+    val supportingHint = when (protocol) {
+        ProtocolId.XMPP -> if (asGroup) {
+            "Exemple : salon@conference.jabber.fr"
+        } else {
+            "Exemple : ami@jabber.fr"
+        }
+        ProtocolId.MATRIX -> if (asGroup) {
+            "Exemple : !roomId:matrix.org"
+        } else {
+            "Exemple : @ami:matrix.org"
+        }
+        ProtocolId.TELEGRAM -> if (asGroup) {
+            "ID numérique négatif ou @canal"
+        } else {
+            "Recherche téléphone disponible ci-dessous"
+        }
+        ProtocolId.SIGNAL -> if (asGroup) {
+            "Collez l'identifiant de groupe Signal"
+        } else {
+            "Format international obligatoire (+…)"
+        }
+    }
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
                 title = { Text("Nouveau chat") },
@@ -77,94 +134,110 @@ fun NewChatScreen(
                 .padding(padding)
                 .padding(16.dp)
                 .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             if (accounts.none { it.protocol == protocol }) {
                 Text(
                     "Connecte un compte ${protocolShortPrefix(protocol)} d'abord.",
                     color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodyMedium,
                 )
             }
 
             Text("Protocole", style = MaterialTheme.typography.titleSmall)
             if (boundAccount != null) {
                 Text(
-                    "${boundAccount.displayName} · ${protocolShortPrefix(boundAccount.protocol)}",
+                    "${boundAccount.displayName} · ${protocolDisplayName(boundAccount.protocol)}",
                     style = MaterialTheme.typography.bodyLarge,
                 )
             } else {
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     viewModel.enabledProtocols.forEach { p ->
-                        FilterChip(
+                        ProtocolAccentChip(
+                            protocol = p,
                             selected = protocol == p,
                             onClick = {
                                 protocol = p
                                 asGroup = false
                             },
-                            label = { Text(protocolShortPrefix(p)) },
                         )
                     }
                 }
             }
 
+            CapabilityChipRow(labels = capabilityLabels(capabilities))
+
             if (capabilities.groupChats) {
-                FilterChip(
-                    selected = asGroup,
-                    onClick = { asGroup = !asGroup },
-                    label = {
+                Text("Type", style = MaterialTheme.typography.titleSmall)
+                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                    SegmentedButton(
+                        selected = !asGroup,
+                        onClick = { asGroup = false },
+                        shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+                    ) {
+                        Text("Direct")
+                    }
+                    SegmentedButton(
+                        selected = asGroup,
+                        onClick = { asGroup = true },
+                        shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+                    ) {
                         Text(
                             when (protocol) {
-                                ProtocolId.XMPP -> "Rejoindre une salle MUC"
-                                ProtocolId.MATRIX -> "Rejoindre une room"
-                                ProtocolId.TELEGRAM -> "Groupe / canal"
-                                ProtocolId.SIGNAL -> "Groupe Signal (gv2:…)"
+                                ProtocolId.XMPP -> "Salle MUC"
+                                ProtocolId.MATRIX -> "Room"
+                                ProtocolId.TELEGRAM -> "Groupe"
+                                ProtocolId.SIGNAL -> "Groupe"
                             },
                         )
-                    },
-                )
+                    }
+                }
             }
 
             OutlinedTextField(
                 value = remoteId,
                 onValueChange = { remoteId = it },
-                label = {
-                    Text(
-                        when {
-                            protocol == ProtocolId.XMPP && asGroup ->
-                                "JID salle (room@conference.domain)"
-                            protocol == ProtocolId.XMPP -> "JID (user@domain)"
-                            protocol == ProtocolId.MATRIX && asGroup ->
-                                "Room ID (!abc:server)"
-                            protocol == ProtocolId.MATRIX -> "Room ID ou @user:server"
-                            protocol == ProtocolId.TELEGRAM && asGroup ->
-                                "Chat ID groupe / @channel"
-                            protocol == ProtocolId.TELEGRAM -> "Chat ID ou @username"
-                            protocol == ProtocolId.SIGNAL && asGroup ->
-                                "Identifiant gv2:… (groupe existant)"
-                            protocol == ProtocolId.SIGNAL -> "Numéro E.164 (+33…) ou ACI"
-                            else -> "Remote ID"
-                        },
-                    )
-                },
+                label = { Text(remoteHint) },
+                supportingText = { Text(supportingHint) },
                 modifier = Modifier.fillMaxWidth(),
-                supportingText = {
-                    val hints = buildList {
-                        if (capabilities.directMessages) add("DM")
-                        if (capabilities.groupChats) add("groupes")
-                        if (capabilities.mediaSend) add("médias")
-                        if (capabilities.endToEndEncryption) add("E2EE")
-                    }
-                    if (hints.isNotEmpty()) {
-                        Text("Capacités : ${hints.joinToString(" · ")}")
-                    }
-                },
+                singleLine = true,
             )
+
+            if (protocol == ProtocolId.TELEGRAM && !asGroup) {
+                OutlinedButton(
+                    onClick = {
+                        val phone = remoteId.trim()
+                        if (phone.isBlank()) {
+                            status = "Numéro requis"
+                            return@OutlinedButton
+                        }
+                        status = "Recherche…"
+                        viewModel.searchTelegramUserByPhone(
+                            phoneNumber = phone,
+                            accountId = boundAccount?.id,
+                        ) { contact ->
+                            if (contact != null) {
+                                remoteId = contact.remoteId
+                                status = "Trouvé : ${contact.displayName}"
+                            } else {
+                                status = "Aucun utilisateur Telegram pour ce numéro"
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Chercher par numéro de téléphone")
+                }
+            }
+
             OutlinedTextField(
                 value = firstMessage,
                 onValueChange = { firstMessage = it },
                 label = { Text("Premier message (optionnel)") },
                 modifier = Modifier.fillMaxWidth(),
+                maxLines = 3,
             )
+
             Button(
                 onClick = {
                     if (remoteId.isBlank()) {
@@ -192,9 +265,6 @@ fun NewChatScreen(
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(if (asGroup) "Rejoindre / ouvrir le groupe" else "Démarrer")
-            }
-            status?.let {
-                Text(it, color = MaterialTheme.colorScheme.error)
             }
         }
     }

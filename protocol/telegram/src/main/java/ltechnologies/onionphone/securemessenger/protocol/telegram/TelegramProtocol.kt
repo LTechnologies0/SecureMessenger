@@ -16,17 +16,21 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import ltechnologies.onionphone.securemessenger.core.model.AccountCredentials
+import ltechnologies.onionphone.securemessenger.core.model.AccountProfile
 import ltechnologies.onionphone.securemessenger.core.model.Attachment
 import ltechnologies.onionphone.securemessenger.core.model.AttachmentState
 import ltechnologies.onionphone.securemessenger.core.model.AuthStep
 import ltechnologies.onionphone.securemessenger.core.model.AuthStepKind
+import ltechnologies.onionphone.securemessenger.core.model.BackupExportResult
 import ltechnologies.onionphone.securemessenger.core.model.ConnectionResult
 import ltechnologies.onionphone.securemessenger.core.model.ConnectionState
+import ltechnologies.onionphone.securemessenger.core.model.Contact
 import ltechnologies.onionphone.securemessenger.core.model.Conversation
 import ltechnologies.onionphone.securemessenger.core.model.DeliveryState
 import ltechnologies.onionphone.securemessenger.core.model.HistoryLoadResult
 import ltechnologies.onionphone.securemessenger.core.model.Message
-import ltechnologies.onionphone.securemessenger.core.model.MessageDirection
+import ltechnologies.onionphone.securemessenger.core.model.MessageKind
+import ltechnologies.onionphone.securemessenger.core.model.OutgoingContent
 import ltechnologies.onionphone.securemessenger.core.model.ProtocolCapabilities
 import ltechnologies.onionphone.securemessenger.core.model.ProtocolId
 import ltechnologies.onionphone.securemessenger.core.model.ProxyConfig
@@ -37,7 +41,18 @@ import ltechnologies.onionphone.securemessenger.core.network.NetworkGuard
 import ltechnologies.onionphone.securemessenger.data.MessengerRepository
 import ltechnologies.onionphone.securemessenger.protocol.api.MessengerProtocol
 import org.drinkless.tdlib.TdApi
+import org.json.JSONObject
 import timber.log.Timber
+import java.io.File
+import java.io.FileOutputStream
+import java.nio.charset.StandardCharsets
+
+/** Sticker ready for the composer (local path after TDLib download). */
+data class TelegramSticker(
+    val id: Long,
+    val emoji: String,
+    val localPath: String?,
+)
 
 /**
  * TDLib adapter implementing [MessengerProtocol].
@@ -62,6 +77,17 @@ class TelegramProtocol @Inject constructor(
         readReceipts = true,
         endToEndEncryption = false,
         requiresPhoneAuth = true,
+        contacts = true,
+        profileEdit = true,
+        voiceNotes = true,
+        stickers = true,
+        gifs = true,
+        locationShare = true,
+        polls = true,
+        contactShare = true,
+        ephemeralMessages = true,
+        messageHistory = true,
+        backupExport = true,
     )
 
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
@@ -72,6 +98,9 @@ class TelegramProtocol @Inject constructor(
 
     private val _lastAuthError = MutableStateFlow<String?>(null)
     fun observeLastAuthError(): StateFlow<String?> = _lastAuthError.asStateFlow()
+
+    /** conversationId → display names of users currently typing. */
+    private val typingFlows = ConcurrentHashMap<String, MutableStateFlow<List<String>>>()
 
     private val updateScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -192,9 +221,43 @@ class TelegramProtocol @Inject constructor(
             is TdApi.UpdateDeleteMessages -> onDeleteMessages(accId, update)
             is TdApi.UpdateMessageContent -> onMessageContent(accId, update.chatId, update.messageId, update.newContent)
             is TdApi.UpdateFile -> onFileUpdate(accId, update.file)
+            is TdApi.UpdateChatAction -> onChatAction(accId, update)
             else -> Unit
         }
     }
+
+    private fun onChatAction(accId: String, update: TdApi.UpdateChatAction) {
+        val convId = TdLibMapper.conversationId(accId, update.chatId)
+        val flow = typingFlows.getOrPut(convId) { MutableStateFlow(emptyList()) }
+        val sender = update.senderId
+        val userId = (sender as? TdApi.MessageSenderUser)?.userId ?: return
+        val isTyping = update.action is TdApi.ChatActionTyping ||
+            update.action is TdApi.ChatActionRecordingVideo ||
+            update.action is TdApi.ChatActionRecordingVoiceNote ||
+            update.action is TdApi.ChatActionUploadingPhoto ||
+            update.action is TdApi.ChatActionUploadingVideo ||
+            update.action is TdApi.ChatActionUploadingVoiceNote ||
+            update.action is TdApi.ChatActionUploadingDocument
+        updateScope.launch {
+            val label = withContext(sessions[accId]?.dispatcher ?: Dispatchers.IO) {
+                sessions[accId]?.facade?.getUser(userId)?.let { u ->
+                    "${u.firstName} ${u.lastName}".trim().ifBlank {
+                        u.usernames?.editableUsername ?: userId.toString()
+                    }
+                } ?: userId.toString()
+            }
+            val current = flow.value.toMutableList()
+            if (isTyping) {
+                if (label !in current) current.add(label)
+            } else {
+                current.removeAll { it == label || it == userId.toString() }
+            }
+            flow.value = current
+        }
+    }
+
+    override fun observeTyping(conversationId: String): StateFlow<List<String>> =
+        typingFlows.getOrPut(conversationId) { MutableStateFlow(emptyList()) }.asStateFlow()
 
     private fun onNewMessage(accId: String, msg: TdApi.Message) {
         val domain = TdLibMapper.toMessage(accId, msg)
@@ -287,10 +350,19 @@ class TelegramProtocol @Inject constructor(
         val convId = TdLibMapper.conversationId(accId, chatId)
         val id = TdLibMapper.messageId(convId, messageId)
         val attachments = TdLibMapper.attachmentsFromContent(content, id)
+        val kind = TdLibMapper.messageKind(content)
+        val payload = TdLibMapper.payloadJson(content)
         updateScope.launch {
             val existing = repository.observeMessages(convId).first().firstOrNull { it.id == id }
             if (existing != null) {
-                repository.upsertMessage(existing.copy(body = body, attachments = attachments))
+                repository.upsertMessage(
+                    existing.copy(
+                        body = body,
+                        attachments = attachments,
+                        kind = kind,
+                        payloadJson = payload,
+                    ),
+                )
             }
         }
     }
@@ -541,6 +613,8 @@ class TelegramProtocol @Inject constructor(
         session.awaitingAuth = AuthStepKind.NONE
         authenticatingAccountId = null
         syncChatList(accId, session)
+        runCatching { refreshContacts(accId) }
+            .onFailure { Timber.w(it, "Telegram contacts refresh after auth failed") }
         val me = withContext(session.dispatcher) { session.facade.getMe() }
         val displayName = me?.let { "${it.firstName} ${it.lastName}".trim().ifBlank { null } }
             ?: session.pendingPhone
@@ -702,8 +776,8 @@ class TelegramProtocol @Inject constructor(
         return withContext(session.dispatcher) {
             try {
                 networkGuard.assertNetworkAllowed()
-                session.facade.sendText(chatId, body.value)
-                SendResult.Success("pending")
+                val error = session.facade.sendTextMessage(chatId, body.value)
+                if (error != null) SendResult.Failure(error) else SendResult.Success("pending")
             } catch (e: NetworkBlockedException) {
                 SendResult.Failure(e.message ?: "Réseau indisponible")
             }
@@ -738,6 +812,473 @@ class TelegramProtocol @Inject constructor(
             } catch (e: NetworkBlockedException) {
                 SendResult.Failure(e.message ?: "Réseau indisponible")
             }
+        }
+    }
+
+    override suspend fun sendContent(
+        conversationId: String,
+        content: OutgoingContent,
+        accountId: String?,
+    ): SendResult {
+        when (content) {
+            is OutgoingContent.Text -> return sendMessage(conversationId, content.body, accountId)
+            is OutgoingContent.Media -> {
+                if (content.kind == MessageKind.GIF) {
+                    val path = content.attachment.localPath
+                        ?: return SendResult.Failure("Missing local file")
+                    return sendViaFacade(conversationId, accountId) { facade, chatId ->
+                        facade.sendAnimation(chatId, path, content.caption?.value)
+                    }
+                }
+                return sendMedia(conversationId, content.attachment, content.caption, accountId)
+            }
+            is OutgoingContent.VoiceNote -> {
+                val path = content.attachment.localPath
+                    ?: return SendResult.Failure("Missing local file")
+                return sendViaFacade(conversationId, accountId) { facade, chatId ->
+                    facade.sendVoiceNote(chatId, path, content.durationMs)
+                }
+            }
+            is OutgoingContent.Location -> return sendViaFacade(conversationId, accountId) { facade, chatId ->
+                facade.sendLocation(
+                    chatId,
+                    content.latitude,
+                    content.longitude,
+                    content.horizontalAccuracy,
+                    content.livePeriodSec,
+                )
+            }
+            is OutgoingContent.ContactCard -> return sendViaFacade(conversationId, accountId) { facade, chatId ->
+                facade.sendContact(
+                    chatId,
+                    content.firstName,
+                    content.lastName,
+                    content.phone,
+                    content.userId ?: 0L,
+                )
+            }
+            is OutgoingContent.Poll -> {
+                if (content.options.size < 2) {
+                    return SendResult.Failure("Un sondage nécessite au moins 2 options")
+                }
+                return sendViaFacade(conversationId, accountId) { facade, chatId ->
+                    facade.sendPoll(
+                        chatId,
+                        content.question,
+                        content.options,
+                        content.anonymous,
+                        content.multipleAnswers,
+                    )
+                }
+            }
+            is OutgoingContent.Sticker -> return sendViaFacade(conversationId, accountId) { facade, chatId ->
+                facade.sendSticker(chatId, content.localPath, content.emoji)
+            }
+            is OutgoingContent.Ephemeral -> {
+                if (content.expireSeconds <= 0) {
+                    return SendResult.Failure("Durée d'expiration invalide")
+                }
+                return sendViaFacade(conversationId, accountId) { facade, chatId ->
+                    facade.setChatMessageAutoDeleteTime(chatId, content.expireSeconds)
+                        ?: facade.sendTextMessage(chatId, content.body.value)
+                }
+            }
+        }
+    }
+
+    private suspend fun sendViaFacade(
+        conversationId: String,
+        accountId: String?,
+        send: suspend (TdLibFacade, Long) -> String?,
+    ): SendResult {
+        val accId = accountId
+            ?: TdLibMapper.accountIdFromConversation(conversationId)
+            ?: return SendResult.Failure("Invalid conversation")
+        val session = sessions[accId] ?: return SendResult.Failure("Telegram not connected")
+        if (!session.nativeAvailable) return SendResult.Failure("Telegram not connected")
+        val chatId = TdLibMapper.chatIdFromConversation(conversationId)
+            ?: return SendResult.Failure("Invalid conversation")
+        return withContext(session.dispatcher) {
+            try {
+                networkGuard.assertNetworkAllowed()
+                val error = send(session.facade, chatId)
+                if (error != null) SendResult.Failure(error) else SendResult.Success("pending")
+            } catch (e: NetworkBlockedException) {
+                SendResult.Failure(e.message ?: "Réseau indisponible")
+            }
+        }
+    }
+
+    override fun observeContacts(accountId: String): Flow<List<Contact>> =
+        repository.observeContacts(accountId)
+
+    override suspend fun refreshContacts(accountId: String): Result<Int> {
+        val session = sessions[accountId]
+            ?: return Result.failure(IllegalStateException("Telegram non connecté"))
+        if (!session.nativeAvailable) {
+            return Result.failure(IllegalStateException("TDLib indisponible"))
+        }
+        return withContext(session.dispatcher) {
+            runCatching {
+                networkGuard.assertNetworkAllowed()
+                val userIds = session.facade.getContacts()
+                val contacts = userIds.mapNotNull { uid ->
+                    session.facade.getUser(uid)?.let { TdLibMapper.toContact(accountId, it) }
+                }
+                withContext(Dispatchers.IO) {
+                    repository.replaceContacts(accountId, contacts)
+                }
+                contacts.size
+            }
+        }
+    }
+
+    override suspend fun getAccountProfile(accountId: String): AccountProfile? {
+        val session = sessions[accountId] ?: return null
+        return withContext(session.dispatcher) {
+            val me = session.facade.getMe() ?: return@withContext null
+            val full = session.facade.getUserFullInfo(me.id)
+            val handle = me.usernames?.editableUsername?.takeIf { it.isNotBlank() }
+                ?: me.usernames?.activeUsernames?.firstOrNull()?.takeIf { it.isNotBlank() }
+            AccountProfile(
+                accountId = accountId,
+                protocol = ProtocolId.TELEGRAM,
+                displayName = "${me.firstName} ${me.lastName}".trim().ifBlank {
+                    handle ?: me.phoneNumber.ifBlank { accountId }
+                },
+                handle = handle?.let { "@$it" },
+                phone = me.phoneNumber.takeIf { it.isNotBlank() },
+                bio = full?.bio?.text?.takeIf { it.isNotBlank() },
+                avatarLocalPath = me.profilePhoto?.small?.local?.path?.takeIf { it.isNotBlank() },
+            )
+        }
+    }
+
+    override suspend fun updateAccountProfile(
+        accountId: String,
+        displayName: String,
+        bio: String?,
+    ): Result<Unit> {
+        val session = sessions[accountId]
+            ?: return Result.failure(IllegalStateException("Telegram non connecté"))
+        return withContext(session.dispatcher) {
+            runCatching {
+                networkGuard.assertNetworkAllowed()
+                val parts = displayName.trim().split(Regex("\\s+"), limit = 2)
+                val first = parts.getOrNull(0).orEmpty().ifBlank { "User" }
+                val last = parts.getOrNull(1).orEmpty()
+                session.facade.setName(first, last)?.let { throw IllegalStateException(it) }
+                if (bio != null) {
+                    session.facade.setBio(bio)?.let { throw IllegalStateException(it) }
+                }
+            }
+        }
+    }
+
+    /** Uploads a local image as the account profile photo. */
+    suspend fun setProfilePhoto(accountId: String, localPath: String): Result<Unit> {
+        val session = sessions[accountId]
+            ?: return Result.failure(IllegalStateException("Telegram non connecté"))
+        return withContext(session.dispatcher) {
+            runCatching {
+                networkGuard.assertNetworkAllowed()
+                session.facade.setProfilePhoto(localPath)?.let { throw IllegalStateException(it) }
+                Unit
+            }
+        }
+    }
+
+    /**
+     * Looks up a Telegram user by phone (E.164 preferred) and opens/creates their private chat.
+     * Useful for NewChat when the remote id is a phone number.
+     */
+    suspend fun searchUserByPhoneNumber(
+        phoneNumber: String,
+        accountId: String? = null,
+    ): Result<Contact> {
+        val accId = accountId ?: sessions.keys.singleOrNull()
+            ?: return Result.failure(IllegalStateException("Telegram non connecté"))
+        val session = sessions[accId]
+            ?: return Result.failure(IllegalStateException("Telegram non connecté"))
+        return withContext(session.dispatcher) {
+            runCatching {
+                networkGuard.assertNetworkAllowed()
+                val normalized = phoneNumber.trim()
+                val user = session.facade.searchUserByPhoneNumber(normalized)
+                    ?: throw IllegalStateException("Aucun utilisateur pour $normalized")
+                val chat = session.facade.createPrivateChat(user.id)
+                if (chat != null) {
+                    withContext(Dispatchers.IO) {
+                        repository.upsertConversation(TdLibMapper.toConversation(accId, chat))
+                    }
+                }
+                val contact = TdLibMapper.toContact(accId, user)
+                withContext(Dispatchers.IO) {
+                    val existing = repository.observeContacts(accId).first()
+                    if (existing.none { it.remoteId == contact.remoteId }) {
+                        repository.replaceContacts(accId, existing + contact)
+                    }
+                }
+                contact
+            }
+        }
+    }
+
+    /** Optional phonebook import via [TdApi.ImportContacts]. */
+    suspend fun importContacts(
+        accountId: String,
+        entries: List<Triple<String, String, String>>,
+    ): Result<Int> {
+        val session = sessions[accountId]
+            ?: return Result.failure(IllegalStateException("Telegram non connecté"))
+        return withContext(session.dispatcher) {
+            runCatching {
+                networkGuard.assertNetworkAllowed()
+                val imported = entries.map { (phone, first, last) ->
+                    TdApi.ImportedContact(
+                        phone,
+                        first,
+                        last,
+                        TdApi.FormattedText("", emptyArray()),
+                    )
+                }.toTypedArray()
+                val result = session.facade.importContacts(imported)
+                    ?: throw IllegalStateException("Import contacts échoué")
+                refreshContacts(accountId)
+                result.userIds?.count { it != 0L } ?: 0
+            }
+        }
+    }
+
+    suspend fun votePoll(
+        conversationId: String,
+        messageId: String,
+        optionIds: IntArray,
+    ): Result<Unit> {
+        val session = sessionForConversation(conversationId)
+            ?: return Result.failure(IllegalStateException("Telegram non connecté"))
+        val chatId = TdLibMapper.chatIdFromConversation(conversationId)
+            ?: return Result.failure(IllegalStateException("Conversation invalide"))
+        val tdMessageId = messageId.substringAfterLast('_').toLongOrNull()
+            ?: return Result.failure(IllegalStateException("Message invalide"))
+        return withContext(session.dispatcher) {
+            runCatching {
+                networkGuard.assertNetworkAllowed()
+                session.facade.setPollAnswer(chatId, tdMessageId, optionIds)
+                    ?.let { throw IllegalStateException(it) }
+                Unit
+            }
+        }
+    }
+
+    suspend fun addReaction(
+        conversationId: String,
+        messageId: String,
+        emoji: String,
+    ): Result<Unit> {
+        val session = sessionForConversation(conversationId)
+            ?: return Result.failure(IllegalStateException("Telegram non connecté"))
+        val chatId = TdLibMapper.chatIdFromConversation(conversationId)
+            ?: return Result.failure(IllegalStateException("Conversation invalide"))
+        val tdMessageId = messageId.substringAfterLast('_').toLongOrNull()
+            ?: return Result.failure(IllegalStateException("Message invalide"))
+        return withContext(session.dispatcher) {
+            runCatching {
+                networkGuard.assertNetworkAllowed()
+                session.facade.addMessageReaction(chatId, tdMessageId, emoji)
+                    ?.let { throw IllegalStateException(it) }
+                Unit
+            }
+        }
+    }
+
+    suspend fun forwardMessages(
+        toConversationId: String,
+        fromConversationId: String,
+        messageIds: List<String>,
+    ): Result<Unit> {
+        val toSession = sessionForConversation(toConversationId)
+            ?: return Result.failure(IllegalStateException("Telegram non connecté"))
+        val toChatId = TdLibMapper.chatIdFromConversation(toConversationId)
+            ?: return Result.failure(IllegalStateException("Destination invalide"))
+        val fromChatId = TdLibMapper.chatIdFromConversation(fromConversationId)
+            ?: return Result.failure(IllegalStateException("Source invalide"))
+        val tdIds = messageIds.mapNotNull { it.substringAfterLast('_').toLongOrNull() }.toLongArray()
+        if (tdIds.isEmpty()) return Result.failure(IllegalStateException("Aucun message"))
+        return withContext(toSession.dispatcher) {
+            runCatching {
+                networkGuard.assertNetworkAllowed()
+                toSession.facade.forwardMessages(toChatId, fromChatId, tdIds)
+                    ?.let { throw IllegalStateException(it) }
+                Unit
+            }
+        }
+    }
+
+    /**
+     * Lists stickers from installed packs (covers + [GetStickers]), downloading files when needed.
+     */
+    suspend fun listStickers(
+        accountId: String? = null,
+        query: String = "",
+        limit: Int = 40,
+    ): List<TelegramSticker> {
+        val accId = accountId ?: sessions.keys.singleOrNull() ?: return emptyList()
+        val session = sessions[accId] ?: return emptyList()
+        return withContext(session.dispatcher) {
+            runCatching {
+                networkGuard.assertNetworkAllowed()
+                val fromSearch = session.facade.getStickers(query, limit)
+                val fromSets = if (fromSearch.isEmpty() || query.isBlank()) {
+                    session.facade.getInstalledStickerSets()
+                        .take(5)
+                        .flatMap { info ->
+                            val set = session.facade.getStickerSet(info.id)
+                            set?.stickers?.toList().orEmpty().take(8)
+                        }
+                } else {
+                    emptyList()
+                }
+                val stickers = (fromSearch + fromSets)
+                    .distinctBy { it.id }
+                    .take(limit)
+                stickers.map { sticker ->
+                    val file = sticker.sticker
+                    var localPath = file?.local?.path?.takeIf { it.isNotBlank() }
+                    if (localPath == null && file != null) {
+                        val downloaded = session.facade.downloadFile(file.id)
+                        localPath = downloaded?.local?.path?.takeIf { it.isNotBlank() }
+                    }
+                    TelegramSticker(
+                        id = sticker.id,
+                        emoji = sticker.emoji.orEmpty().ifBlank { "⭐" },
+                        localPath = localPath,
+                    )
+                }
+            }.getOrElse {
+                Timber.w(it, "listStickers failed")
+                emptyList()
+            }
+        }
+    }
+
+    /** Sets chat-wide auto-delete TTL (seconds); 0 disables. */
+    suspend fun setChatMessageAutoDeleteTime(
+        conversationId: String,
+        expireSeconds: Int,
+    ): Result<Unit> {
+        val session = sessionForConversation(conversationId)
+            ?: return Result.failure(IllegalStateException("Telegram non connecté"))
+        val chatId = TdLibMapper.chatIdFromConversation(conversationId)
+            ?: return Result.failure(IllegalStateException("Conversation invalide"))
+        return withContext(session.dispatcher) {
+            runCatching {
+                networkGuard.assertNetworkAllowed()
+                session.facade.setChatMessageAutoDeleteTime(chatId, expireSeconds)
+                    ?.let { throw IllegalStateException(it) }
+                Unit
+            }
+        }
+    }
+
+    /**
+     * Sends a self-destructing photo/voice (per-message timer, independent of chat TTL).
+     */
+    suspend fun sendSelfDestructMedia(
+        conversationId: String,
+        localPath: String,
+        mimeType: String,
+        expireSeconds: Int,
+        caption: String? = null,
+        durationMs: Int = 0,
+        accountId: String? = null,
+    ): SendResult {
+        if (expireSeconds <= 0) return SendResult.Failure("Durée d'expiration invalide")
+        return when {
+            mimeType.startsWith("audio/") || mimeType.contains("ogg") || mimeType.contains("voice") ->
+                sendViaFacade(conversationId, accountId) { facade, chatId ->
+                    facade.sendVoiceNote(chatId, localPath, durationMs, expireSeconds)
+                }
+            mimeType.startsWith("image/") ->
+                sendViaFacade(conversationId, accountId) { facade, chatId ->
+                    facade.sendPhoto(chatId, localPath, caption, expireSeconds)
+                }
+            else ->
+                sendViaFacade(conversationId, accountId) { facade, chatId ->
+                    facade.sendMedia(chatId, localPath, mimeType, caption, expireSeconds)
+                }
+        }
+    }
+
+    override suspend fun setTyping(conversationId: String, typing: Boolean) {
+        val session = sessionForConversation(conversationId) ?: return
+        val chatId = TdLibMapper.chatIdFromConversation(conversationId) ?: return
+        withContext(session.dispatcher) {
+            session.facade.setTyping(chatId, typing)
+        }
+    }
+
+    override suspend fun markRead(conversationId: String, messageId: String?) {
+        val session = sessionForConversation(conversationId) ?: return
+        val chatId = TdLibMapper.chatIdFromConversation(conversationId) ?: return
+        val tdMessageId = messageId?.substringAfterLast('_')?.toLongOrNull()
+            ?: withContext(Dispatchers.IO) {
+                repository.observeMessages(conversationId).first()
+                    .maxByOrNull { it.timestamp }
+                    ?.id
+                    ?.substringAfterLast('_')
+                    ?.toLongOrNull()
+            }
+            ?: return
+        withContext(session.dispatcher) {
+            session.facade.viewMessages(chatId, longArrayOf(tdMessageId))
+        }
+    }
+
+    override suspend fun exportBackup(
+        accountId: String,
+        destinationPath: String,
+    ): BackupExportResult = withContext(Dispatchers.IO) {
+        runCatching {
+            val (convs, messages) = repository.exportSnapshot(accountId)
+            val json = buildString {
+                append("{\"protocol\":\"TELEGRAM\",\"accountId\":")
+                append(JSONObject.quote(accountId))
+                append(",\"exportedAt\":")
+                append(System.currentTimeMillis())
+                append(",\"conversations\":[")
+                convs.forEachIndexed { i, c ->
+                    if (i > 0) append(',')
+                    append("{\"id\":").append(JSONObject.quote(c.id))
+                    append(",\"title\":").append(JSONObject.quote(c.title))
+                    append(",\"remoteId\":").append(JSONObject.quote(c.remoteId))
+                    append('}')
+                }
+                append("],\"messages\":[")
+                messages.forEachIndexed { i, m ->
+                    if (i > 0) append(',')
+                    append("{\"id\":").append(JSONObject.quote(m.id))
+                    append(",\"conversationId\":").append(JSONObject.quote(m.conversationId))
+                    append(",\"body\":").append(JSONObject.quote(m.body))
+                    append(",\"timestamp\":").append(m.timestamp)
+                    append(",\"direction\":").append(JSONObject.quote(m.direction.name))
+                    append(",\"kind\":").append(JSONObject.quote(m.kind.name))
+                    append('}')
+                }
+                append("]}")
+            }
+            val out = File(destinationPath)
+            out.parentFile?.mkdirs()
+            FileOutputStream(out).use { fos ->
+                fos.write(json.toByteArray(StandardCharsets.UTF_8))
+            }
+            BackupExportResult.Success(
+                uriOrPath = out.absolutePath,
+                messageCount = messages.size,
+                conversationCount = convs.size,
+            )
+        }.getOrElse { e ->
+            BackupExportResult.Failure(e.message ?: "Export failed")
         }
     }
 

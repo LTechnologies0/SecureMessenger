@@ -10,23 +10,29 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import java.io.File
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.flow.MutableStateFlow
 import ltechnologies.onionphone.securemessenger.core.model.AccountCredentials
+import ltechnologies.onionphone.securemessenger.core.model.AccountProfile
+import ltechnologies.onionphone.securemessenger.core.model.BackupExportResult
 import ltechnologies.onionphone.securemessenger.core.model.ConnectionResult
 import ltechnologies.onionphone.securemessenger.core.model.ConnectionState
 import ltechnologies.onionphone.securemessenger.core.model.Attachment
+import ltechnologies.onionphone.securemessenger.core.model.Contact
 import ltechnologies.onionphone.securemessenger.core.model.Conversation
 import ltechnologies.onionphone.securemessenger.core.model.FeatureFlags
 import ltechnologies.onionphone.securemessenger.core.model.HistoryLoadResult
 import ltechnologies.onionphone.securemessenger.core.model.Message
+import ltechnologies.onionphone.securemessenger.core.model.OutgoingContent
 import ltechnologies.onionphone.securemessenger.core.model.ProtocolCapabilities
 import ltechnologies.onionphone.securemessenger.core.model.ProtocolId
 import ltechnologies.onionphone.securemessenger.core.model.ProxyConfig
 import ltechnologies.onionphone.securemessenger.core.model.RegistrationRequest
 import ltechnologies.onionphone.securemessenger.core.model.RegistrationResult
 import ltechnologies.onionphone.securemessenger.core.model.SanitizedText
+import ltechnologies.onionphone.securemessenger.core.model.SendResult
 import ltechnologies.onionphone.securemessenger.core.proxy.OnionVpnHelper
 import ltechnologies.onionphone.securemessenger.core.proxy.ProxyManager
 import ltechnologies.onionphone.securemessenger.core.proxy.ProxyStatus
@@ -35,6 +41,8 @@ import ltechnologies.onionphone.securemessenger.core.security.MessageSanitizer
 import ltechnologies.onionphone.securemessenger.data.MessengerRepository
 import ltechnologies.onionphone.securemessenger.protocol.telegram.TelegramProtocol
 import ltechnologies.onionphone.securemessenger.service.ConnectionManager
+import org.json.JSONArray
+import org.json.JSONObject
 
 @HiltViewModel
 class MainViewModel @Inject constructor(
@@ -67,6 +75,7 @@ class MainViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     private val messageFlows = ConcurrentHashMap<String, StateFlow<List<Message>>>()
+    private val contactFlows = ConcurrentHashMap<String, StateFlow<List<Contact>>>()
 
     val enabledProtocols: List<ProtocolId> = FeatureFlags.enabled.toList()
 
@@ -75,6 +84,144 @@ class MainViewModel @Inject constructor(
             repository.observeMessages(conversationId)
                 .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
         }
+
+    fun contactsFor(accountId: String): StateFlow<List<Contact>> =
+        contactFlows.getOrPut(accountId) {
+            repository.observeContacts(accountId)
+                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+        }
+
+    fun refreshContacts(accountId: String, protocol: ProtocolId, onResult: (Result<Int>) -> Unit) {
+        viewModelScope.launch {
+            val impl = connectionManager.protocolFor(protocol) ?: run {
+                onResult(Result.failure(IllegalStateException("Protocole indisponible")))
+                return@launch
+            }
+            onResult(impl.refreshContacts(accountId))
+        }
+    }
+
+    fun loadAccountProfile(
+        accountId: String,
+        protocol: ProtocolId,
+        onResult: (AccountProfile?) -> Unit,
+    ) {
+        viewModelScope.launch {
+            onResult(connectionManager.protocolFor(protocol)?.getAccountProfile(accountId))
+        }
+    }
+
+    fun updateAccountProfile(
+        accountId: String,
+        protocol: ProtocolId,
+        displayName: String,
+        bio: String?,
+        onResult: (Result<Unit>) -> Unit,
+    ) {
+        viewModelScope.launch {
+            val impl = connectionManager.protocolFor(protocol) ?: run {
+                onResult(Result.failure(IllegalStateException("Protocole indisponible")))
+                return@launch
+            }
+            onResult(impl.updateAccountProfile(accountId, displayName, bio))
+        }
+    }
+
+    fun sendContent(
+        conversationId: String,
+        protocol: ProtocolId,
+        content: OutgoingContent,
+        onResult: (Boolean) -> Unit,
+    ) {
+        viewModelScope.launch {
+            val protocolImpl = connectionManager.protocolFor(protocol) ?: run {
+                onResult(false)
+                return@launch
+            }
+            val result = protocolImpl.sendContent(conversationId, content)
+            onResult(result is SendResult.Success)
+        }
+    }
+
+    fun exportBackup(
+        accountId: String,
+        destinationPath: String,
+        protocol: ProtocolId? = null,
+        onResult: (BackupExportResult) -> Unit,
+    ) {
+        viewModelScope.launch {
+            val resolvedProtocol = protocol
+                ?: accounts.value.firstOrNull { it.id == accountId }?.protocol
+            if (resolvedProtocol != null) {
+                val impl = connectionManager.protocolFor(resolvedProtocol)
+                val protocolResult = impl?.exportBackup(accountId, destinationPath)
+                if (protocolResult is BackupExportResult.Success) {
+                    onResult(protocolResult)
+                    return@launch
+                }
+            }
+            onResult(
+                runCatching {
+                    val (convs, messages) = repository.exportSnapshot(accountId)
+                    val root = JSONObject()
+                        .put("accountId", accountId)
+                        .put("exportedAt", System.currentTimeMillis())
+                        .put(
+                            "conversations",
+                            JSONArray().also { arr ->
+                                convs.forEach { c ->
+                                    arr.put(
+                                        JSONObject()
+                                            .put("id", c.id)
+                                            .put("protocol", c.protocol.name)
+                                            .put("remoteId", c.remoteId)
+                                            .put("title", c.title)
+                                            .put("lastMessageAt", c.lastMessageAt),
+                                    )
+                                }
+                            },
+                        )
+                        .put(
+                            "messages",
+                            JSONArray().also { arr ->
+                                messages.forEach { m ->
+                                    arr.put(
+                                        JSONObject()
+                                            .put("id", m.id)
+                                            .put("conversationId", m.conversationId)
+                                            .put("body", m.body)
+                                            .put("timestamp", m.timestamp)
+                                            .put("direction", m.direction.name)
+                                            .put("kind", m.kind.name)
+                                            .put("payloadJson", m.payloadJson),
+                                    )
+                                }
+                            },
+                        )
+                    File(destinationPath).writeText(root.toString(2))
+                    BackupExportResult.Success(
+                        uriOrPath = destinationPath,
+                        messageCount = messages.size,
+                        conversationCount = convs.size,
+                    )
+                }.getOrElse {
+                    BackupExportResult.Failure(it.message ?: "Export échoué")
+                },
+            )
+        }
+    }
+
+    fun setTyping(conversationId: String, protocol: ProtocolId, typing: Boolean) {
+        viewModelScope.launch {
+            connectionManager.protocolFor(protocol)?.setTyping(conversationId, typing)
+        }
+    }
+
+    fun markRead(conversationId: String, protocol: ProtocolId, messageId: String? = null) {
+        viewModelScope.launch {
+            connectionManager.protocolFor(protocol)?.markRead(conversationId, messageId)
+        }
+    }
 
     suspend fun loadMessageHistory(conversationId: String, protocol: ProtocolId): HistoryLoadResult =
         connectionManager.protocolFor(protocol)?.loadMessageHistory(conversationId)
@@ -88,6 +235,109 @@ class MainViewModel @Inject constructor(
 
     fun telegramProtocol(): TelegramProtocol? =
         connectionManager.protocolFor(ProtocolId.TELEGRAM) as? TelegramProtocol
+
+    fun votePoll(
+        conversationId: String,
+        messageId: String,
+        optionIds: IntArray,
+        onResult: (Boolean) -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            val ok = telegramProtocol()?.votePoll(conversationId, messageId, optionIds)?.isSuccess == true
+            onResult(ok)
+        }
+    }
+
+    fun addReaction(
+        conversationId: String,
+        messageId: String,
+        emoji: String,
+        onResult: (Boolean) -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            val ok = telegramProtocol()?.addReaction(conversationId, messageId, emoji)?.isSuccess == true
+            onResult(ok)
+        }
+    }
+
+    fun forwardTelegramMessages(
+        toConversationId: String,
+        fromConversationId: String,
+        messageIds: List<String>,
+        onResult: (Boolean) -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            val ok = telegramProtocol()
+                ?.forwardMessages(toConversationId, fromConversationId, messageIds)
+                ?.isSuccess == true
+            onResult(ok)
+        }
+    }
+
+    fun listTelegramStickers(
+        accountId: String? = null,
+        query: String = "",
+        onResult: (List<ltechnologies.onionphone.securemessenger.protocol.telegram.TelegramSticker>) -> Unit,
+    ) {
+        viewModelScope.launch {
+            onResult(telegramProtocol()?.listStickers(accountId, query).orEmpty())
+        }
+    }
+
+    fun observeTyping(conversationId: String, protocol: ProtocolId): StateFlow<List<String>> =
+        connectionManager.protocolFor(protocol)?.observeTyping(conversationId)
+            ?: MutableStateFlow(emptyList())
+
+    fun searchTelegramUserByPhone(
+        phoneNumber: String,
+        accountId: String? = null,
+        onResult: (Contact?) -> Unit,
+    ) {
+        viewModelScope.launch {
+            onResult(
+                telegramProtocol()?.searchUserByPhoneNumber(phoneNumber, accountId)?.getOrNull(),
+            )
+        }
+    }
+
+    fun setTelegramProfilePhoto(
+        accountId: String,
+        localPath: String,
+        onResult: (Result<Unit>) -> Unit,
+    ) {
+        viewModelScope.launch {
+            onResult(
+                telegramProtocol()?.setProfilePhoto(accountId, localPath)
+                    ?: Result.failure(IllegalStateException("Telegram non disponible")),
+            )
+        }
+    }
+
+    fun setTelegramChatAutoDelete(
+        conversationId: String,
+        expireSeconds: Int,
+        onResult: (Boolean) -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            val ok = telegramProtocol()
+                ?.setChatMessageAutoDeleteTime(conversationId, expireSeconds)
+                ?.isSuccess == true
+            onResult(ok)
+        }
+    }
+
+    fun importTelegramContacts(
+        accountId: String,
+        entries: List<Triple<String, String, String>>,
+        onResult: (Result<Int>) -> Unit,
+    ) {
+        viewModelScope.launch {
+            onResult(
+                telegramProtocol()?.importContacts(accountId, entries)
+                    ?: Result.failure(IllegalStateException("Telegram non disponible")),
+            )
+        }
+    }
 
     fun signalProtocol(): ltechnologies.onionphone.securemessenger.protocol.signal.SignalProtocol? =
         connectionManager.protocolFor(ProtocolId.SIGNAL) as? ltechnologies.onionphone.securemessenger.protocol.signal.SignalProtocol

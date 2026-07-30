@@ -9,8 +9,10 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import ltechnologies.onionphone.securemessenger.core.model.AccountCredentials
+import ltechnologies.onionphone.securemessenger.core.model.AccountProfile
 import ltechnologies.onionphone.securemessenger.core.model.Attachment
 import ltechnologies.onionphone.securemessenger.core.model.AttachmentState
 import ltechnologies.onionphone.securemessenger.core.model.AuthStep
@@ -18,7 +20,12 @@ import ltechnologies.onionphone.securemessenger.core.model.AuthStepKind
 import ltechnologies.onionphone.securemessenger.core.model.ConnectionResult
 import ltechnologies.onionphone.securemessenger.core.model.ConnectionState
 import ltechnologies.onionphone.securemessenger.core.model.Conversation
+import ltechnologies.onionphone.securemessenger.core.model.DeliveryState
+import ltechnologies.onionphone.securemessenger.core.model.HistoryLoadResult
 import ltechnologies.onionphone.securemessenger.core.model.Message
+import ltechnologies.onionphone.securemessenger.core.model.MessageDirection
+import ltechnologies.onionphone.securemessenger.core.model.MessageKind
+import ltechnologies.onionphone.securemessenger.core.model.OutgoingContent
 import ltechnologies.onionphone.securemessenger.core.model.ProtocolCapabilities
 import ltechnologies.onionphone.securemessenger.core.model.ProtocolId
 import ltechnologies.onionphone.securemessenger.core.model.ProxyConfig
@@ -50,6 +57,17 @@ class MatrixProtocol @Inject constructor(
         typingIndicators = true,
         readReceipts = true,
         endToEndEncryption = true,
+        contacts = true,
+        profileEdit = true,
+        voiceNotes = true,
+        stickers = false,
+        gifs = true,
+        locationShare = true,
+        polls = false,
+        contactShare = false,
+        ephemeralMessages = false,
+        messageHistory = true,
+        backupExport = true,
     )
 
     /** Reflects live session: E2EE and encrypted media require an active Trixnity engine. */
@@ -412,6 +430,43 @@ class MatrixProtocol @Inject constructor(
     override fun observeMessages(conversationId: String): Flow<List<Message>> =
         repository.observeMessages(conversationId)
 
+    override suspend fun loadMessageHistory(conversationId: String): HistoryLoadResult =
+        withContext(Dispatchers.IO) {
+            try {
+                networkGuard.assertNetworkAllowed()
+                val accId = conversationId.substringBefore('_', missingDelimiterValue = conversationId)
+                val roomId = conversationId.substringAfter('_', missingDelimiterValue = conversationId)
+                val session = sessions[accId]
+                    ?: return@withContext HistoryLoadResult.Failure("Compte Matrix non connecté")
+                val engine = session.trixnityEngine
+                    ?: return@withContext HistoryLoadResult.Failure(
+                        "Historique Matrix nécessite une session Trixnity E2EE",
+                    )
+                val persisted = engine.loadHistory(accId, roomId, limit = 50)
+                val inDb = repository.observeMessages(conversationId).first().size
+                HistoryLoadResult.Success(
+                    messageCount = inDb.coerceAtLeast(persisted),
+                    loadedFromCache = inDb > 0,
+                    syncedFromNetwork = true,
+                )
+            } catch (e: Exception) {
+                Timber.w(e, "Matrix loadMessageHistory failed for $conversationId")
+                HistoryLoadResult.Failure(e.message ?: "Historique Matrix indisponible")
+            }
+        }
+
+    override suspend fun refreshContacts(accountId: String): Result<Int> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                networkGuard.assertNetworkAllowed()
+                val session = sessions[accountId]
+                    ?: error("Compte Matrix non connecté")
+                val engine = session.trixnityEngine
+                    ?: error("Contacts Matrix nécessitent une session Trixnity E2EE")
+                engine.refreshContactsFromDmRooms(accountId)
+            }
+        }
+
     override suspend fun startConversation(
         remoteId: String,
         initialMessage: SanitizedText?,
@@ -478,6 +533,117 @@ class MatrixProtocol @Inject constructor(
         attachment: Attachment,
         caption: SanitizedText?,
         accountId: String?,
+    ): SendResult = sendMediaInternal(
+        conversationId = conversationId,
+        attachment = attachment,
+        caption = caption,
+        accountId = accountId,
+        kind = mimeToKind(attachment.mimeType, attachment.fileName),
+    )
+
+    override suspend fun sendContent(
+        conversationId: String,
+        content: OutgoingContent,
+        accountId: String?,
+    ): SendResult = withContext(Dispatchers.IO) {
+        when (content) {
+            is OutgoingContent.Text -> sendMessage(conversationId, content.body, accountId)
+            is OutgoingContent.Media -> sendMediaInternal(
+                conversationId = conversationId,
+                attachment = content.attachment,
+                caption = content.caption,
+                accountId = accountId,
+                kind = content.kind.takeUnless { it == MessageKind.FILE }
+                    ?: mimeToKind(content.attachment.mimeType, content.attachment.fileName),
+            )
+            is OutgoingContent.VoiceNote -> {
+                try {
+                    networkGuard.assertNetworkAllowed()
+                    val accId = accountId
+                        ?: conversationId.substringBefore('_', missingDelimiterValue = conversationId)
+                    val session = sessions[accId] ?: return@withContext SendResult.Failure("Account not connected")
+                    val roomId = conversationId.substringAfter('_', missingDelimiterValue = conversationId)
+                    val localPath = content.attachment.localPath
+                        ?: return@withContext SendResult.Failure("Missing local file path")
+                    val engine = session.trixnityEngine
+                        ?: return@withContext SendResult.Failure("Voice note requires Trixnity E2EE session")
+                    val sent = engine.sendVoiceNote(
+                        roomId = roomId,
+                        localPath = localPath,
+                        mimeType = content.attachment.mimeType,
+                        fileName = content.attachment.fileName,
+                        durationMs = content.durationMs,
+                    )
+                    if (sent.isFailure) {
+                        return@withContext SendResult.Failure(
+                            sent.exceptionOrNull()?.message ?: "Voice note send failed",
+                        )
+                    }
+                    val msg = Message(
+                        id = "${conversationId}_${System.currentTimeMillis()}",
+                        conversationId = conversationId,
+                        protocol = ProtocolId.MATRIX,
+                        body = content.attachment.fileName ?: "Voice note",
+                        timestamp = System.currentTimeMillis(),
+                        direction = MessageDirection.OUTGOING,
+                        deliveryState = DeliveryState.SENT,
+                        attachments = listOf(content.attachment.copy(state = AttachmentState.READY)),
+                        kind = MessageKind.VOICE,
+                    )
+                    repository.upsertMessage(msg)
+                    SendResult.Success(msg.id)
+                } catch (e: Exception) {
+                    SendResult.Failure(e.message ?: "Voice note send failed")
+                }
+            }
+            is OutgoingContent.Location -> {
+                try {
+                    networkGuard.assertNetworkAllowed()
+                    val accId = accountId
+                        ?: conversationId.substringBefore('_', missingDelimiterValue = conversationId)
+                    val session = sessions[accId] ?: return@withContext SendResult.Failure("Account not connected")
+                    val roomId = conversationId.substringAfter('_', missingDelimiterValue = conversationId)
+                    val engine = session.trixnityEngine
+                        ?: return@withContext SendResult.Failure("Location requires Trixnity E2EE session")
+                    val sent = engine.sendLocation(
+                        roomId = roomId,
+                        latitude = content.latitude,
+                        longitude = content.longitude,
+                        horizontalAccuracy = content.horizontalAccuracy,
+                    )
+                    if (sent.isFailure) {
+                        return@withContext SendResult.Failure(
+                            sent.exceptionOrNull()?.message ?: "Location send failed",
+                        )
+                    }
+                    val geoUri = "geo:${content.latitude},${content.longitude}"
+                    val msg = Message(
+                        id = "${conversationId}_${System.currentTimeMillis()}",
+                        conversationId = conversationId,
+                        protocol = ProtocolId.MATRIX,
+                        body = geoUri,
+                        timestamp = System.currentTimeMillis(),
+                        direction = MessageDirection.OUTGOING,
+                        deliveryState = DeliveryState.SENT,
+                        kind = MessageKind.LOCATION,
+                        payloadJson = """{"geoUri":"$geoUri","lat":${content.latitude},"lon":${content.longitude}}""",
+                    )
+                    repository.upsertMessage(msg)
+                    SendResult.Success(msg.id)
+                } catch (e: Exception) {
+                    SendResult.Failure(e.message ?: "Location send failed")
+                }
+            }
+            else -> SendResult.Failure("Content type not supported for MATRIX")
+        }
+    }
+
+    private suspend fun sendMediaInternal(
+        conversationId: String,
+        attachment: Attachment,
+        caption: SanitizedText?,
+        accountId: String?,
+        kind: MessageKind,
     ): SendResult = withContext(Dispatchers.IO) {
         try {
             networkGuard.assertNetworkAllowed()
@@ -495,6 +661,7 @@ class MatrixProtocol @Inject constructor(
                 mimeType = attachment.mimeType,
                 fileName = attachment.fileName,
                 caption = caption?.value,
+                kind = kind,
             )
             if (sent.isFailure) {
                 return@withContext SendResult.Failure(
@@ -508,11 +675,10 @@ class MatrixProtocol @Inject constructor(
                 protocol = ProtocolId.MATRIX,
                 body = body,
                 timestamp = System.currentTimeMillis(),
-                direction = ltechnologies.onionphone.securemessenger.core.model.MessageDirection.OUTGOING,
-                deliveryState = ltechnologies.onionphone.securemessenger.core.model.DeliveryState.SENT,
-                attachments = listOf(
-                    attachment.copy(state = AttachmentState.READY),
-                ),
+                direction = MessageDirection.OUTGOING,
+                deliveryState = DeliveryState.SENT,
+                attachments = listOf(attachment.copy(state = AttachmentState.READY)),
+                kind = kind,
             )
             repository.upsertMessage(msg)
             SendResult.Success(msg.id)
@@ -520,6 +686,109 @@ class MatrixProtocol @Inject constructor(
             SendResult.Failure(e.message ?: "Media send failed")
         }
     }
+
+    override fun observeContacts(accountId: String) = repository.observeContacts(accountId)
+
+    override suspend fun getAccountProfile(accountId: String): AccountProfile? {
+        val engine = sessions[accountId]?.trixnityEngine
+        val handle = engine?.currentUserId() ?: accountId
+        return AccountProfile(
+            accountId = accountId,
+            protocol = ProtocolId.MATRIX,
+            displayName = engine?.currentDisplayName()?.takeIf { it.isNotBlank() } ?: handle,
+            handle = handle,
+        )
+    }
+
+    override suspend fun updateAccountProfile(
+        accountId: String,
+        displayName: String,
+        bio: String?,
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            networkGuard.assertNetworkAllowed()
+            val engine = sessions[accountId]?.trixnityEngine
+                ?: error("Profile edit requires Trixnity E2EE session")
+            engine.setDisplayName(displayName).getOrThrow()
+            repository.upsertAccount(
+                ltechnologies.onionphone.securemessenger.core.model.Account(
+                    id = accountId,
+                    protocol = ProtocolId.MATRIX,
+                    displayName = displayName.trim().ifBlank { accountId },
+                    connectionState = ConnectionState.CONNECTED,
+                ),
+            )
+        }
+    }
+
+    override suspend fun setTyping(conversationId: String, typing: Boolean) {
+        withContext(Dispatchers.IO) {
+            val accId = conversationId.substringBefore('_', missingDelimiterValue = conversationId)
+            val roomId = conversationId.substringAfter('_', missingDelimiterValue = conversationId)
+            val engine = sessions[accId]?.trixnityEngine ?: return@withContext
+            engine.setTyping(roomId, typing)
+                .onFailure { Timber.w(it, "Matrix setTyping failed for $conversationId") }
+        }
+    }
+
+    override fun observeTyping(conversationId: String): StateFlow<List<String>> {
+        val accId = conversationId.substringBefore('_', missingDelimiterValue = conversationId)
+        return sessions[accId]?.trixnityEngine?.observeTyping(conversationId)
+            ?: MutableStateFlow<List<String>>(emptyList()).asStateFlow()
+    }
+
+    override suspend fun markRead(conversationId: String, messageId: String?) {
+        withContext(Dispatchers.IO) {
+            val accId = conversationId.substringBefore('_', missingDelimiterValue = conversationId)
+            val roomId = conversationId.substringAfter('_', missingDelimiterValue = conversationId)
+            val engine = sessions[accId]?.trixnityEngine ?: return@withContext
+            engine.markRead(roomId, messageId)
+                .onFailure { Timber.w(it, "Matrix markRead failed for $conversationId") }
+        }
+    }
+
+    override suspend fun exportBackup(accountId: String, destinationPath: String) =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val (convs, messages) = repository.exportSnapshot(accountId)
+                val root = org.json.JSONObject()
+                    .put("protocol", "MATRIX")
+                    .put("accountId", accountId)
+                    .put("exportedAt", System.currentTimeMillis())
+                val convArr = org.json.JSONArray()
+                convs.forEach { c ->
+                    convArr.put(
+                        org.json.JSONObject()
+                            .put("id", c.id)
+                            .put("title", c.title)
+                            .put("remoteId", c.remoteId),
+                    )
+                }
+                val msgArr = org.json.JSONArray()
+                messages.forEach { m ->
+                    msgArr.put(
+                        org.json.JSONObject()
+                            .put("id", m.id)
+                            .put("conversationId", m.conversationId)
+                            .put("body", m.body)
+                            .put("timestamp", m.timestamp)
+                            .put("kind", m.kind.name),
+                    )
+                }
+                root.put("conversations", convArr)
+                root.put("messages", msgArr)
+                java.io.File(destinationPath).writeText(root.toString(2))
+                ltechnologies.onionphone.securemessenger.core.model.BackupExportResult.Success(
+                    destinationPath,
+                    messages.size,
+                    convs.size,
+                )
+            }.getOrElse {
+                ltechnologies.onionphone.securemessenger.core.model.BackupExportResult.Failure(
+                    it.message ?: "Export échoué",
+                )
+            }
+        }
 
     override suspend fun disconnect(accountId: String?) {
         withContext(Dispatchers.IO) {
@@ -553,5 +822,14 @@ class MatrixProtocol @Inject constructor(
         const val SYNC_SINCE_KEY = "syncSince"
 
         fun conversationIdFor(accountId: String, roomId: String) = "${accountId}_$roomId"
+
+        fun mimeToKind(mimeType: String, fileName: String?): MessageKind = when {
+            mimeType.equals("image/gif", ignoreCase = true) ||
+                fileName?.endsWith(".gif", ignoreCase = true) == true -> MessageKind.GIF
+            mimeType.startsWith("image/") -> MessageKind.IMAGE
+            mimeType.startsWith("video/") -> MessageKind.VIDEO
+            mimeType.startsWith("audio/") -> MessageKind.VOICE
+            else -> MessageKind.FILE
+        }
     }
 }

@@ -60,12 +60,21 @@ internal data class SignalPreKeyMaterial(
         )
     }
 
-    fun buildDeviceAttributes(deviceName: String): org.whispersystems.signalservice.api.account.DeviceAttributes =
-        org.whispersystems.signalservice.api.account.DeviceAttributes(
+    fun buildDeviceAttributes(
+        deviceName: String,
+        aciIdentityForName: IdentityKeyPair = aciIdentity,
+    ): org.whispersystems.signalservice.api.account.DeviceAttributes {
+        // Server expects Base64(DeviceName protobuf), not plaintext — see Signal DeviceNameCipher.
+        val encryptedName = org.signal.core.util.crypto.DeviceNameCipher.encryptDeviceName(
+            deviceName.toByteArray(Charsets.UTF_8),
+            aciIdentityForName,
+        )
+        val nameB64 = org.signal.core.util.Base64.encodeWithPadding(encryptedName)
+        return org.whispersystems.signalservice.api.account.DeviceAttributes(
             fetchesMessages = true,
             registrationId = aciRegistrationId,
             pniRegistrationId = pniRegistrationId,
-            name = deviceName,
+            name = nameB64,
             capabilities = AccountAttributes.Capabilities(
                 storage = true,
                 versionedExpirationTimer = true,
@@ -74,6 +83,7 @@ internal data class SignalPreKeyMaterial(
                 usernameChangeSyncMessage = true,
             ),
         )
+    }
 
     companion object {
         fun generate(): SignalPreKeyMaterial {

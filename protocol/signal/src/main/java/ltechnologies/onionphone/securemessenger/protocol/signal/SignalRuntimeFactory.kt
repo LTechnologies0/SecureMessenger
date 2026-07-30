@@ -48,6 +48,9 @@ internal data class SignalSessionContext(
     val cipher: SignalServiceCipher,
     val keysApi: KeysApi,
     val groupsV2Operations: GroupsV2Operations,
+    val profileApi: org.whispersystems.signalservice.api.profiles.ProfileApi,
+    val profileKey: org.signal.libsignal.zkgroup.profiles.ProfileKey?,
+    val clientZkOperations: ClientZkOperations,
 ) {
     fun shutdown() {
         runCatching { messageSender.cancelInFlightRequests() }
@@ -97,8 +100,9 @@ internal object SignalRuntimeFactory {
         val authWebSocket = SignalWebSocket.AuthenticatedWebSocket(authFactory, canConnect, sleepTimer, 30_000L)
         val unauthWebSocket = SignalWebSocket.UnauthenticatedWebSocket(unauthFactory, canConnect, sleepTimer, 30_000L)
         val accountApi = AccountApi(authWebSocket)
+        val clientZkOperations = ClientZkOperations.create(configuration)
         val groupsV2Operations = GroupsV2Operations(
-            ClientZkOperations.create(configuration),
+            clientZkOperations,
             SignalServiceEnvironment.MAX_GROUP_SIZE,
         )
         val accountManager = SignalServiceAccountManager(
@@ -139,6 +143,19 @@ internal object SignalRuntimeFactory {
             SignalCertificateUtil.validator,
         )
 
+        val profileApi = org.whispersystems.signalservice.api.profiles.ProfileApi(
+            authWebSocket,
+            unauthWebSocket,
+            pushServiceSocket,
+            clientZkOperations.profileOperations,
+        )
+        val profileKey = secrets[SignalCredentialKeys.PROFILE_KEY]?.let { encoded ->
+            runCatching {
+                val bytes = android.util.Base64.decode(encoded, android.util.Base64.NO_WRAP)
+                org.signal.libsignal.zkgroup.profiles.ProfileKey(bytes)
+            }.getOrNull()
+        }
+
         authWebSocket.registerKeepAliveToken(SignalWebSocket.FOREGROUND_KEEPALIVE)
         authWebSocket.connect()
 
@@ -161,6 +178,9 @@ internal object SignalRuntimeFactory {
             cipher = cipher,
             keysApi = keysApi,
             groupsV2Operations = groupsV2Operations,
+            profileApi = profileApi,
+            profileKey = profileKey,
+            clientZkOperations = clientZkOperations,
         )
     }
 

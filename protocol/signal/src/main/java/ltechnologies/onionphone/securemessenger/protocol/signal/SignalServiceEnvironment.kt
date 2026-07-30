@@ -74,6 +74,10 @@ internal object SignalCredentialKeys {
     const val SESSION_READY = "sessionReady"
     const val REGISTRATION_SESSION_ID = "registrationSessionId"
     const val REGISTRATION_PIN = "registrationPin"
+    const val PROFILE_KEY = "profileKey"
+    const val CDSI_TOKEN = "cdsiToken"
+    const val PROFILE_NAME = "profileName"
+    const val PROFILE_ABOUT = "profileAbout"
 }
 
 internal fun generateSignalPassword(): String {

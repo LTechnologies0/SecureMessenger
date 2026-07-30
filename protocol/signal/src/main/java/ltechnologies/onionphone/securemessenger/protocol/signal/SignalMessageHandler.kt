@@ -3,13 +3,16 @@ package ltechnologies.onionphone.securemessenger.protocol.signal
 import android.content.Context
 import android.util.Base64
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
 import ltechnologies.onionphone.securemessenger.core.model.Attachment
 import ltechnologies.onionphone.securemessenger.core.model.AttachmentState
+import ltechnologies.onionphone.securemessenger.core.model.Contact
 import ltechnologies.onionphone.securemessenger.core.model.Conversation
 import ltechnologies.onionphone.securemessenger.core.model.DeliveryState
 import ltechnologies.onionphone.securemessenger.core.model.Message
 import ltechnologies.onionphone.securemessenger.core.model.MessageDirection
+import ltechnologies.onionphone.securemessenger.core.model.MessageKind
 import ltechnologies.onionphone.securemessenger.core.model.ProtocolId
 import ltechnologies.onionphone.securemessenger.core.security.MessageSanitizer
 import ltechnologies.onionphone.securemessenger.data.MessengerRepository
@@ -19,6 +22,7 @@ import org.whispersystems.signalservice.api.crypto.AttachmentCipherInputStream
 import org.whispersystems.signalservice.api.crypto.EnvelopeMetadata
 import org.whispersystems.signalservice.api.crypto.SignalServiceCipherResult
 import org.whispersystems.signalservice.api.messages.EnvelopeResponse
+import org.whispersystems.signalservice.api.messages.multidevice.DeviceContactsInputStream
 import org.whispersystems.signalservice.api.util.AttachmentPointerUtil
 import org.whispersystems.signalservice.internal.push.AttachmentPointer
 import org.whispersystems.signalservice.internal.push.DataMessage
@@ -61,6 +65,7 @@ internal class SignalMessageHandler(
         when {
             content.dataMessage != null -> handleDataMessage(content.dataMessage!!, result.metadata, envelope)
             content.syncMessage?.sent != null -> handleSentTranscript(content.syncMessage!!.sent!!)
+            content.syncMessage?.contacts != null -> handleContactsSync(content.syncMessage!!.contacts!!)
             else -> Timber.d("Ignoring unsupported Signal content type")
         }
     }
@@ -82,18 +87,37 @@ internal class SignalMessageHandler(
             groupHelper.rememberMember(groupMasterKey.toByteArray(), metadata.sourceServiceId.toString())
             dataMessage.groupV2?.revision?.let { groupHelper.rememberRevision(groupMasterKey.toByteArray(), it) }
         }
-        val downloaded = downloadAttachments(dataMessage.attachments, envelope.serverGuid)
-        if (body.isEmpty() && downloaded.isEmpty() && dataMessage.groupV2?.groupChange == null) {
+
+        val attachmentPointers = dataMessage.attachments.toMutableList()
+        dataMessage.sticker?.data_?.let { attachmentPointers.add(it) }
+        val downloaded = downloadAttachments(attachmentPointers, envelope.serverGuid)
+        val hasVoice = downloaded.any { it.mimeType.startsWith("audio/") } ||
+            dataMessage.attachments.any { ((it.flags ?: 0) and AttachmentPointer.Flags.VOICE_MESSAGE.value) != 0 }
+
+        if (body.isEmpty() &&
+            downloaded.isEmpty() &&
+            dataMessage.groupV2?.groupChange == null &&
+            !SignalFeatureHelpers.hasRichContent(dataMessage)
+        ) {
             return
         }
+
+        val (kind, payloadJson, expireSeconds) = SignalFeatureHelpers.classifyDataMessage(dataMessage, hasVoice)
         val conversationId = signalConversationId(accountId, remoteId)
         val timestamp = dataMessage.timestamp ?: envelope.clientTimestamp ?: envelope.serverTimestamp
             ?: System.currentTimeMillis()
         val messageId = envelope.serverGuid?.let { UuidUtil.parseOrNull(it)?.toString() }
             ?: "${conversationId}_$timestamp"
-        val preview = body.ifBlank {
-            downloaded.firstOrNull()?.fileName
-                ?: if (isGroup) "Groupe Signal" else "📎"
+        val preview = when (kind) {
+            MessageKind.STICKER -> dataMessage.sticker?.emoji ?: "⭐"
+            MessageKind.POLL -> dataMessage.pollCreate?.question ?: "Sondage"
+            MessageKind.CONTACT -> "Contact"
+            MessageKind.VOICE -> "🎤"
+            MessageKind.SYSTEM -> dataMessage.reaction?.emoji ?: body.ifBlank { "System" }
+            else -> body.ifBlank {
+                downloaded.firstOrNull()?.fileName
+                    ?: if (isGroup) "Groupe Signal" else "📎"
+            }
         }
         val title = if (isGroup) {
             groupHelper.cachedTitle(groupMasterKey!!.toByteArray()) ?: "Groupe Signal"
@@ -113,7 +137,7 @@ internal class SignalMessageHandler(
                 unreadCount = 1,
             ),
         )
-        if (body.isNotEmpty() || downloaded.isNotEmpty()) {
+        if (body.isNotEmpty() || downloaded.isNotEmpty() || SignalFeatureHelpers.hasRichContent(dataMessage)) {
             repository.upsertMessage(
                 Message(
                     id = messageId,
@@ -125,6 +149,9 @@ internal class SignalMessageHandler(
                     deliveryState = DeliveryState.DELIVERED,
                     senderDisplayName = metadata.sourceE164 ?: metadata.sourceServiceId.toString(),
                     attachments = downloaded,
+                    kind = kind,
+                    payloadJson = payloadJson,
+                    expireSeconds = expireSeconds,
                 ),
             )
         }
@@ -197,13 +224,25 @@ internal class SignalMessageHandler(
                 ?: sent.destinationServiceId
                 ?: return
         }
-        val downloaded = downloadAttachments(dataMessage.attachments, null)
-        if (body.isEmpty() && downloaded.isEmpty()) {
+        val attachmentPointers = dataMessage.attachments.toMutableList()
+        dataMessage.sticker?.data_?.let { attachmentPointers.add(it) }
+        val downloaded = downloadAttachments(attachmentPointers, null)
+        val hasVoice = downloaded.any { it.mimeType.startsWith("audio/") } ||
+            dataMessage.attachments.any { ((it.flags ?: 0) and AttachmentPointer.Flags.VOICE_MESSAGE.value) != 0 }
+        if (body.isEmpty() && downloaded.isEmpty() && !SignalFeatureHelpers.hasRichContent(dataMessage)) {
             return
         }
+        val (kind, payloadJson, expireSeconds) = SignalFeatureHelpers.classifyDataMessage(dataMessage, hasVoice)
         val conversationId = signalConversationId(accountId, destination)
         val timestamp = dataMessage.timestamp ?: System.currentTimeMillis()
-        val preview = body.ifBlank { downloaded.firstOrNull()?.fileName ?: "📎" }
+        val preview = body.ifBlank {
+            when (kind) {
+                MessageKind.STICKER -> dataMessage.sticker?.emoji ?: "⭐"
+                MessageKind.POLL -> dataMessage.pollCreate?.question ?: "Sondage"
+                MessageKind.VOICE -> "🎤"
+                else -> downloaded.firstOrNull()?.fileName ?: "📎"
+            }
+        }
         repository.upsertConversation(
             Conversation(
                 id = conversationId,
@@ -225,8 +264,57 @@ internal class SignalMessageHandler(
                 direction = MessageDirection.OUTGOING,
                 deliveryState = DeliveryState.SENT,
                 attachments = downloaded,
+                kind = kind,
+                payloadJson = payloadJson,
+                expireSeconds = expireSeconds,
             ),
         )
+    }
+
+    private suspend fun handleContactsSync(
+        contactsSync: org.whispersystems.signalservice.internal.push.SyncMessage.Contacts,
+    ) {
+        val blob = contactsSync.blob ?: return
+        val downloaded = downloadAttachments(listOf(blob), "contacts_sync")
+        val path = downloaded.firstOrNull()?.localPath ?: return
+        val parsed = mutableListOf<Contact>()
+        try {
+            FileInputStream(File(path)).use { input ->
+                val stream = DeviceContactsInputStream(input)
+                while (true) {
+                    val deviceContact = try {
+                        stream.read() ?: break
+                    } catch (e: Exception) {
+                        Timber.w(e, "Stopping contacts sync parse")
+                        break
+                    }
+                    deviceContact.avatar.orElse(null)?.let { avatar ->
+                        runCatching { avatar.inputStream.readBytes() }
+                    }
+                    val remoteId = deviceContact.aci.map { it.toString() }.orElse(null)
+                        ?: deviceContact.e164.orElse(null)
+                        ?: continue
+                    val displayName = deviceContact.name.orElse(null)
+                        ?: deviceContact.e164.orElse(remoteId)
+                    parsed += Contact(
+                        id = "${accountId}_$remoteId",
+                        protocol = ProtocolId.SIGNAL,
+                        accountId = accountId,
+                        remoteId = remoteId,
+                        displayName = displayName,
+                        handle = deviceContact.aci.map { it.toString() }.orElse(null),
+                        phone = deviceContact.e164.orElse(null),
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            Timber.w(e, "Failed to parse SyncMessage.Contacts")
+            return
+        }
+        if (contactsSync.complete == true || parsed.isNotEmpty()) {
+            repository.replaceContacts(accountId, parsed)
+        }
+        Timber.i("Signal contacts sync: stored %d contacts (complete=%s)", parsed.size, contactsSync.complete)
     }
 
     private fun sendAckSafely(response: EnvelopeResponse, index: Int, size: Int) {

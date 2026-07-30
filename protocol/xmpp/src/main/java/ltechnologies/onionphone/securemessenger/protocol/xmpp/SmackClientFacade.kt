@@ -1,15 +1,21 @@
 package ltechnologies.onionphone.securemessenger.protocol.xmpp
 
 import android.content.Context
+import java.io.BufferedInputStream
 import java.io.File
+import java.io.FileInputStream
+import java.io.IOException
+import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.jivesoftware.smack.AbstractXMPPConnection
 import org.jivesoftware.smack.ConnectionConfiguration
 import org.jivesoftware.smack.MessageListener
 import org.jivesoftware.smack.ReconnectionManager
 import org.jivesoftware.smack.SmackException
+import org.jivesoftware.smack.chat2.Chat
 import org.jivesoftware.smack.chat2.ChatManager
 import org.jivesoftware.smack.packet.Message as SmackMessage
 import org.jivesoftware.smack.roster.Roster
@@ -20,24 +26,37 @@ import org.jivesoftware.smackx.bookmarks.BookmarkManager
 import org.jivesoftware.smackx.bookmarks.BookmarkedConference
 import org.jivesoftware.smackx.carbons.CarbonManager
 import org.jivesoftware.smackx.carbons.packet.CarbonExtension
+import org.jivesoftware.smackx.chat_markers.ChatMarkersManager
+import org.jivesoftware.smackx.chat_markers.element.ChatMarkersElements
+import org.jivesoftware.smackx.chatstates.ChatState
+import org.jivesoftware.smackx.chatstates.ChatStateListener
+import org.jivesoftware.smackx.chatstates.ChatStateManager
 import org.jivesoftware.smackx.delay.packet.DelayInformation
 import org.jivesoftware.smackx.filetransfer.FileTransferManager
+import org.jivesoftware.smackx.geoloc.GeoLocationManager
+import org.jivesoftware.smackx.geoloc.packet.GeoLocation
 import org.jivesoftware.smackx.httpfileupload.HttpFileUploadManager
+import org.jivesoftware.smackx.httpfileupload.element.Slot
 import org.jivesoftware.smackx.mam.MamManager
 import org.jivesoftware.smackx.muc.MultiUserChat
 import org.jivesoftware.smackx.muc.MultiUserChatManager
 import org.jivesoftware.smackx.omemo.OmemoManager
 import org.jivesoftware.smackx.ping.PingManager
+import org.jivesoftware.smackx.receipts.DeliveryReceiptManager
+import org.jivesoftware.smackx.receipts.DeliveryReceiptRequest
+import org.jivesoftware.smackx.receipts.ReceiptReceivedListener
+import org.jivesoftware.smackx.vcardtemp.VCardManager
+import org.jivesoftware.smackx.vcardtemp.packet.VCard
 import org.jxmpp.jid.EntityBareJid
 import org.jxmpp.jid.impl.JidCreate
 import org.jxmpp.jid.parts.Resourcepart
 import ltechnologies.onionphone.securemessenger.core.model.ProxyConfig
 import ltechnologies.onionphone.securemessenger.core.proxy.SocksEndpointResolver
-import timber.log.Timber
 
 /**
  * Smack SDK facade — RFC 6120 JID parsing, RFC 6121 roster, XEP-0313 MAM, XEP-0384 OMEMO,
- * XEP-0045 MUC, XEP-0363 HTTP File Upload.
+ * XEP-0045 MUC, XEP-0363 HTTP File Upload, XEP-0085 chat states, XEP-0184 receipts,
+ * XEP-0333 chat markers, XEP-0054 vCard, XEP-0080 geolocation.
  */
 class SmackClientFacade(
     private val context: Context,
@@ -79,6 +98,21 @@ class SmackClientFacade(
 
     val omemoManager: OmemoManager?
         get() = connection?.let { OmemoManager.getInstanceFor(it) }
+
+    val chatStateManager: ChatStateManager?
+        get() = connection?.let { ChatStateManager.getInstance(it) }
+
+    val deliveryReceiptManager: DeliveryReceiptManager?
+        get() = connection?.let { DeliveryReceiptManager.getInstanceFor(it) }
+
+    val chatMarkersManager: ChatMarkersManager?
+        get() = connection?.let { ChatMarkersManager.getInstanceFor(it) }
+
+    val vCardManager: VCardManager?
+        get() = connection?.let { VCardManager.getInstanceFor(it) }
+
+    val geoLocationManager: GeoLocationManager?
+        get() = connection?.let { GeoLocationManager.getInstanceFor(it) }
 
     var omemoHelper: OmemoHelper? = null
         private set
@@ -160,6 +194,13 @@ class SmackClientFacade(
         }
 
         try {
+            val receipts = DeliveryReceiptManager.getInstanceFor(conn)
+            receipts.autoAddDeliveryReceiptRequests()
+            receipts.setAutoReceiptMode(DeliveryReceiptManager.AutoReceiptMode.always)
+        } catch (_: Exception) {
+        }
+
+        try {
             val omemo = OmemoManager.getInstanceFor(conn)
             omemoHelper = OmemoHelper(omemo, conn)
             omemoHelper?.initializeAsync()
@@ -180,17 +221,132 @@ class SmackClientFacade(
         emptyList()
     }
 
-    fun sendChatMessage(remoteJid: String, body: String) {
+    fun chatWith(remoteJid: String): Chat {
+        val conn = connection ?: throw SmackException.NotConnectedException()
+        return ChatManager.getInstanceFor(conn).chatWith(JidCreate.entityBareFrom(remoteJid))
+    }
+
+    /**
+     * XEP-0085: [typing]=true → composing; false → paused (active after idle is left to peer).
+     */
+    fun setTyping(remoteJid: String, typing: Boolean) {
+        val manager = chatStateManager ?: return
+        val chat = chatWith(remoteJid)
+        val state = if (typing) ChatState.composing else ChatState.paused
+        manager.setCurrentState(state, chat)
+    }
+
+    fun addChatStateListener(listener: ChatStateListener) {
+        chatStateManager?.addChatStateListener(listener)
+    }
+
+    fun addReceiptReceivedListener(listener: ReceiptReceivedListener) {
+        deliveryReceiptManager?.addReceiptReceivedListener(listener)
+    }
+
+    fun addChatMarkerListener(
+        listener: org.jivesoftware.smackx.chat_markers.ChatMarkersListener,
+    ) {
+        chatMarkersManager?.addIncomingChatMarkerMessageListener(listener)
+    }
+
+    /** XEP-0333 `<displayed/>` for [stanzaId]. */
+    fun markDisplayed(remoteJid: String, stanzaId: String) {
+        val conn = connection ?: throw SmackException.NotConnectedException()
+        val message = conn.stanzaFactory.buildMessageStanza()
+            .to(JidCreate.entityBareFrom(remoteJid))
+            .addExtension(ChatMarkersElements.DisplayedExtension(stanzaId))
+            .build()
+        conn.sendStanza(message)
+    }
+
+    /**
+     * Sends a chat body and returns the outgoing stanza id (for receipts / local message id).
+     * Attaches XEP-0184 receipt request + XEP-0333 markable when [requestReceipts] is true.
+     */
+    fun sendChatMessage(
+        remoteJid: String,
+        body: String,
+        requestReceipts: Boolean = true,
+    ): String {
         val conn = connection ?: throw SmackException.NotConnectedException()
         val jid: EntityBareJid = JidCreate.entityBareFrom(remoteJid)
         val chat = ChatManager.getInstanceFor(conn).chatWith(jid)
         val helper = omemoHelper
         if (helper != null && helper.ready && helper.contactSupportsOmemo(remoteJid)) {
             // Fail-closed: never fall back to cleartext when the contact supports OMEMO.
-            chat.send(helper.sendEncrypted(remoteJid, body))
-            return
+            val encrypted = helper.sendEncrypted(remoteJid, body)
+            if (requestReceipts) {
+                attachReceiptExtensions(encrypted)
+            }
+            chat.send(encrypted)
+            return encrypted.stanzaId.orEmpty()
         }
-        chat.send(conn.stanzaFactory.buildMessageStanza().setBody(body).build())
+        val builder = conn.stanzaFactory.buildMessageStanza().setBody(body)
+        if (requestReceipts) {
+            DeliveryReceiptRequest.addTo(builder)
+            builder.addExtension(ChatMarkersElements.MarkableExtension.INSTANCE)
+        }
+        val message = builder.build()
+        chat.send(message)
+        return message.stanzaId.orEmpty()
+    }
+
+    fun sendMucMessage(roomJid: String, body: String): String {
+        val muc = joinedMucs[roomJid] ?: run {
+            val conn = connection ?: throw SmackException.NotConnectedException()
+            MultiUserChatManager.getInstanceFor(conn)
+                .getMultiUserChat(JidCreate.entityBareFrom(roomJid))
+        }
+        val helper = omemoHelper
+        if (helper != null && helper.ready && helper.multiUserChatSupportsOmemo(muc)) {
+            // Fail-closed: never send cleartext when the room advertises OMEMO.
+            val encrypted = helper.encryptMuc(muc, body)
+            muc.sendMessage(encrypted)
+            return encrypted.stanzaId.orEmpty()
+        }
+        val conn = connection ?: throw SmackException.NotConnectedException()
+        val message = conn.stanzaFactory.buildMessageStanza().setBody(body).build()
+        muc.sendMessage(message)
+        return message.stanzaId.orEmpty()
+    }
+
+    fun sendGeoLocation(
+        remoteJid: String,
+        latitude: Double,
+        longitude: Double,
+        accuracy: Double = 0.0,
+    ) {
+        val manager = geoLocationManager ?: throw SmackException.NotConnectedException()
+        val builder = GeoLocation.builder()
+            .setLat(latitude)
+            .setLon(longitude)
+        if (accuracy > 0.0) {
+            builder.setAccuracy(accuracy)
+        }
+        manager.sendGeoLocationToJid(builder.build(), JidCreate.from(remoteJid))
+    }
+
+    fun loadOwnVCard(): VCard {
+        val manager = vCardManager ?: throw SmackException.NotConnectedException()
+        return manager.loadVCard()
+    }
+
+    fun saveOwnVCard(displayName: String, bio: String?) {
+        val manager = vCardManager ?: throw SmackException.NotConnectedException()
+        val existing = runCatching { manager.loadVCard() }.getOrElse { VCard() }
+        val trimmed = displayName.trim()
+        if (trimmed.isNotEmpty()) {
+            existing.nickName = trimmed
+            val parts = trimmed.split(Regex("\\s+"), limit = 2)
+            existing.firstName = parts.getOrNull(0).orEmpty()
+            existing.lastName = parts.getOrNull(1).orEmpty()
+        }
+        if (bio != null) {
+            existing.setField("DESC", bio)
+        }
+        myBareJid()?.let { existing.setJabberId(it) }
+        manager.saveVCard(existing)
     }
 
     fun joinMuc(
@@ -214,27 +370,63 @@ class SmackClientFacade(
     fun isMucRoom(roomJid: String): Boolean =
         joinedMucs.containsKey(roomJid) || isLikelyMucJid(roomJid)
 
-    fun sendMucMessage(roomJid: String, body: String) {
-        val muc = joinedMucs[roomJid] ?: run {
-            val conn = connection ?: throw SmackException.NotConnectedException()
-            MultiUserChatManager.getInstanceFor(conn)
-                .getMultiUserChat(JidCreate.entityBareFrom(roomJid))
-        }
-        val helper = omemoHelper
-        if (helper != null && helper.ready && helper.multiUserChatSupportsOmemo(muc)) {
-            // Fail-closed: never send cleartext when the room advertises OMEMO.
-            muc.sendMessage(helper.encryptMuc(muc, body))
-            return
-        }
-        muc.sendMessage(body)
-    }
-
-    suspend fun uploadFile(file: File): URL = withContext(Dispatchers.IO) {
+    /**
+     * XEP-0363 upload. When [contentType] is set (e.g. `audio/ogg`, `image/gif`), the slot IQ
+     * requests that MIME; PUT still uses Smack-compatible octet-stream + connection proxy.
+     */
+    suspend fun uploadFile(file: File, contentType: String? = null): URL = withContext(Dispatchers.IO) {
         val manager = httpFileUploadManager ?: throw SmackException.NotConnectedException()
         if (!manager.isUploadServiceDiscovered) {
             manager.discoverUploadService()
         }
-        manager.uploadFile(file)
+        val mime = contentType?.takeIf { it.isNotBlank() } ?: "application/octet-stream"
+        if (mime == "application/octet-stream") {
+            return@withContext manager.uploadFile(file)
+        }
+        val slot = manager.requestSlot(file.name, file.length(), mime)
+        putHttpUploadSlot(slot, file)
+        slot.getGetUrl()
+    }
+
+    private fun putHttpUploadSlot(slot: Slot, file: File) {
+        val conn = connection ?: throw SmackException.NotConnectedException()
+        val putUrl = slot.getPutUrl()
+        val proxyInfo = (conn as? AbstractXMPPConnection)?.configuration?.proxyInfo
+        val urlConnection = (
+            if (proxyInfo != null) {
+                putUrl.openConnection(proxyInfo.toJavaProxy())
+            } else {
+                putUrl.openConnection()
+            }
+            ) as HttpURLConnection
+        urlConnection.requestMethod = "PUT"
+        urlConnection.useCaches = false
+        urlConnection.doOutput = true
+        urlConnection.setFixedLengthStreamingMode(file.length())
+        urlConnection.setRequestProperty("Content-Type", "application/octet-stream")
+        for ((key, value) in slot.headers) {
+            urlConnection.setRequestProperty(key, value)
+        }
+        try {
+            FileInputStream(file).use { fis ->
+                BufferedInputStream(fis).use { input ->
+                    urlConnection.outputStream.use { output ->
+                        input.copyTo(output)
+                    }
+                }
+            }
+            val status = urlConnection.responseCode
+            if (status != HttpURLConnection.HTTP_OK &&
+                status != HttpURLConnection.HTTP_CREATED &&
+                status != HttpURLConnection.HTTP_NO_CONTENT
+            ) {
+                throw IOException(
+                    "HTTP upload failed: $status ${urlConnection.responseMessage}",
+                )
+            }
+        } finally {
+            urlConnection.disconnect()
+        }
     }
 
     fun disconnect() {
@@ -250,6 +442,15 @@ class SmackClientFacade(
     fun isConnected(): Boolean = connection?.isConnected == true && connection?.isAuthenticated == true
 
     fun myBareJid(): String? = connection?.user?.asBareJid()?.toString()
+
+    private fun attachReceiptExtensions(message: SmackMessage) {
+        if (!DeliveryReceiptManager.hasDeliveryReceiptRequest(message)) {
+            DeliveryReceiptRequest.addTo(message)
+        }
+        if (ChatMarkersElements.MarkableExtension.from(message) == null) {
+            message.addExtension(ChatMarkersElements.MarkableExtension.INSTANCE)
+        }
+    }
 
     companion object {
         fun extractDelayTimestamp(message: SmackMessage): Long? =
@@ -295,6 +496,22 @@ class SmackClientFacade(
         fun isLikelyMucJid(jid: String): Boolean {
             val lower = jid.lowercase()
             return lower.contains("@conference.") || lower.contains("@muc.")
+        }
+
+        fun formatContactVCard(
+            firstName: String,
+            lastName: String,
+            phone: String?,
+        ): String = buildString {
+            append("BEGIN:VCARD\n")
+            append("VERSION:3.0\n")
+            append("N:").append(lastName).append(';').append(firstName).append(";;;\n")
+            val fn = listOf(firstName, lastName).filter { it.isNotBlank() }.joinToString(" ").ifBlank { firstName }
+            append("FN:").append(fn).append('\n')
+            if (!phone.isNullOrBlank()) {
+                append("TEL;TYPE=CELL:").append(phone.trim()).append('\n')
+            }
+            append("END:VCARD")
         }
     }
 }

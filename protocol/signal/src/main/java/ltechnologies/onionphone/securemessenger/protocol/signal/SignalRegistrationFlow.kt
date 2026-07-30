@@ -160,6 +160,10 @@ internal class SignalRegistrationFlow(
                     put(SignalCredentialKeys.ACI, aci.toString())
                     put(SignalCredentialKeys.PNI, pni.toString())
                     putAll(preKeys.toSecrets(password, pin))
+                    put(
+                        SignalCredentialKeys.PROFILE_KEY,
+                        SignalFeatureHelpers.encodeProfileKey(SignalFeatureHelpers.generateProfileKey()),
+                    )
                 }
                 SignalRegistrationOutcome(
                     step = SignalRegistrationStep.Complete,

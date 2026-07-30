@@ -150,7 +150,7 @@ class TdLibFacade(private val client: TdLibClient) {
                 systemLanguageCode = "fr"
                 deviceModel = "Android"
                 systemVersion = "SecureMessenger"
-                applicationVersion = "1.0"
+                applicationVersion = "1.0.5"
             },
         )
     }
@@ -206,20 +206,66 @@ class TdLibFacade(private val client: TdLibClient) {
             }
         }
 
+    suspend fun getContacts(): List<Long> = suspendCancellableCoroutine { cont ->
+        client.send(TdApi.GetContacts()) { result ->
+            when (result) {
+                is TdApi.Users -> {
+                    val ids = result.userIds?.toList() ?: emptyList()
+                    if (cont.isActive) cont.resume(ids)
+                }
+                is TdApi.Error -> {
+                    Timber.w("GetContacts error ${result.code}: ${result.message}")
+                    if (cont.isActive) cont.resume(emptyList())
+                }
+                else -> if (cont.isActive) cont.resume(emptyList())
+            }
+        }
+    }
+
+    suspend fun getUser(userId: Long): TdApi.User? = suspendCancellableCoroutine { cont ->
+        client.send(TdApi.GetUser(userId)) { result ->
+            when (result) {
+                is TdApi.User -> if (cont.isActive) cont.resume(result)
+                is TdApi.Error -> {
+                    Timber.w("GetUser error ${result.code}: ${result.message}")
+                    if (cont.isActive) cont.resume(null)
+                }
+                else -> if (cont.isActive) cont.resume(null)
+            }
+        }
+    }
+
+    suspend fun getUserFullInfo(userId: Long): TdApi.UserFullInfo? = suspendCancellableCoroutine { cont ->
+        client.send(TdApi.GetUserFullInfo(userId)) { result ->
+            when (result) {
+                is TdApi.UserFullInfo -> if (cont.isActive) cont.resume(result)
+                is TdApi.Error -> {
+                    Timber.w("GetUserFullInfo error ${result.code}: ${result.message}")
+                    if (cont.isActive) cont.resume(null)
+                }
+                else -> if (cont.isActive) cont.resume(null)
+            }
+        }
+    }
+
     suspend fun sendMedia(
         chatId: Long,
         localPath: String,
         mimeType: String,
         caption: String?,
+        selfDestructSeconds: Int? = null,
     ): String? {
         val formattedCaption = TdApi.FormattedText(caption.orEmpty(), emptyArray())
         val localFile = TdApi.InputFileLocal(localPath)
+        val selfDestruct = selfDestructSeconds?.takeIf { it > 0 }?.let {
+            TdApi.MessageSelfDestructTypeTimer(it)
+        }
         val content: TdApi.InputMessageContent = when {
             mimeType.startsWith("image/") -> TdApi.InputMessagePhoto(
                 TdApi.InputPhoto(localFile, null, null, intArrayOf(), 0, 0),
                 formattedCaption,
                 false,
-                null,
+                selfDestruct,
                 false,
             )
             mimeType.startsWith("video/") -> TdApi.InputMessageVideo(
@@ -238,19 +284,320 @@ class TdLibFacade(private val client: TdLibClient) {
                 formattedCaption,
             )
         }
-        return awaitResult {
-            client.send(
-                TdApi.SendMessage().apply {
-                    this.chatId = chatId
-                    topicId = null
-                    replyTo = null
-                    options = TdApi.MessageSendOptions()
-                    replyMarkup = null
-                    inputMessageContent = content
-                },
-                it,
-            )
+        return sendMessageContent(chatId, content)
+    }
+
+    suspend fun sendVoiceNote(
+        chatId: Long,
+        localPath: String,
+        durationMs: Int = 0,
+        selfDestructSeconds: Int? = null,
+    ): String? {
+        val durationSec = (durationMs / 1000).coerceAtLeast(0)
+        val selfDestruct = selfDestructSeconds?.takeIf { it > 0 }?.let {
+            TdApi.MessageSelfDestructTypeTimer(it)
         }
+        val content = TdApi.InputMessageVoiceNote(
+            TdApi.InputFileLocal(localPath),
+            durationSec,
+            ByteArray(0),
+            TdApi.FormattedText("", emptyArray()),
+            selfDestruct,
+        )
+        return sendMessageContent(chatId, content)
+    }
+
+    /** Photo with optional [MessageSelfDestructTypeTimer] (view-once / timed). */
+    suspend fun sendPhoto(
+        chatId: Long,
+        localPath: String,
+        caption: String? = null,
+        selfDestructSeconds: Int? = null,
+    ): String? {
+        val selfDestruct = selfDestructSeconds?.takeIf { it > 0 }?.let {
+            TdApi.MessageSelfDestructTypeTimer(it)
+        }
+        val content = TdApi.InputMessagePhoto(
+            TdApi.InputPhoto(TdApi.InputFileLocal(localPath), null, null, intArrayOf(), 0, 0),
+            TdApi.FormattedText(caption.orEmpty(), emptyArray()),
+            false,
+            selfDestruct,
+            false,
+        )
+        return sendMessageContent(chatId, content)
+    }
+
+    suspend fun setChatMessageAutoDeleteTime(chatId: Long, messageAutoDeleteTime: Int): String? =
+        awaitResult {
+            client.send(TdApi.SetChatMessageAutoDeleteTime(chatId, messageAutoDeleteTime), it)
+        }
+
+    suspend fun setPollAnswer(chatId: Long, messageId: Long, optionIds: IntArray): String? =
+        awaitResult {
+            client.send(TdApi.SetPollAnswer(chatId, messageId, optionIds), it)
+        }
+
+    suspend fun searchUserByPhoneNumber(phoneNumber: String, onlyLocal: Boolean = false): TdApi.User? =
+        suspendCancellableCoroutine { cont ->
+            client.send(TdApi.SearchUserByPhoneNumber(phoneNumber, onlyLocal)) { result ->
+                when (result) {
+                    is TdApi.User -> if (cont.isActive) cont.resume(result)
+                    is TdApi.Error -> {
+                        Timber.w("SearchUserByPhoneNumber error ${result.code}: ${result.message}")
+                        if (cont.isActive) cont.resume(null)
+                    }
+                    else -> if (cont.isActive) cont.resume(null)
+                }
+            }
+        }
+
+    suspend fun createPrivateChat(userId: Long, force: Boolean = false): TdApi.Chat? =
+        suspendCancellableCoroutine { cont ->
+            client.send(TdApi.CreatePrivateChat(userId, force)) { result ->
+                when (result) {
+                    is TdApi.Chat -> if (cont.isActive) cont.resume(result)
+                    is TdApi.Error -> {
+                        Timber.w("CreatePrivateChat error ${result.code}: ${result.message}")
+                        if (cont.isActive) cont.resume(null)
+                    }
+                    else -> if (cont.isActive) cont.resume(null)
+                }
+            }
+        }
+
+    suspend fun setProfilePhoto(localPath: String, isPublic: Boolean = true): String? = awaitResult {
+        client.send(
+            TdApi.SetProfilePhoto(
+                TdApi.InputChatPhotoStatic(TdApi.InputFileLocal(localPath)),
+                isPublic,
+            ),
+            it,
+        )
+    }
+
+    suspend fun importContacts(contacts: Array<TdApi.ImportedContact>): TdApi.ImportedContacts? =
+        suspendCancellableCoroutine { cont ->
+            client.send(TdApi.ImportContacts(contacts)) { result ->
+                when (result) {
+                    is TdApi.ImportedContacts -> if (cont.isActive) cont.resume(result)
+                    is TdApi.Error -> {
+                        Timber.w("ImportContacts error ${result.code}: ${result.message}")
+                        if (cont.isActive) cont.resume(null)
+                    }
+                    else -> if (cont.isActive) cont.resume(null)
+                }
+            }
+        }
+
+    suspend fun getInstalledStickerSets(): List<TdApi.StickerSetInfo> =
+        suspendCancellableCoroutine { cont ->
+            client.send(TdApi.GetInstalledStickerSets(TdApi.StickerTypeRegular())) { result ->
+                when (result) {
+                    is TdApi.StickerSets -> {
+                        val sets = result.sets?.toList() ?: emptyList()
+                        if (cont.isActive) cont.resume(sets)
+                    }
+                    is TdApi.Error -> {
+                        Timber.w("GetInstalledStickerSets error ${result.code}: ${result.message}")
+                        if (cont.isActive) cont.resume(emptyList())
+                    }
+                    else -> if (cont.isActive) cont.resume(emptyList())
+                }
+            }
+        }
+
+    suspend fun getStickerSet(setId: Long): TdApi.StickerSet? =
+        suspendCancellableCoroutine { cont ->
+            client.send(TdApi.GetStickerSet(setId)) { result ->
+                when (result) {
+                    is TdApi.StickerSet -> if (cont.isActive) cont.resume(result)
+                    is TdApi.Error -> {
+                        Timber.w("GetStickerSet error ${result.code}: ${result.message}")
+                        if (cont.isActive) cont.resume(null)
+                    }
+                    else -> if (cont.isActive) cont.resume(null)
+                }
+            }
+        }
+
+    suspend fun getStickers(query: String = "", limit: Int = 50, chatId: Long = 0L): List<TdApi.Sticker> =
+        suspendCancellableCoroutine { cont ->
+            client.send(
+                TdApi.GetStickers(TdApi.StickerTypeRegular(), query, limit, chatId),
+            ) { result ->
+                when (result) {
+                    is TdApi.Stickers -> {
+                        val list = result.stickers?.toList() ?: emptyList()
+                        if (cont.isActive) cont.resume(list)
+                    }
+                    is TdApi.Error -> {
+                        Timber.w("GetStickers error ${result.code}: ${result.message}")
+                        if (cont.isActive) cont.resume(emptyList())
+                    }
+                    else -> if (cont.isActive) cont.resume(emptyList())
+                }
+            }
+        }
+
+    suspend fun addMessageReaction(
+        chatId: Long,
+        messageId: Long,
+        emoji: String,
+        isBig: Boolean = false,
+    ): String? = awaitResult {
+        client.send(
+            TdApi.AddMessageReaction(
+                chatId,
+                messageId,
+                TdApi.ReactionTypeEmoji(emoji),
+                isBig,
+                true,
+            ),
+            it,
+        )
+    }
+
+    suspend fun forwardMessages(
+        toChatId: Long,
+        fromChatId: Long,
+        messageIds: LongArray,
+        sendCopy: Boolean = false,
+        removeCaption: Boolean = false,
+    ): String? = awaitResult {
+        client.send(
+            TdApi.ForwardMessages(
+                toChatId,
+                null,
+                fromChatId,
+                messageIds,
+                TdApi.MessageSendOptions(),
+                sendCopy,
+                removeCaption,
+            ),
+            it,
+        )
+    }
+
+    suspend fun sendTextMessage(chatId: Long, text: String): String? {
+        val linkPreview = TdApi.LinkPreviewOptions().apply {
+            isDisabled = false
+            url = ""
+            forceSmallMedia = false
+            forceLargeMedia = false
+            showAboveText = false
+        }
+        return sendMessageContent(
+            chatId,
+            TdApi.InputMessageText(
+                TdApi.FormattedText(text, emptyArray()),
+                linkPreview,
+                true,
+            ),
+        )
+    }
+
+    suspend fun sendLocation(
+        chatId: Long,
+        latitude: Double,
+        longitude: Double,
+        horizontalAccuracy: Double = 0.0,
+        livePeriodSec: Int? = null,
+    ): String? {
+        val location = TdApi.Location(latitude, longitude, horizontalAccuracy)
+        val content: TdApi.InputMessageContent = if (livePeriodSec != null && livePeriodSec > 0) {
+            TdApi.InputMessageLiveLocation(
+                TdApi.LiveLocation(location, livePeriodSec, 0, 0),
+            )
+        } else {
+            TdApi.InputMessageLocation(location)
+        }
+        return sendMessageContent(chatId, content)
+    }
+
+    suspend fun sendContact(
+        chatId: Long,
+        firstName: String,
+        lastName: String = "",
+        phone: String? = null,
+        userId: Long = 0L,
+    ): String? {
+        val content = TdApi.InputMessageContact(
+            TdApi.Contact(phone.orEmpty(), firstName, lastName, "", userId),
+        )
+        return sendMessageContent(chatId, content)
+    }
+
+    suspend fun sendPoll(
+        chatId: Long,
+        question: String,
+        options: List<String>,
+        anonymous: Boolean = true,
+        multipleAnswers: Boolean = false,
+    ): String? {
+        val pollOptions = options.map {
+            TdApi.InputPollOption(TdApi.FormattedText(it, emptyArray()), null)
+        }.toTypedArray()
+        val content = TdApi.InputMessagePoll(
+            TdApi.FormattedText(question, emptyArray()),
+            pollOptions,
+            TdApi.FormattedText("", emptyArray()),
+            null,
+            anonymous,
+            multipleAnswers,
+            true,
+            false,
+            emptyArray(),
+            false,
+            false,
+            TdApi.InputPollTypeRegular(false),
+            0,
+            0,
+            false,
+        )
+        return sendMessageContent(chatId, content)
+    }
+
+    suspend fun sendAnimation(
+        chatId: Long,
+        localPath: String,
+        caption: String? = null,
+    ): String? {
+        val content = TdApi.InputMessageAnimation(
+            TdApi.InputAnimation(TdApi.InputFileLocal(localPath), null, intArrayOf(), 0, 0, 0),
+            TdApi.FormattedText(caption.orEmpty(), emptyArray()),
+            false,
+            false,
+        )
+        return sendMessageContent(chatId, content)
+    }
+
+    suspend fun sendSticker(
+        chatId: Long,
+        localPath: String,
+        emoji: String = "⭐",
+    ): String? {
+        val content = TdApi.InputMessageSticker(
+            TdApi.InputFileLocal(localPath),
+            null,
+            0,
+            0,
+            emoji,
+        )
+        return sendMessageContent(chatId, content)
+    }
+
+    fun setTyping(chatId: Long, typing: Boolean) {
+        val action: TdApi.ChatAction =
+            if (typing) TdApi.ChatActionTyping() else TdApi.ChatActionCancel()
+        client.send(TdApi.SendChatAction(chatId, null, "", action))
+    }
+
+    suspend fun setName(firstName: String, lastName: String): String? = awaitResult {
+        client.send(TdApi.SetName(firstName, lastName), it)
+    }
+
+    suspend fun setBio(bio: String): String? = awaitResult {
+        client.send(TdApi.SetBio(bio), it)
     }
 
     fun sendText(chatId: Long, text: String) {
@@ -274,6 +621,23 @@ class TdLibFacade(private val client: TdLibClient) {
                     true,
                 )
             },
+        )
+    }
+
+    private suspend fun sendMessageContent(
+        chatId: Long,
+        content: TdApi.InputMessageContent,
+    ): String? = awaitResult {
+        client.send(
+            TdApi.SendMessage().apply {
+                this.chatId = chatId
+                topicId = null
+                replyTo = null
+                options = TdApi.MessageSendOptions()
+                replyMarkup = null
+                inputMessageContent = content
+            },
+            it,
         )
     }
 

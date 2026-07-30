@@ -134,6 +134,15 @@ fun SignalLoginScreen(
                     if (!authStep.url.isNullOrBlank()) {
                         linkUrl = authStep.url
                     }
+                    // Errors keep SIGNAL_DEVICE_LINK with a failure prompt and no success path.
+                    if (authStep.prompt.contains("refusé", ignoreCase = true) ||
+                        authStep.prompt.contains("échou", ignoreCase = true) ||
+                        authStep.prompt.contains("invalide", ignoreCase = true) ||
+                        authStep.prompt.contains("Erreur", ignoreCase = true) ||
+                        authStep.prompt.contains("interrompu", ignoreCase = true)
+                    ) {
+                        loading = false
+                    }
                 }
                 else -> Unit
             }
@@ -238,11 +247,25 @@ fun SignalLoginScreen(
                 )
                 Text(
                     text = "Sur votre téléphone Signal principal : Paramètres → Appareils liés → " +
-                        "Lier un nouvel appareil, puis scannez ce QR.",
+                        "Lier un nouvel appareil, puis scannez ce QR. Après le scan, " +
+                        "l'association se termine ici (ne fermez pas cet écran).",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 val url = linkUrl
+                if (url != null && loading) {
+                    Text(
+                        text = "En attente du scan / finalisation…",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.align(Alignment.CenterHorizontally),
+                    )
+                    CircularProgressIndicator(
+                        modifier = Modifier
+                            .padding(8.dp)
+                            .align(Alignment.CenterHorizontally),
+                    )
+                }
                 if (url != null) {
                     val qr = remember(url) { qrImageBitmap(url) }
                     Image(
@@ -277,7 +300,7 @@ fun SignalLoginScreen(
                             }
                         }
                     },
-                    enabled = !loading || linkUrl != null,
+                    enabled = true,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text("Régénérer le QR")

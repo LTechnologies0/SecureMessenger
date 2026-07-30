@@ -1,7 +1,7 @@
 # SecureMessenger
 
 <p align="center">
-  <strong>Multi-protocol secure messenger for Android — Matrix, XMPP, Telegram, and Signal, with optional Tor routing.</strong>
+  <strong>Messagerie Android multi-protocole — Matrix, XMPP, Telegram et Signal dans une seule app, Tor optionnel via OnionVPN.</strong>
 </p>
 
 <p align="center">
@@ -11,13 +11,18 @@
   <a href="https://ltechnologies0.github.io/SecureMessenger/"><img src="https://img.shields.io/badge/docs-KDoc%20(Dokka)-blue" alt="API docs"></a>
   <img src="https://img.shields.io/badge/minSdk-26-green" alt="minSdk 26">
   <img src="https://img.shields.io/badge/compileSdk-37-green" alt="compileSdk 37">
+  <img src="https://img.shields.io/badge/Matrix-Trixnity-teal" alt="Matrix">
+  <img src="https://img.shields.io/badge/XMPP-Smack-amber" alt="XMPP">
+  <img src="https://img.shields.io/badge/Telegram-TDLib-blue" alt="Telegram">
+  <img src="https://img.shields.io/badge/Signal-libsignal-indigo" alt="Signal">
 </p>
 
-**SecureMessenger** is an open-source Android app that lets you chat over **Matrix, XMPP, Telegram, and Signal** from a single app. Part of the [OnionPhone](https://onionphone.org) app family.
+**SecureMessenger** is an open-source Android messenger that unifies **Matrix**, **XMPP**, **Telegram**, and **Signal** in one Material 3 inbox — contacts, history, rich media (voice, location, polls, GIFs where the protocol supports them), typing, read receipts, profile edit, and local JSON backup. Part of the [OnionPhone](https://onionphone.org) app family.
 
-> Tor routing is **optional** (off by default). When enabled, all protocols (including Signal)
-> use the [OnionVPN](https://github.com/LTechnologies0/OnionVPN) PAC bridge
+> Tor routing is **optional** (off by default). When enabled, traffic uses the [OnionVPN](https://github.com/LTechnologies0/OnionVPN) PAC bridge
 > (`http://127.0.0.1:18201/onionvpn.pac` → SOCKS5 `127.0.0.1:18202`). Orbot / InviZible are not used.
+
+**Keywords / topics:** `android` · `kotlin` · `jetpack-compose` · `material-design` · `messenger` · `matrix` · `xmpp` · `telegram` · `signal` · `tdlib` · `tor` · `privacy` · `onionphone`
 
 ---
 
@@ -38,14 +43,17 @@
 
 | Feature | Description |
 |---------|-------------|
-| **Multi-protocol** | Matrix, XMPP, Telegram, Signal accounts side by side in one app |
-| **Optional Tor routing** | Opt-in SOCKS5 via OnionVPN PAC for all protocols; custom SOCKS optional; no global killswitch |
+| **Multi-protocol inbox** | Matrix, XMPP, Telegram, and Signal accounts side by side |
+| **Unified messaging** | Text, images, files, GIFs, voice notes, location, polls, contact cards, stickers/ephemeral where the protocol API allows |
+| **Contacts & profile** | Protocol contacts (roster / GetContacts / CDSI / room members), display-name (and bio/photo where supported) |
+| **History** | Telegram TDLib history, XMPP MAM, Matrix timeline backfill; Signal live + device sync (no cloud 1:1 backfill) |
+| **Typing & read receipts** | Outbound + inbound typing (Matrix/XMPP/Telegram); read markers / receipts where supported |
 | **Signal link (QR)** | Register by SMS or link an existing account as a secondary device |
-| **Account registration** | Create new Matrix accounts (UIA dummy/token stages inline, WebView fallback for captcha/email/terms) and XMPP accounts (XEP-0077 in-band registration with dynamic extra fields) — no browser needed for the common case |
-| **Matrix well-known discovery** | Automatically resolves delegated homeservers via `.well-known/matrix/client` |
-| **Per-account Tor circuit isolation** | XMPP connections use per-account SOCKS5 stream isolation so different accounts don't share a Tor circuit |
-| **Encrypted local storage** | Account credentials stored via Android Keystore-backed encrypted storage |
-| **Material 3 UI** | Jetpack Compose with adaptive navigation |
+| **Account registration** | Matrix (UIA / WebView) and XMPP (XEP-0077) account creation |
+| **Optional Tor** | OnionVPN PAC SOCKS for all protocols when Tor is enabled; custom SOCKS optional |
+| **Local backup** | Per-account JSON export of conversations/messages |
+| **Encrypted at rest** | SQLCipher DB + Keystore-backed credentials; system app lock |
+| **Material 3 UI** | Jetpack Compose, expressive motion, capability chips per protocol |
 
 ### Network flow
 

@@ -16,15 +16,18 @@ import ltechnologies.onionphone.securemessenger.data.MessengerRepository
 
 /** XEP-0313 MAM archive sync with XEP-0384 OMEMO decryption and XEP-0280 carbon direction. */
 object XmppMamSync {
+    /**
+     * @return true if a MAM query was issued against the network (even if zero messages).
+     */
     suspend fun syncHistory(
         smack: SmackClientFacade,
         accountId: String,
         repository: MessengerRepository,
         remoteJid: String,
         maxResults: Int = 50,
-    ) {
-        val mam = smack.mamManager ?: return
-        if (!mam.isSupported) return
+    ): Boolean {
+        val mam = smack.mamManager ?: return false
+        if (!mam.isSupported) return false
         val with = JidCreate.entityBareFrom(remoteJid)
         val queryArgsBuilder = MamManager.MamQueryArgs.builder()
             .setResultPageSizeTo(maxResults)
@@ -89,6 +92,7 @@ object XmppMamSync {
                 ),
             )
         }
+        return true
     }
 
     private fun resolveBody(smack: SmackClientFacade, remoteJid: String, smackMsg: SmackMessage): String? {

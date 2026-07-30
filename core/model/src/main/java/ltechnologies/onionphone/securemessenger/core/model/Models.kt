@@ -127,7 +127,113 @@ data class ProtocolCapabilities(
     val readReceipts: Boolean = false,
     val endToEndEncryption: Boolean = false,
     val requiresPhoneAuth: Boolean = false,
+    /** Address-book style contacts (roster / GetContacts / CDS). */
+    val contacts: Boolean = false,
+    /** User can edit display name / bio / avatar via the app. */
+    val profileEdit: Boolean = false,
+    val voiceNotes: Boolean = false,
+    val stickers: Boolean = false,
+    val gifs: Boolean = false,
+    val locationShare: Boolean = false,
+    val polls: Boolean = false,
+    val contactShare: Boolean = false,
+    val ephemeralMessages: Boolean = false,
+    /** Protocol can backfill older messages when opening a chat. */
+    val messageHistory: Boolean = false,
+    /** App-level JSON export of local conversations/messages. */
+    val backupExport: Boolean = true,
 )
+
+enum class MessageKind {
+    TEXT,
+    IMAGE,
+    VIDEO,
+    FILE,
+    GIF,
+    STICKER,
+    VOICE,
+    LOCATION,
+    POLL,
+    CONTACT,
+    SYSTEM,
+    UNKNOWN,
+}
+
+data class Contact(
+    val id: String,
+    val protocol: ProtocolId,
+    val accountId: String,
+    val remoteId: String,
+    val displayName: String,
+    val handle: String? = null,
+    val phone: String? = null,
+    val avatarLocalPath: String? = null,
+)
+
+data class AccountProfile(
+    val accountId: String,
+    val protocol: ProtocolId,
+    val displayName: String,
+    val handle: String? = null,
+    val phone: String? = null,
+    val bio: String? = null,
+    val avatarLocalPath: String? = null,
+)
+
+/**
+ * Outgoing rich payloads beyond plain text / generic media.
+ * Protocols map what they support; unsupported kinds return [SendResult.Failure].
+ */
+sealed class OutgoingContent {
+    data class Text(val body: SanitizedText) : OutgoingContent()
+
+    data class Media(
+        val attachment: Attachment,
+        val caption: SanitizedText? = null,
+        val kind: MessageKind = MessageKind.FILE,
+    ) : OutgoingContent()
+
+    data class VoiceNote(
+        val attachment: Attachment,
+        val durationMs: Int = 0,
+    ) : OutgoingContent()
+
+    data class Location(
+        val latitude: Double,
+        val longitude: Double,
+        val horizontalAccuracy: Double = 0.0,
+        val livePeriodSec: Int? = null,
+    ) : OutgoingContent()
+
+    data class ContactCard(
+        val firstName: String,
+        val lastName: String = "",
+        val phone: String? = null,
+        val userId: Long? = null,
+    ) : OutgoingContent()
+
+    data class Poll(
+        val question: String,
+        val options: List<String>,
+        val anonymous: Boolean = true,
+        val multipleAnswers: Boolean = false,
+    ) : OutgoingContent()
+
+    data class Sticker(
+        val localPath: String,
+        val emoji: String = "⭐",
+    ) : OutgoingContent()
+
+    data class Ephemeral(
+        val body: SanitizedText,
+        val expireSeconds: Int,
+    ) : OutgoingContent()
+}
+
+sealed class BackupExportResult {
+    data class Success(val uriOrPath: String, val messageCount: Int, val conversationCount: Int) : BackupExportResult()
+    data class Failure(val reason: String) : BackupExportResult()
+}
 
 data class Account(
     val id: String,
@@ -174,6 +280,11 @@ data class Message(
     val deliveryState: DeliveryState = DeliveryState.SENT,
     val senderDisplayName: String? = null,
     val attachments: List<Attachment> = emptyList(),
+    val kind: MessageKind = MessageKind.TEXT,
+    /** Opaque JSON for location/poll/contact metadata when [kind] is structured. */
+    val payloadJson: String? = null,
+    /** Disappearing-message timer in seconds; null = permanent. */
+    val expireSeconds: Int? = null,
 )
 
 @JvmInline

@@ -2,12 +2,16 @@ package ltechnologies.onionphone.securemessenger.protocol.telegram
 
 import ltechnologies.onionphone.securemessenger.core.model.Attachment
 import ltechnologies.onionphone.securemessenger.core.model.AttachmentState
+import ltechnologies.onionphone.securemessenger.core.model.Contact
 import ltechnologies.onionphone.securemessenger.core.model.Conversation
 import ltechnologies.onionphone.securemessenger.core.model.DeliveryState
 import ltechnologies.onionphone.securemessenger.core.model.Message
 import ltechnologies.onionphone.securemessenger.core.model.MessageDirection
+import ltechnologies.onionphone.securemessenger.core.model.MessageKind
 import ltechnologies.onionphone.securemessenger.core.model.ProtocolId
 import org.drinkless.tdlib.TdApi
+import org.json.JSONArray
+import org.json.JSONObject
 
 /** Maps TDLib API objects onto the unified [MessengerProtocol] domain model. */
 object TdLibMapper {
@@ -44,10 +48,37 @@ object TdLibMapper {
         )
     }
 
+    fun toContact(accountId: String, user: TdApi.User): Contact {
+        val display = "${user.firstName} ${user.lastName}".trim().ifBlank {
+            user.usernames?.editableUsername?.takeIf { it.isNotBlank() }
+                ?: user.phoneNumber.takeIf { it.isNotBlank() }
+                ?: user.id.toString()
+        }
+        val handle = user.usernames?.editableUsername?.takeIf { it.isNotBlank() }
+            ?: user.usernames?.activeUsernames?.firstOrNull()?.takeIf { it.isNotBlank() }
+        return Contact(
+            id = "${accountId}_${user.id}",
+            protocol = ProtocolId.TELEGRAM,
+            accountId = accountId,
+            remoteId = user.id.toString(),
+            displayName = display,
+            handle = handle?.let { "@$it" },
+            phone = user.phoneNumber.takeIf { it.isNotBlank() },
+            avatarLocalPath = user.profilePhoto?.small?.local?.path?.takeIf { it.isNotBlank() },
+        )
+    }
+
     fun toMessage(accountId: String, msg: TdApi.Message): Message {
         val body = messageBody(msg)
         val convId = conversationId(accountId, msg.chatId)
         val msgKey = messageId(convId, msg.id)
+        val kind = messageKind(msg.content)
+        val expire = when {
+            msg.selfDestructType is TdApi.MessageSelfDestructTypeTimer ->
+                (msg.selfDestructType as TdApi.MessageSelfDestructTypeTimer).selfDestructTime
+            msg.selfDestructIn > 0 -> msg.selfDestructIn.toInt()
+            else -> null
+        }
         return Message(
             id = msgKey,
             conversationId = convId,
@@ -58,7 +89,76 @@ object TdLibMapper {
             deliveryState = deliveryState(msg),
             senderDisplayName = senderLabel(msg.senderId),
             attachments = attachmentsFromContent(msg.content, msgKey),
+            kind = kind,
+            payloadJson = payloadJson(msg.content),
+            expireSeconds = expire,
         )
+    }
+
+    fun messageKind(content: TdApi.MessageContent): MessageKind = when (content) {
+        is TdApi.MessageText -> MessageKind.TEXT
+        is TdApi.MessagePhoto -> MessageKind.IMAGE
+        is TdApi.MessageVideo -> MessageKind.VIDEO
+        is TdApi.MessageDocument, is TdApi.MessageAudio -> MessageKind.FILE
+        is TdApi.MessageAnimation -> MessageKind.GIF
+        is TdApi.MessageSticker -> MessageKind.STICKER
+        is TdApi.MessageVoiceNote, is TdApi.MessageVideoNote -> MessageKind.VOICE
+        is TdApi.MessageLocation, is TdApi.MessageLiveLocation -> MessageKind.LOCATION
+        is TdApi.MessagePoll -> MessageKind.POLL
+        is TdApi.MessageContact -> MessageKind.CONTACT
+        is TdApi.MessageChatChangeTitle,
+        is TdApi.MessageChatAddMembers,
+        is TdApi.MessageChatDeleteMember,
+        is TdApi.MessageChatJoinByLink,
+        is TdApi.MessagePinMessage,
+        is TdApi.MessageScreenshotTaken,
+        is TdApi.MessageCall,
+        -> MessageKind.SYSTEM
+        else -> MessageKind.UNKNOWN
+    }
+
+    fun payloadJson(content: TdApi.MessageContent): String? = when (content) {
+        is TdApi.MessageLocation -> JSONObject().apply {
+            put("latitude", content.location.latitude)
+            put("longitude", content.location.longitude)
+            put("horizontalAccuracy", content.location.horizontalAccuracy)
+        }.toString()
+        is TdApi.MessageLiveLocation -> JSONObject().apply {
+            val loc = content.location.location
+            put("latitude", loc.latitude)
+            put("longitude", loc.longitude)
+            put("horizontalAccuracy", loc.horizontalAccuracy)
+            put("livePeriod", content.location.livePeriod)
+            put("expiresIn", content.expiresIn)
+        }.toString()
+        is TdApi.MessagePoll -> JSONObject().apply {
+            put("question", content.poll.question.text)
+            put("anonymous", content.poll.isAnonymous)
+            put("multipleAnswers", content.poll.allowsMultipleAnswers)
+            put("totalVoterCount", content.poll.totalVoterCount)
+            put("isClosed", content.poll.isClosed)
+            put(
+                "options",
+                JSONArray().apply {
+                    content.poll.options.forEach { opt ->
+                        put(
+                            JSONObject().apply {
+                                put("text", opt.text.text)
+                                put("voterCount", opt.voterCount)
+                                put("isChosen", opt.isChosen)
+                            },
+                        )
+                    }
+                },
+            )
+        }.toString()
+        is TdApi.MessageContact -> JSONObject().apply {
+            put("firstName", content.contact.firstName)
+            put("lastName", content.contact.lastName)
+            put("phoneNumber", content.contact.phoneNumber)
+            put("userId", content.contact.userId)
+        }.toString()
+        else -> null
     }
 
     fun attachmentsFromContent(content: TdApi.MessageContent, messageId: String): List<Attachment> =
@@ -91,6 +191,20 @@ object TdLibMapper {
                 mimeType = content.voiceNote.mimeType.ifBlank { "audio/ogg" },
                 fileName = null,
             ))
+            is TdApi.MessageSticker -> listOf(attachmentFromFile(
+                messageId = messageId,
+                suffix = "sticker",
+                file = content.sticker.sticker,
+                mimeType = "image/webp",
+                fileName = null,
+            ))
+            is TdApi.MessageAnimation -> listOf(attachmentFromFile(
+                messageId = messageId,
+                suffix = "animation",
+                file = content.animation.animation,
+                mimeType = content.animation.mimeType.ifBlank { "video/mp4" },
+                fileName = content.animation.fileName,
+            ))
             else -> emptyList()
         }
 
@@ -104,10 +218,14 @@ object TdLibMapper {
         is TdApi.MessageAudio -> content.caption.text.ifBlank { "[Audio]" }
         is TdApi.MessageVoiceNote -> "[Message vocal]"
         is TdApi.MessageVideoNote -> "[Vidéo ronde]"
-        is TdApi.MessageSticker -> "[Sticker]"
+        is TdApi.MessageSticker -> content.sticker.emoji.ifBlank { "[Sticker]" }
         is TdApi.MessageAnimation -> content.caption.text.ifBlank { "[GIF]" }
         is TdApi.MessageLocation -> "[Position]"
-        is TdApi.MessageContact -> "[Contact]"
+        is TdApi.MessageLiveLocation -> "[Position en direct]"
+        is TdApi.MessageContact -> {
+            val name = "${content.contact.firstName} ${content.contact.lastName}".trim()
+            if (name.isBlank()) "[Contact]" else "[Contact] $name"
+        }
         is TdApi.MessagePoll -> content.poll.question.text
         is TdApi.MessageGame -> content.game.title
         is TdApi.MessageInvoice -> content.productInfo.title

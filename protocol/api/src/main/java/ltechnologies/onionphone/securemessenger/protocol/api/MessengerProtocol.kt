@@ -1,13 +1,20 @@
 package ltechnologies.onionphone.securemessenger.protocol.api
 
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.flowOf
 import ltechnologies.onionphone.securemessenger.core.model.AccountCredentials
+import ltechnologies.onionphone.securemessenger.core.model.AccountProfile
 import ltechnologies.onionphone.securemessenger.core.model.AuthStep
+import ltechnologies.onionphone.securemessenger.core.model.BackupExportResult
 import ltechnologies.onionphone.securemessenger.core.model.ConnectionResult
 import ltechnologies.onionphone.securemessenger.core.model.ConnectionState
+import ltechnologies.onionphone.securemessenger.core.model.Contact
 import ltechnologies.onionphone.securemessenger.core.model.Conversation
 import ltechnologies.onionphone.securemessenger.core.model.Message
+import ltechnologies.onionphone.securemessenger.core.model.OutgoingContent
 import ltechnologies.onionphone.securemessenger.core.model.ProtocolCapabilities
 import ltechnologies.onionphone.securemessenger.core.model.ProtocolId
 import ltechnologies.onionphone.securemessenger.core.model.ProxyConfig
@@ -115,12 +122,65 @@ interface MessengerProtocol {
         accountId: String? = null,
     ): SendResult = SendResult.Failure("Media not supported for $id")
 
+    /**
+     * Sends rich content (voice, location, poll, contact card, sticker, ephemeral, …).
+     * Default routes [OutgoingContent.Text] / [OutgoingContent.Media] to existing methods.
+     */
+    suspend fun sendContent(
+        conversationId: String,
+        content: OutgoingContent,
+        accountId: String? = null,
+    ): SendResult = when (content) {
+        is OutgoingContent.Text -> sendMessage(conversationId, content.body, accountId)
+        is OutgoingContent.Media -> sendMedia(
+            conversationId,
+            content.attachment,
+            content.caption,
+            accountId,
+        )
+        else -> SendResult.Failure("Content type not supported for $id")
+    }
+
     /** Sync full message history when the user opens a conversation. */
     suspend fun loadMessageHistory(conversationId: String): HistoryLoadResult =
         HistoryLoadResult.Success(messageCount = 0, loadedFromCache = false, syncedFromNetwork = false)
 
     /** Protocol hook when the user leaves a conversation screen. */
     suspend fun closeConversation(conversationId: String) = Unit
+
+    /** Live contacts for [accountId] when [ProtocolCapabilities.contacts] is true. */
+    fun observeContacts(accountId: String): Flow<List<Contact>> = flowOf(emptyList())
+
+    /** Pulls contacts from the network into local storage. */
+    suspend fun refreshContacts(accountId: String): Result<Int> =
+        Result.failure(UnsupportedOperationException("Contacts not supported for $id"))
+
+    /** Current account profile (display name, handle, bio). */
+    suspend fun getAccountProfile(accountId: String): AccountProfile? = null
+
+    /** Updates editable profile fields. Default: unsupported. */
+    suspend fun updateAccountProfile(accountId: String, displayName: String, bio: String?): Result<Unit> =
+        Result.failure(UnsupportedOperationException("Profile edit not supported for $id"))
+
+    /** Sends a typing indicator for [conversationId]. No-op by default. */
+    suspend fun setTyping(conversationId: String, typing: Boolean) = Unit
+
+    /**
+     * Live display names (or protocol ids) of peers currently typing in [conversationId].
+     * Empty by default; protocols with inbound typing (Telegram, Matrix, XMPP) override.
+     */
+    fun observeTyping(conversationId: String): StateFlow<List<String>> =
+        MutableStateFlow<List<String>>(emptyList()).asStateFlow()
+
+    /** Marks messages in [conversationId] as read up to [messageId] when known. */
+    suspend fun markRead(conversationId: String, messageId: String? = null) = Unit
+
+    /**
+     * Exports local conversations/messages for [accountId] to [destinationPath]
+     * (app-private or SAF-copied path). Default uses repository if wired by caller.
+     */
+    suspend fun exportBackup(accountId: String, destinationPath: String): BackupExportResult =
+        BackupExportResult.Failure("Backup not supported for $id")
 
     /**
      * Tears down the connection and releases any underlying client/socket resources.

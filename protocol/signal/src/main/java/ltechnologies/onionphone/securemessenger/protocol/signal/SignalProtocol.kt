@@ -19,15 +19,19 @@ import java.io.File
 import java.io.FileInputStream
 import java.util.Optional
 import ltechnologies.onionphone.securemessenger.core.model.AccountCredentials
+import ltechnologies.onionphone.securemessenger.core.model.AccountProfile
 import ltechnologies.onionphone.securemessenger.core.model.Attachment
 import ltechnologies.onionphone.securemessenger.core.model.AttachmentState
 import ltechnologies.onionphone.securemessenger.core.model.AuthStep
 import ltechnologies.onionphone.securemessenger.core.model.AuthStepKind
 import ltechnologies.onionphone.securemessenger.core.model.ConnectionResult
 import ltechnologies.onionphone.securemessenger.core.model.ConnectionState
+import ltechnologies.onionphone.securemessenger.core.model.Contact
 import ltechnologies.onionphone.securemessenger.core.model.Conversation
 import ltechnologies.onionphone.securemessenger.core.model.FeatureFlags
 import ltechnologies.onionphone.securemessenger.core.model.Message
+import ltechnologies.onionphone.securemessenger.core.model.MessageKind
+import ltechnologies.onionphone.securemessenger.core.model.OutgoingContent
 import ltechnologies.onionphone.securemessenger.core.model.ProtocolCapabilities
 import ltechnologies.onionphone.securemessenger.core.model.ProtocolId
 import ltechnologies.onionphone.securemessenger.core.model.ProxyConfig
@@ -37,19 +41,26 @@ import ltechnologies.onionphone.securemessenger.core.security.EncryptedCredentia
 import ltechnologies.onionphone.securemessenger.data.MessengerRepository
 import ltechnologies.onionphone.securemessenger.protocol.api.MessengerProtocol
 import ltechnologies.onionphone.securemessenger.protocol.api.ProtocolNotEnabledException
-import org.signal.core.models.ServiceId.ACI
-import org.signal.core.models.ServiceId.PNI
 import org.signal.core.util.SignalSocksHolder
 import org.whispersystems.signalservice.api.crypto.ContentHint
 import org.whispersystems.signalservice.api.crypto.SealedSenderAccess
 import org.whispersystems.signalservice.api.messages.SignalServiceAttachment
+import org.whispersystems.signalservice.api.messages.SignalServiceAttachmentPointer
 import org.whispersystems.signalservice.api.messages.SignalServiceDataMessage
+import org.whispersystems.signalservice.api.messages.SignalServiceReceiptMessage
+import org.whispersystems.signalservice.api.messages.SignalServiceTypingMessage
+import org.whispersystems.signalservice.api.messages.shared.SharedContact
+import org.whispersystems.signalservice.api.profiles.AvatarUploadParams
 import org.whispersystems.signalservice.api.push.SignalServiceAddress
 import org.whispersystems.signalservice.api.SignalServiceMessageSender
 import timber.log.Timber
 import java.net.InetSocketAddress
 import java.net.Proxy
+import java.security.SecureRandom
+import kotlinx.coroutines.flow.first
 import ltechnologies.onionphone.securemessenger.core.proxy.SocksEndpointResolver
+import org.json.JSONArray
+import org.json.JSONObject
 
 @Singleton
 class SignalProtocol @Inject constructor(
@@ -66,10 +77,21 @@ class SignalProtocol @Inject constructor(
         groupChats = true,
         mediaSend = true,
         mediaReceive = true,
-        typingIndicators = false,
+        typingIndicators = true,
         readReceipts = true,
         endToEndEncryption = true,
         requiresPhoneAuth = true,
+        contacts = true,
+        profileEdit = true,
+        voiceNotes = true,
+        stickers = false,
+        gifs = false,
+        locationShare = false,
+        polls = true,
+        contactShare = true,
+        ephemeralMessages = true,
+        messageHistory = false,
+        backupExport = true,
     )
 
     private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -202,6 +224,14 @@ class SignalProtocol @Inject constructor(
                         prompt = "Scannez ce QR depuis Signal (appareil principal) → Paramètres → Appareils liés",
                         fields = emptyList(),
                         url = url,
+                    )
+                },
+                onProgress = { msg ->
+                    _pendingAuthStep.value = AuthStep(
+                        kind = AuthStepKind.SIGNAL_DEVICE_LINK,
+                        prompt = msg,
+                        fields = emptyList(),
+                        url = _deviceLinkUrl.value,
                     )
                 },
                 onOutcome = { outcome ->
@@ -400,7 +430,19 @@ class SignalProtocol @Inject constructor(
                 return outcome
             }
             is SignalRegistrationStep.Failed -> {
-                _pendingAuthStep.value = null
+                val reason = outcome.step.reason
+                Timber.w("Signal auth/link failed: %s", reason)
+                // Keep SIGNAL_DEVICE_LINK step so the QR screen can show the error.
+                if (_deviceLinkUrl.value != null || linkFlow != null) {
+                    _pendingAuthStep.value = AuthStep(
+                        kind = AuthStepKind.SIGNAL_DEVICE_LINK,
+                        prompt = reason,
+                        fields = emptyList(),
+                        url = _deviceLinkUrl.value,
+                    )
+                } else {
+                    _pendingAuthStep.value = null
+                }
                 _connectionState.value = ConnectionState.ERROR
                 return outcome
             }
@@ -584,6 +626,10 @@ class SignalProtocol @Inject constructor(
         body: SanitizedText,
         attachments: List<org.whispersystems.signalservice.api.messages.SignalServiceAttachment> = emptyList(),
         localAttachment: Attachment? = null,
+        kind: MessageKind = MessageKind.TEXT,
+        payloadJson: String? = null,
+        expireSeconds: Int? = null,
+        configure: (SignalServiceDataMessage.Builder) -> Unit = {},
     ): SendResult {
         val helper = groupHelper ?: SignalGroupHelper(context, accId, credentialStore).also { groupHelper = it }
         val plan = helper.resolveSendTargets(activeSession, masterKeyBytes)
@@ -596,6 +642,10 @@ class SignalProtocol @Inject constructor(
         if (attachments.isNotEmpty()) {
             builder.withAttachments(attachments)
         }
+        if (expireSeconds != null && expireSeconds > 0) {
+            builder.withExpiration(expireSeconds)
+        }
+        configure(builder)
         val dataMessage = builder.build()
         val results = if (plan.canUseSenderKeys) {
             activeSession.messageSender.sendGroupDataMessage(
@@ -642,6 +692,9 @@ class SignalProtocol @Inject constructor(
             direction = ltechnologies.onionphone.securemessenger.core.model.MessageDirection.OUTGOING,
             deliveryState = ltechnologies.onionphone.securemessenger.core.model.DeliveryState.SENT,
             attachments = listOfNotNull(localAttachment),
+            kind = kind,
+            payloadJson = payloadJson,
+            expireSeconds = expireSeconds,
         )
         repository.upsertMessage(msg)
         repository.upsertConversation(
@@ -666,6 +719,10 @@ class SignalProtocol @Inject constructor(
         body: SanitizedText,
         attachments: List<org.whispersystems.signalservice.api.messages.SignalServiceAttachment> = emptyList(),
         localAttachment: Attachment? = null,
+        kind: MessageKind = MessageKind.TEXT,
+        payloadJson: String? = null,
+        expireSeconds: Int? = null,
+        configure: (SignalServiceDataMessage.Builder) -> Unit = {},
     ): SendResult {
         val timestamp = System.currentTimeMillis()
         val builder = SignalServiceDataMessage.newBuilder()
@@ -674,6 +731,10 @@ class SignalProtocol @Inject constructor(
         if (attachments.isNotEmpty()) {
             builder.withAttachments(attachments)
         }
+        if (expireSeconds != null && expireSeconds > 0) {
+            builder.withExpiration(expireSeconds)
+        }
+        configure(builder)
         val dataMessage = builder.build()
         val result = activeSession.messageSender.sendDataMessage(
             recipient,
@@ -696,6 +757,9 @@ class SignalProtocol @Inject constructor(
             direction = ltechnologies.onionphone.securemessenger.core.model.MessageDirection.OUTGOING,
             deliveryState = ltechnologies.onionphone.securemessenger.core.model.DeliveryState.SENT,
             attachments = listOfNotNull(localAttachment),
+            kind = kind,
+            payloadJson = payloadJson,
+            expireSeconds = expireSeconds,
         )
         repository.upsertMessage(msg)
         repository.upsertConversation(
@@ -711,6 +775,498 @@ class SignalProtocol @Inject constructor(
         )
         return SendResult.Success(msg.id)
     }
+
+    override suspend fun sendContent(
+        conversationId: String,
+        content: OutgoingContent,
+        accountId: String?,
+    ): SendResult = withContext(signalDispatcher) {
+        when (content) {
+            is OutgoingContent.Text -> sendMessage(conversationId, content.body, accountId)
+            is OutgoingContent.Media -> sendMedia(conversationId, content.attachment, content.caption, accountId)
+            is OutgoingContent.Location ->
+                SendResult.Failure("Partage GPS non supporté par Signal DataMessage")
+            is OutgoingContent.Ephemeral -> sendEphemeral(conversationId, content, accountId)
+            is OutgoingContent.VoiceNote -> sendVoiceNote(conversationId, content, accountId)
+            is OutgoingContent.Sticker -> sendSticker(conversationId, content, accountId)
+            is OutgoingContent.Poll -> sendPoll(conversationId, content, accountId)
+            is OutgoingContent.ContactCard -> sendContactCard(conversationId, content, accountId)
+        }
+    }
+
+    private suspend fun sendEphemeral(
+        conversationId: String,
+        content: OutgoingContent.Ephemeral,
+        accountId: String?,
+    ): SendResult {
+        val accId = accountId ?: this.accountId ?: return SendResult.Failure("Compte non connecté")
+        val activeSession = session ?: return SendResult.Failure("Session Signal indisponible")
+        val remoteId = conversationId.removePrefix("${accId}_")
+        if (remoteId == conversationId) return SendResult.Failure("Conversation Signal invalide")
+        return try {
+            val masterKey = SignalGroupHelper.parseMasterKey(remoteId)
+            if (masterKey != null) {
+                deliverGroupMessage(
+                    activeSession, conversationId, accId, masterKey, content.body,
+                    expireSeconds = content.expireSeconds,
+                )
+            } else {
+                deliverMessage(
+                    activeSession, conversationId, accId, resolveSignalAddress(remoteId), content.body,
+                    expireSeconds = content.expireSeconds,
+                )
+            }
+        } catch (e: Exception) {
+            Timber.e(e, "Signal ephemeral send failed")
+            SendResult.Failure(e.message ?: "Envoi éphémère échoué")
+        }
+    }
+
+    private suspend fun uploadLocalAttachment(
+        activeSession: SignalSessionContext,
+        file: File,
+        mimeType: String,
+        fileName: String?,
+        voiceNote: Boolean = false,
+        caption: String? = null,
+    ): Pair<SignalServiceAttachmentPointer, Attachment> {
+        val form = activeSession.pushServiceSocket.attachmentV4UploadForm
+        val uploadSpec = activeSession.pushServiceSocket.getResumableUploadSpec(form)
+        return FileInputStream(file).use { input ->
+            val streamBuilder = SignalServiceAttachment.newStreamBuilder()
+                .withStream(input)
+                .withContentType(mimeType)
+                .withFileName(fileName ?: file.name)
+                .withLength(file.length())
+                .withCaption(caption)
+                .withResumableUploadSpec(uploadSpec)
+            if (voiceNote) {
+                streamBuilder.withVoiceNote(true)
+            }
+            val pointer = activeSession.messageSender.uploadAttachment(streamBuilder.build())
+            val local = Attachment(
+                id = java.util.UUID.randomUUID().toString(),
+                mimeType = mimeType,
+                fileName = fileName ?: file.name,
+                localPath = file.absolutePath,
+                remoteRef = pointer.remoteId.toString(),
+                sizeBytes = file.length(),
+                state = AttachmentState.READY,
+            )
+            pointer to local
+        }
+    }
+
+    private suspend fun sendVoiceNote(
+        conversationId: String,
+        content: OutgoingContent.VoiceNote,
+        accountId: String?,
+    ): SendResult {
+        val accId = accountId ?: this.accountId ?: return SendResult.Failure("Compte non connecté")
+        val activeSession = session ?: return SendResult.Failure("Session Signal indisponible")
+        val remoteId = conversationId.removePrefix("${accId}_")
+        if (remoteId == conversationId) return SendResult.Failure("Conversation Signal invalide")
+        val path = content.attachment.localPath ?: return SendResult.Failure("Fichier vocal manquant")
+        val file = File(path)
+        if (!file.exists()) return SendResult.Failure("Fichier vocal introuvable")
+        return try {
+            val mime = content.attachment.mimeType.ifBlank { "audio/aac" }
+            val (pointer, local) = uploadLocalAttachment(
+                activeSession, file, mime, content.attachment.fileName ?: file.name, voiceNote = true,
+            )
+            val body = SanitizedText("🎤")
+            val payload = JSONObject().put("durationMs", content.durationMs).toString()
+            val masterKey = SignalGroupHelper.parseMasterKey(remoteId)
+            if (masterKey != null) {
+                deliverGroupMessage(
+                    activeSession, conversationId, accId, masterKey, body,
+                    attachments = listOf(pointer), localAttachment = local,
+                    kind = MessageKind.VOICE, payloadJson = payload,
+                )
+            } else {
+                deliverMessage(
+                    activeSession, conversationId, accId, resolveSignalAddress(remoteId), body,
+                    attachments = listOf(pointer), localAttachment = local,
+                    kind = MessageKind.VOICE, payloadJson = payload,
+                )
+            }
+        } catch (e: Exception) {
+            Timber.e(e, "Signal voice note send failed")
+            SendResult.Failure(e.message ?: "Envoi vocal échoué")
+        }
+    }
+
+    private suspend fun sendSticker(
+        conversationId: String,
+        content: OutgoingContent.Sticker,
+        accountId: String?,
+    ): SendResult {
+        // Signal stickers require a real packId/packKey from an installed sticker pack.
+        // Random bytes are not interoperable with Signal clients — refuse rather than fake.
+        return SendResult.Failure(
+            "Stickers Signal nécessitent un pack installé (packId/packKey) — non supporté pour l'instant",
+        )
+    }
+
+    private suspend fun sendPoll(
+        conversationId: String,
+        content: OutgoingContent.Poll,
+        accountId: String?,
+    ): SendResult {
+        val accId = accountId ?: this.accountId ?: return SendResult.Failure("Compte non connecté")
+        val activeSession = session ?: return SendResult.Failure("Session Signal indisponible")
+        val remoteId = conversationId.removePrefix("${accId}_")
+        if (remoteId == conversationId) return SendResult.Failure("Conversation Signal invalide")
+        if (content.options.size < 2) return SendResult.Failure("Un sondage nécessite au moins 2 options")
+        return try {
+            val poll = SignalServiceDataMessage.PollCreate(
+                content.question,
+                content.multipleAnswers,
+                content.options,
+            )
+            val body = SanitizedText(content.question)
+            val optionsArr = JSONArray()
+            content.options.forEach { optionsArr.put(it) }
+            val payload = JSONObject()
+                .put("question", content.question)
+                .put("options", optionsArr)
+                .put("multipleAnswers", content.multipleAnswers)
+                .toString()
+            val configure: (SignalServiceDataMessage.Builder) -> Unit = { it.withPollCreate(poll) }
+            val masterKey = SignalGroupHelper.parseMasterKey(remoteId)
+            if (masterKey != null) {
+                deliverGroupMessage(
+                    activeSession, conversationId, accId, masterKey, body,
+                    kind = MessageKind.POLL, payloadJson = payload, configure = configure,
+                )
+            } else {
+                deliverMessage(
+                    activeSession, conversationId, accId, resolveSignalAddress(remoteId), body,
+                    kind = MessageKind.POLL, payloadJson = payload, configure = configure,
+                )
+            }
+        } catch (e: Exception) {
+            Timber.e(e, "Signal poll send failed")
+            SendResult.Failure(e.message ?: "Envoi sondage échoué")
+        }
+    }
+
+    private suspend fun sendContactCard(
+        conversationId: String,
+        content: OutgoingContent.ContactCard,
+        accountId: String?,
+    ): SendResult {
+        val accId = accountId ?: this.accountId ?: return SendResult.Failure("Compte non connecté")
+        val activeSession = session ?: return SendResult.Failure("Session Signal indisponible")
+        val remoteId = conversationId.removePrefix("${accId}_")
+        if (remoteId == conversationId) return SendResult.Failure("Conversation Signal invalide")
+        return try {
+            val name = SharedContact.Name.newBuilder()
+                .setGiven(content.firstName)
+                .setFamily(content.lastName)
+                .build()
+            val builder = SharedContact.newBuilder().setName(name)
+            content.phone?.takeIf { it.isNotBlank() }?.let { phone ->
+                builder.withPhone(
+                    SharedContact.Phone.newBuilder()
+                        .setValue(phone)
+                        .setType(SharedContact.Phone.Type.MOBILE)
+                        .build(),
+                )
+            }
+            val shared = builder.build()
+            val display = "${content.firstName} ${content.lastName}".trim()
+            val body = SanitizedText(display.ifBlank { content.phone ?: "Contact" })
+            val payload = JSONObject()
+                .put("firstName", content.firstName)
+                .put("lastName", content.lastName)
+                .put("phone", content.phone)
+                .toString()
+            val configure: (SignalServiceDataMessage.Builder) -> Unit = { it.withSharedContact(shared) }
+            val masterKey = SignalGroupHelper.parseMasterKey(remoteId)
+            if (masterKey != null) {
+                deliverGroupMessage(
+                    activeSession, conversationId, accId, masterKey, body,
+                    kind = MessageKind.CONTACT, payloadJson = payload, configure = configure,
+                )
+            } else {
+                deliverMessage(
+                    activeSession, conversationId, accId, resolveSignalAddress(remoteId), body,
+                    kind = MessageKind.CONTACT, payloadJson = payload, configure = configure,
+                )
+            }
+        } catch (e: Exception) {
+            Timber.e(e, "Signal contact card send failed")
+            SendResult.Failure(e.message ?: "Envoi contact échoué")
+        }
+    }
+
+    override fun observeContacts(accountId: String): Flow<List<Contact>> =
+        repository.observeContacts(accountId)
+
+    override suspend fun refreshContacts(accountId: String): Result<Int> = withContext(signalDispatcher) {
+        val activeSession = session
+            ?: return@withContext Result.failure(IllegalStateException("Session Signal indisponible"))
+        runCatching {
+            val stored = repository.observeContacts(accountId).first()
+            val conversationNumbers = repository.listConversationsForAccount(accountId)
+                .map { it.remoteId }
+                .filter { it.startsWith("+") }
+                .toSet()
+            val phoneCandidates = (
+                stored.mapNotNull { it.phone?.takeIf { p -> p.startsWith("+") } } +
+                    conversationNumbers
+                ).toSet()
+
+            if (phoneCandidates.isNotEmpty()) {
+                val results = SignalFeatureHelpers.lookupRegisteredUsers(
+                    activeSession,
+                    phoneCandidates,
+                    previousToken = null,
+                ) { token ->
+                    credentialStore.put(
+                        accountId,
+                        SignalCredentialKeys.CDSI_TOKEN,
+                        android.util.Base64.encodeToString(token, android.util.Base64.NO_WRAP),
+                    )
+                }
+                if (results.isNotEmpty()) {
+                    val contacts = results.map { (e164, item) ->
+                        val remoteId = item.aci.map { it.toString() }.orElse(e164)
+                        val existingName = stored.firstOrNull {
+                            it.phone == e164 || it.remoteId == remoteId
+                        }?.displayName
+                        Contact(
+                            id = "${accountId}_$remoteId",
+                            protocol = ProtocolId.SIGNAL,
+                            accountId = accountId,
+                            remoteId = remoteId,
+                            displayName = existingName ?: e164,
+                            handle = item.aci.map { it.toString() }.orElse(null),
+                            phone = e164,
+                        )
+                    }
+                    repository.replaceContacts(accountId, contacts)
+                    return@runCatching contacts.size
+                }
+            }
+            // Fallback: expose contacts already stored from SyncMessage.Contacts
+            stored.size
+        }
+    }
+
+    override suspend fun setTyping(conversationId: String, typing: Boolean) {
+        withContext(signalDispatcher) {
+            val accId = accountId ?: return@withContext
+            val activeSession = session ?: return@withContext
+            val remoteId = conversationId.removePrefix("${accId}_")
+            if (remoteId == conversationId) return@withContext
+            try {
+                val action = if (typing) {
+                    SignalServiceTypingMessage.Action.STARTED
+                } else {
+                    SignalServiceTypingMessage.Action.STOPPED
+                }
+                val masterKey = SignalGroupHelper.parseMasterKey(remoteId)
+                val groupId = masterKey?.let {
+                    // GroupId for typing is derived from master key via helper when available; optional empty for fan-out.
+                    Optional.empty<ByteArray>()
+                } ?: Optional.empty()
+                val typingMessage = SignalServiceTypingMessage(action, System.currentTimeMillis(), groupId)
+                if (masterKey != null) {
+                    val helper = groupHelper ?: return@withContext
+                    val plan = helper.resolveSendTargets(activeSession, masterKey) ?: return@withContext
+                    if (plan.canUseSenderKeys) {
+                        activeSession.messageSender.sendGroupTyping(
+                            plan.distributionId,
+                            plan.recipients,
+                            plan.unidentifiedAccess,
+                            plan.groupSendEndorsements!!,
+                            typingMessage,
+                        )
+                    } else {
+                        val sealed = List(plan.recipients.size) { SealedSenderAccess.NONE }
+                        activeSession.messageSender.sendTyping(plan.recipients, sealed, typingMessage, null)
+                    }
+                } else {
+                    val recipient = resolveSignalAddress(remoteId)
+                    activeSession.messageSender.sendTyping(
+                        listOf(recipient),
+                        listOf(SealedSenderAccess.NONE),
+                        typingMessage,
+                        null,
+                    )
+                }
+            } catch (e: Exception) {
+                Timber.d(e, "Signal typing send failed")
+            }
+        }
+    }
+
+    override suspend fun markRead(conversationId: String, messageId: String?) {
+        withContext(signalDispatcher) {
+            val accId = accountId ?: return@withContext
+            val activeSession = session ?: return@withContext
+            val remoteId = conversationId.removePrefix("${accId}_")
+            if (remoteId == conversationId) return@withContext
+            // Read receipts are 1:1 only.
+            if (SignalGroupHelper.parseMasterKey(remoteId) != null) {
+                clearUnread(conversationId, accId, remoteId)
+                return@withContext
+            }
+            try {
+                val messages = repository.observeMessages(conversationId).first()
+                val timestamps = when {
+                    messageId != null -> {
+                        val ts = messages.firstOrNull { it.id == messageId }?.timestamp
+                            ?: messageId.substringAfterLast('_').toLongOrNull()
+                        listOfNotNull(ts)
+                    }
+                    else -> messages
+                        .filter {
+                            it.direction == ltechnologies.onionphone.securemessenger.core.model.MessageDirection.INCOMING
+                        }
+                        .map { it.timestamp }
+                        .takeLast(20)
+                }
+                if (timestamps.isNotEmpty()) {
+                    val receipt = SignalServiceReceiptMessage(
+                        SignalServiceReceiptMessage.Type.READ,
+                        timestamps,
+                        System.currentTimeMillis(),
+                    )
+                    activeSession.messageSender.sendReceipt(
+                        resolveSignalAddress(remoteId),
+                        SealedSenderAccess.NONE,
+                        receipt,
+                        false,
+                    )
+                }
+                clearUnread(conversationId, accId, remoteId)
+            } catch (e: Exception) {
+                Timber.d(e, "Signal markRead failed")
+            }
+        }
+    }
+
+    private suspend fun clearUnread(conversationId: String, accId: String, remoteId: String) {
+        val existing = repository.listConversationsForAccount(accId)
+            .firstOrNull { it.id == conversationId }
+            ?: return
+        if (existing.unreadCount > 0) {
+            repository.upsertConversation(existing.copy(unreadCount = 0, remoteId = remoteId))
+        }
+    }
+
+    override suspend fun getAccountProfile(accountId: String): AccountProfile? = withContext(signalDispatcher) {
+        val activeSession = session
+        val storedName = credentialStore.get(accountId, SignalCredentialKeys.PROFILE_NAME)
+        val storedAbout = credentialStore.get(accountId, SignalCredentialKeys.PROFILE_ABOUT)
+        if (activeSession != null && activeSession.profileKey != null) {
+            runCatching {
+                val result = activeSession.profileApi.getVersionedProfile(
+                    activeSession.aci,
+                    activeSession.profileKey,
+                    null,
+                )
+                val profile = result.successOrThrow()
+                val (name, about) = SignalFeatureHelpers.decryptProfile(activeSession.profileKey, profile)
+                if (name != null) credentialStore.put(accountId, SignalCredentialKeys.PROFILE_NAME, name)
+                if (about != null) credentialStore.put(accountId, SignalCredentialKeys.PROFILE_ABOUT, about)
+                return@withContext AccountProfile(
+                    accountId = accountId,
+                    protocol = ProtocolId.SIGNAL,
+                    displayName = name ?: storedName ?: activeSession.e164,
+                    phone = activeSession.e164,
+                    bio = about ?: storedAbout,
+                )
+            }.onFailure { Timber.d(it, "Signal profile fetch failed") }
+        }
+        AccountProfile(
+            accountId = accountId,
+            protocol = ProtocolId.SIGNAL,
+            displayName = storedName ?: activeSession?.e164 ?: pendingE164 ?: accountId,
+            phone = activeSession?.e164 ?: pendingE164,
+            bio = storedAbout,
+        )
+    }
+
+    override suspend fun updateAccountProfile(
+        accountId: String,
+        displayName: String,
+        bio: String?,
+    ): Result<Unit> = withContext(signalDispatcher) {
+        val activeSession = session
+            ?: return@withContext Result.failure(IllegalStateException("Session Signal indisponible"))
+        runCatching {
+            var profileKey = activeSession.profileKey
+            if (profileKey == null) {
+                profileKey = SignalFeatureHelpers.generateProfileKey()
+                credentialStore.put(accountId, SignalCredentialKeys.PROFILE_KEY, SignalFeatureHelpers.encodeProfileKey(profileKey))
+                // Re-open session so profileKey is available next connect; use generated key for this call.
+            }
+            val result = activeSession.profileApi.setVersionedProfile(
+                activeSession.aci,
+                profileKey!!,
+                displayName,
+                bio,
+                null,
+                null,
+                AvatarUploadParams.unchanged(false),
+                emptyList(),
+                false,
+            )
+            result.successOrThrow()
+            credentialStore.put(accountId, SignalCredentialKeys.PROFILE_NAME, displayName)
+            if (bio != null) {
+                credentialStore.put(accountId, SignalCredentialKeys.PROFILE_ABOUT, bio)
+            }
+            Unit
+        }
+    }
+
+    override suspend fun exportBackup(accountId: String, destinationPath: String) =
+        withContext(signalDispatcher) {
+            runCatching {
+                val (convs, messages) = repository.exportSnapshot(accountId)
+                val root = org.json.JSONObject()
+                    .put("protocol", "SIGNAL")
+                    .put("accountId", accountId)
+                    .put("exportedAt", System.currentTimeMillis())
+                val convArr = org.json.JSONArray()
+                convs.forEach { c ->
+                    convArr.put(
+                        org.json.JSONObject()
+                            .put("id", c.id)
+                            .put("title", c.title)
+                            .put("remoteId", c.remoteId),
+                    )
+                }
+                val msgArr = org.json.JSONArray()
+                messages.forEach { m ->
+                    msgArr.put(
+                        org.json.JSONObject()
+                            .put("id", m.id)
+                            .put("conversationId", m.conversationId)
+                            .put("body", m.body)
+                            .put("timestamp", m.timestamp)
+                            .put("kind", m.kind.name),
+                    )
+                }
+                root.put("conversations", convArr)
+                root.put("messages", msgArr)
+                java.io.File(destinationPath).writeText(root.toString(2))
+                ltechnologies.onionphone.securemessenger.core.model.BackupExportResult.Success(
+                    destinationPath,
+                    messages.size,
+                    convs.size,
+                )
+            }.getOrElse {
+                ltechnologies.onionphone.securemessenger.core.model.BackupExportResult.Failure(
+                    it.message ?: "Export échoué",
+                )
+            }
+        }
 
     override suspend fun disconnect(accountId: String?) {
         withContext(signalDispatcher) {
