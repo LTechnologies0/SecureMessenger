@@ -2,20 +2,27 @@ package ltechnologies.onionphone.securemessenger.protocol.signal
 
 import android.content.Context
 import android.util.Base64
+import java.util.Optional
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.runBlocking
+import ltechnologies.onionphone.securemessenger.core.security.EncryptedCredentialStore
 import org.signal.core.models.ServiceId.ACI
 import org.signal.libsignal.metadata.certificate.SenderCertificate
 import org.signal.libsignal.zkgroup.groups.GroupMasterKey
 import org.signal.libsignal.zkgroup.groups.GroupSecretParams
+import org.signal.libsignal.zkgroup.profiles.ExpiringProfileKeyCredential
+import org.signal.network.NetworkResult
+import org.signal.storageservice.storage.protos.groups.Member
 import org.whispersystems.signalservice.api.crypto.UnidentifiedAccess
+import org.whispersystems.signalservice.api.groupsv2.GroupCandidate
 import org.whispersystems.signalservice.api.groupsv2.GroupSendEndorsements
+import org.whispersystems.signalservice.api.groupsv2.GroupsV2AuthorizationString
 import org.whispersystems.signalservice.api.groupsv2.toAciList
 import org.whispersystems.signalservice.api.messages.SignalServiceGroupV2
 import org.whispersystems.signalservice.api.push.DistributionId
 import org.whispersystems.signalservice.api.push.SignalServiceAddress
 import timber.log.Timber
-import ltechnologies.onionphone.securemessenger.core.security.EncryptedCredentialStore
 
 /**
  * GV2 helper: member cache, GroupsV2 refresh, DistributionId, and sender-key send plan.
@@ -47,6 +54,20 @@ internal class SignalGroupHelper(
         }
     }
 
+    fun rememberMembers(masterKeyBytes: ByteArray, memberAcis: Set<String>) {
+        if (memberAcis.isEmpty()) return
+        credentialStore.put(accountId, membersKey(masterKeyBytes), memberAcis.joinToString(","))
+        if (credentialStore.get(accountId, revKey(masterKeyBytes)) == null) {
+            credentialStore.put(accountId, revKey(masterKeyBytes), "0")
+        }
+    }
+
+    fun rememberTitle(masterKeyBytes: ByteArray, title: String) {
+        if (title.isNotBlank()) {
+            credentialStore.put(accountId, titleKey(masterKeyBytes), title)
+        }
+    }
+
     fun rememberRevision(masterKeyBytes: ByteArray, revision: Int) {
         credentialStore.put(accountId, revKey(masterKeyBytes), revision.coerceAtLeast(0).toString())
     }
@@ -64,6 +85,71 @@ internal class SignalGroupHelper(
         val masterKey = GroupMasterKey(masterKeyBytes)
         val secretParams = GroupSecretParams.deriveFromMasterKey(masterKey)
         fetchGroupState(session, masterKeyBytes, secretParams)
+    }
+
+    /**
+     * Creates a GV2 group. Returns master-key bytes on success, or null on failure
+     * (including missing self profile-key credential).
+     */
+    fun createGroup(
+        session: SignalSessionContext,
+        title: String,
+        memberAcis: Set<String>,
+    ): ByteArray? {
+        val profileKey = session.profileKey ?: run {
+            Timber.w("Signal group create: no local profile key")
+            return null
+        }
+        val credential: ExpiringProfileKeyCredential = runBlocking {
+            when (
+                val result = session.profileApi.getVersionedProfileAndCredential(
+                    session.aci,
+                    profileKey,
+                    null,
+                )
+            ) {
+                is NetworkResult.Success -> result.result.second
+                else -> {
+                    Timber.w("Signal group create: profile credential fetch failed: %s", result)
+                    null
+                }
+            }
+        } ?: run {
+            Timber.w("Signal group create: no ExpiringProfileKeyCredential for self")
+            return null
+        }
+
+        return try {
+            val masterKeyBytes = ByteArray(GroupMasterKey.SIZE).also {
+                java.security.SecureRandom().nextBytes(it)
+            }
+            val masterKey = GroupMasterKey(masterKeyBytes)
+            val secretParams = GroupSecretParams.deriveFromMasterKey(masterKey)
+            val self = GroupCandidate(session.aci, Optional.of(credential))
+            val invitees = memberAcis.mapNotNull { aciString ->
+                runCatching {
+                    GroupCandidate(ACI.parseOrThrow(aciString), Optional.empty())
+                }.getOrNull()
+            }.toSet()
+            val newGroup = session.groupsV2Operations.createNewGroup(
+                secretParams,
+                title,
+                Optional.empty(),
+                self,
+                invitees,
+                Member.Role.DEFAULT,
+                /* timerSeconds = */ 0,
+            )
+            val authString = groupsV2AuthString(session, secretParams) ?: return null
+            session.accountManager.groupsV2Api.putNewGroup(newGroup, authString)
+            rememberMembers(masterKeyBytes, memberAcis)
+            rememberTitle(masterKeyBytes, title)
+            rememberRevision(masterKeyBytes, 0)
+            masterKeyBytes
+        } catch (e: Exception) {
+            Timber.e(e, "Signal GV2 createGroup failed")
+            null
+        }
     }
 
     fun distributionId(masterKeyBytes: ByteArray): DistributionId {
@@ -134,11 +220,10 @@ internal class SignalGroupHelper(
         val unidentifiedAccess: List<UnidentifiedAccess>,
     )
 
-    private fun fetchGroupState(
+    private fun groupsV2AuthString(
         session: SignalSessionContext,
-        masterKeyBytes: ByteArray,
         secretParams: GroupSecretParams,
-    ): FetchedGroup? = try {
+    ): GroupsV2AuthorizationString? = try {
         val groupsApi = session.accountManager.groupsV2Api
         val todaySeconds = TimeUnit.DAYS.toSeconds(TimeUnit.MILLISECONDS.toDays(System.currentTimeMillis()))
         val credentialMaps = groupsApi.getCredentials(todaySeconds)
@@ -146,13 +231,25 @@ internal class SignalGroupHelper(
             .firstOrNull { it.key == todaySeconds }
             ?: credentialMaps.authCredentialWithPniResponseHashMap.entries.firstOrNull()
             ?: return null
-        val authString = groupsApi.getGroupsV2AuthorizationString(
+        groupsApi.getGroupsV2AuthorizationString(
             session.aci,
             session.pni,
             entry.key,
             secretParams,
             entry.value,
         )
+    } catch (e: Exception) {
+        Timber.w(e, "GV2 auth string failed")
+        null
+    }
+
+    private fun fetchGroupState(
+        session: SignalSessionContext,
+        masterKeyBytes: ByteArray,
+        secretParams: GroupSecretParams,
+    ): FetchedGroup? = try {
+        val groupsApi = session.accountManager.groupsV2Api
+        val authString = groupsV2AuthString(session, secretParams) ?: return null
         val response = groupsApi.getGroup(secretParams, authString)
         val members = response.group.members.toAciList()
             .map { it.toString() }

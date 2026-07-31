@@ -697,6 +697,36 @@ class TdLibFacade(private val client: TdLibClient) {
         }
     }
 
+    /**
+     * Creates a basic group chat. Returns the resulting [TdApi.Chat] after [TdApi.CreateNewBasicGroupChat].
+     */
+    suspend fun createNewBasicGroupChat(title: String, userIds: LongArray): TdApi.Chat? =
+        suspendCancellableCoroutine { cont ->
+            client.send(TdApi.CreateNewBasicGroupChat(userIds, title, 0)) { result ->
+                when (result) {
+                    is TdApi.CreatedBasicGroupChat -> {
+                        client.send(TdApi.GetChat(result.chatId)) { chatResult ->
+                            when (chatResult) {
+                                is TdApi.Chat -> if (cont.isActive) cont.resume(chatResult)
+                                is TdApi.Error -> {
+                                    Timber.w(
+                                        "GetChat after create group error ${chatResult.code}: ${chatResult.message}",
+                                    )
+                                    if (cont.isActive) cont.resume(null)
+                                }
+                                else -> if (cont.isActive) cont.resume(null)
+                            }
+                        }
+                    }
+                    is TdApi.Error -> {
+                        Timber.w("CreateNewBasicGroupChat error ${result.code}: ${result.message}")
+                        if (cont.isActive) cont.resume(null)
+                    }
+                    else -> if (cont.isActive) cont.resume(null)
+                }
+            }
+        }
+
     fun closeChat(chatId: Long) {
         client.send(TdApi.CloseChat(chatId))
     }

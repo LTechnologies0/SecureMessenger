@@ -86,12 +86,14 @@ class SignalProtocol @Inject constructor(
         contacts = true,
         profileEdit = true,
         voiceNotes = true,
-        stickers = false,
+        stickers = true,
         gifs = true,
         locationShare = true,
         polls = true,
         contactShare = true,
         ephemeralMessages = true,
+        // Linked devices have no server history API. A link-and-sync backup may be
+        // downloaded (LINK_SYNC_BACKUP_PATH) but is not message-imported yet, so keep false.
         messageHistory = false,
         backupExport = true,
     )
@@ -185,6 +187,7 @@ class SignalProtocol @Inject constructor(
             session = SignalRuntimeFactory.open(trustStore, credentialStore, account.accountId, secrets)
             startSync(account.accountId, proxy)
             scheduleInitialSyncBootstrap(account.accountId)
+            scheduleLinkAndSync(account.accountId)
             _pendingAuthStep.value = null
             _connectionState.value = ConnectionState.CONNECTED
             ConnectionResult.Success
@@ -192,6 +195,16 @@ class SignalProtocol @Inject constructor(
             Timber.e(e, "Signal session restore failed")
             _connectionState.value = ConnectionState.ERROR
             ConnectionResult.Failure(e.message ?: "Session restore failed")
+        }
+    }
+
+    /** Best-effort download of primary link-and-sync backup when EPHEMERAL_BACKUP_KEY is present. */
+    private fun scheduleLinkAndSync(accId: String) {
+        ioScope.launch(signalDispatcher) {
+            delay(1_500)
+            val active = session ?: return@launch
+            if (accountId != accId) return@launch
+            SignalLinkAndSync.maybeFetchBackup(context, accId, active, credentialStore)
         }
     }
 
@@ -637,15 +650,81 @@ class SignalProtocol @Inject constructor(
         accountId: String?,
         asGroup: Boolean,
     ): SendResult = withContext(signalDispatcher) {
-        if (asGroup) {
-            return@withContext SendResult.Failure(
-                "Création de groupe Signal non supportée — rejoignez via un message entrant",
-            )
-        }
         val accId = accountId ?: this@SignalProtocol.accountId ?: return@withContext SendResult.Failure("Compte non connecté")
         val activeSession = session ?: return@withContext SendResult.Failure("Session Signal indisponible")
+        val trimmed = remoteId.trim()
+
+        if (asGroup) {
+            val existingKey = SignalGroupHelper.parseMasterKey(trimmed)
+            if (existingKey != null) {
+                return@withContext try {
+                    val helper = groupHelper ?: SignalGroupHelper(context, accId, credentialStore).also { groupHelper = it }
+                    helper.refreshFromNetwork(activeSession, existingKey)
+                    val gv2Id = "gv2:" + android.util.Base64.encodeToString(existingKey, android.util.Base64.NO_WRAP)
+                    val convId = signalConversationId(accId, gv2Id)
+                    repository.upsertConversation(
+                        Conversation(
+                            id = convId,
+                            protocol = ProtocolId.SIGNAL,
+                            accountId = accId,
+                            remoteId = gv2Id,
+                            title = helper.cachedTitle(existingKey) ?: "Groupe Signal",
+                        ),
+                    )
+                    if (initialMessage != null) {
+                        when (
+                            val send = deliverGroupMessage(
+                                activeSession, convId, accId, existingKey, initialMessage,
+                            )
+                        ) {
+                            is SendResult.Failure -> send
+                            else -> SendResult.Success(convId)
+                        }
+                    } else {
+                        SendResult.Success(convId)
+                    }
+                } catch (e: Exception) {
+                    SendResult.Failure(e.message ?: "Impossible d'ouvrir le groupe Signal")
+                }
+            }
+
+            val createParts = parseSignalGroupCreate(trimmed)
+                ?: return@withContext SendResult.Failure(
+                    "Groupe Signal : gv2:… pour ouvrir, ou Titre|+e164 / ACI pour créer",
+                )
+            val (title, memberTokens) = createParts
+            val memberAcis = resolveGroupMemberAcis(activeSession, accId, memberTokens)
+            if (memberAcis.isEmpty()) {
+                return@withContext SendResult.Failure("Aucun membre Signal valide pour créer le groupe")
+            }
+            val helper = groupHelper ?: SignalGroupHelper(context, accId, credentialStore).also { groupHelper = it }
+            val masterKey = helper.createGroup(activeSession, title, memberAcis)
+                ?: return@withContext SendResult.Failure(
+                    "Création de groupe Signal échouée — profil / credential manquant",
+                )
+            val gv2Id = "gv2:" + android.util.Base64.encodeToString(masterKey, android.util.Base64.NO_WRAP)
+            val convId = signalConversationId(accId, gv2Id)
+            repository.upsertConversation(
+                Conversation(
+                    id = convId,
+                    protocol = ProtocolId.SIGNAL,
+                    accountId = accId,
+                    remoteId = gv2Id,
+                    title = title,
+                ),
+            )
+            return@withContext if (initialMessage != null) {
+                when (val send = deliverGroupMessage(activeSession, convId, accId, masterKey, initialMessage)) {
+                    is SendResult.Failure -> send
+                    else -> SendResult.Success(convId)
+                }
+            } else {
+                SendResult.Success(convId)
+            }
+        }
+
         return@withContext try {
-            val recipient = resolveSignalAddress(remoteId)
+            val recipient = resolveSignalAddress(trimmed)
             val convId = signalConversationId(accId, recipient.identifier)
             repository.upsertConversation(
                 Conversation(
@@ -667,6 +746,68 @@ class SignalProtocol @Inject constructor(
         } catch (e: Exception) {
             SendResult.Failure(e.message ?: "Impossible de démarrer la conversation")
         }
+    }
+
+    /** Parses `Title|+33...,+44...` or `Title|aci,aci`. */
+    private fun parseSignalGroupCreate(remoteId: String): Pair<String, List<String>>? {
+        val sep = remoteId.indexOf('|')
+        if (sep <= 0) return null
+        val title = remoteId.substring(0, sep).trim()
+        if (title.isEmpty()) return null
+        val members = remoteId.substring(sep + 1)
+            .split(',')
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+        if (members.isEmpty()) return null
+        return title to members
+    }
+
+    private fun resolveGroupMemberAcis(
+        session: SignalSessionContext,
+        accId: String,
+        tokens: List<String>,
+    ): Set<String> {
+        val acis = linkedSetOf<String>()
+        val phones = mutableSetOf<String>()
+        for (token in tokens) {
+            when {
+                token.startsWith("+") || token.all { it.isDigit() } -> {
+                    val e164 = if (token.startsWith("+")) token else "+$token"
+                    phones.add(e164)
+                }
+                else -> runCatching {
+                    acis.add(org.signal.core.models.ServiceId.ACI.parseOrThrow(token).toString())
+                }.onFailure { Timber.w(it, "Invalid group member token %s", token) }
+            }
+        }
+        if (phones.isNotEmpty()) {
+            val results = SignalFeatureHelpers.lookupRegisteredUsers(
+                session,
+                phones,
+                previousToken = null,
+            ) { token ->
+                credentialStore.put(
+                    accId,
+                    SignalCredentialKeys.CDSI_TOKEN,
+                    android.util.Base64.encodeToString(token, android.util.Base64.NO_WRAP),
+                )
+            }
+            for ((_, item) in results) {
+                item.aci.ifPresent { acis.add(it.toString()) }
+            }
+            // Fallback: resolveSignalAddress when CDSI misses (unlikely for e164-only).
+            for (phone in phones) {
+                if (results[phone]?.hasAci() != true) {
+                    runCatching {
+                        val addr = resolveSignalAddress(phone)
+                        if (addr.hasValidServiceId()) {
+                            acis.add(addr.serviceId.toString())
+                        }
+                    }
+                }
+            }
+        }
+        return acis.filter { it != session.aci.toString() }.toSet()
     }
 
     override suspend fun sendMessage(
@@ -1048,12 +1189,105 @@ class SignalProtocol @Inject constructor(
         conversationId: String,
         content: OutgoingContent.Sticker,
         accountId: String?,
-    ): SendResult {
-        // Signal stickers require a real packId/packKey from an installed sticker pack.
-        // Random bytes are not interoperable with Signal clients — refuse rather than fake.
-        return SendResult.Failure(
-            "Stickers Signal nécessitent un pack installé (packId/packKey) — non supporté pour l'instant",
-        )
+    ): SendResult = withContext(signalDispatcher) {
+        val accId = accountId ?: this@SignalProtocol.accountId
+            ?: return@withContext SendResult.Failure("Compte non connecté")
+        val activeSession = session ?: return@withContext SendResult.Failure("Session Signal indisponible")
+        val remoteId = conversationId.removePrefix("${accId}_")
+        if (remoteId == conversationId) {
+            return@withContext SendResult.Failure("Conversation Signal invalide")
+        }
+        val file = java.io.File(content.localPath)
+        if (!file.exists() || file.length() <= 0L) {
+            return@withContext SendResult.Failure("Fichier sticker introuvable")
+        }
+        val packId = content.packId
+        val packKey = content.packKey
+        val stickerId = content.stickerId
+        return@withContext try {
+            val form = activeSession.pushServiceSocket.attachmentV4UploadForm
+            val uploadSpec = activeSession.pushServiceSocket.getResumableUploadSpec(form)
+            java.io.FileInputStream(file).use { input ->
+                val mime = when {
+                    file.name.endsWith(".webp", ignoreCase = true) -> "image/webp"
+                    file.name.endsWith(".png", ignoreCase = true) -> "image/png"
+                    else -> "image/webp"
+                }
+                val stream = org.whispersystems.signalservice.api.messages.SignalServiceAttachment
+                    .newStreamBuilder()
+                    .withStream(input)
+                    .withContentType(mime)
+                    .withFileName(file.name)
+                    .withLength(file.length())
+                    .withResumableUploadSpec(uploadSpec)
+                    .build()
+                val pointer = activeSession.messageSender.uploadAttachment(stream)
+                val localAtt = Attachment(
+                    id = java.util.UUID.randomUUID().toString(),
+                    mimeType = mime,
+                    fileName = file.name,
+                    localPath = content.localPath,
+                    remoteRef = pointer.remoteId.toString(),
+                    sizeBytes = file.length(),
+                    state = AttachmentState.READY,
+                )
+                val body = SanitizedText(content.emoji)
+                val payload = org.json.JSONObject()
+                    .put("emoji", content.emoji)
+                    .put("packId", packId)
+                    .put("packKey", packKey)
+                    .put("stickerId", stickerId)
+                    .toString()
+                val configure: (org.whispersystems.signalservice.api.messages.SignalServiceDataMessage.Builder) -> Unit =
+                    if (packId != null && packKey != null && stickerId != null) {
+                        val packIdBytes = decodePackBytes(packId)
+                        val packKeyBytes = decodePackBytes(packKey)
+                        val sticker = org.whispersystems.signalservice.api.messages.SignalServiceDataMessage.Sticker(
+                            packIdBytes,
+                            packKeyBytes,
+                            stickerId,
+                            content.emoji,
+                            pointer,
+                        )
+                        val stickerConfigure: (org.whispersystems.signalservice.api.messages.SignalServiceDataMessage.Builder) -> Unit =
+                            { builder -> builder.withSticker(sticker) }
+                        stickerConfigure
+                    } else {
+                        // No pack metadata: still deliver as image attachment (STICKER in local store).
+                        { _ -> }
+                    }
+                val attachments = if (packId != null && packKey != null && stickerId != null) {
+                    emptyList()
+                } else {
+                    listOf(pointer)
+                }
+                val masterKey = SignalGroupHelper.parseMasterKey(remoteId)
+                if (masterKey != null) {
+                    deliverGroupMessage(
+                        activeSession, conversationId, accId, masterKey, body,
+                        attachments = attachments, localAttachment = localAtt,
+                        kind = MessageKind.STICKER, payloadJson = payload, configure = configure,
+                    )
+                } else {
+                    deliverMessage(
+                        activeSession, conversationId, accId, resolveSignalAddress(remoteId), body,
+                        attachments = attachments, localAttachment = localAtt,
+                        kind = MessageKind.STICKER, payloadJson = payload, configure = configure,
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            Timber.e(e, "Signal sticker send failed")
+            SendResult.Failure(e.message ?: "Envoi sticker échoué")
+        }
+    }
+
+    private fun decodePackBytes(encoded: String): ByteArray {
+        return runCatching { org.signal.core.util.Hex.fromStringOrThrow(encoded) }
+            .getOrElse {
+                runCatching { android.util.Base64.decode(encoded, android.util.Base64.NO_WRAP) }
+                    .getOrElse { java.util.Base64.getDecoder().decode(encoded) }
+            }
     }
 
     private suspend fun sendPoll(
@@ -1394,14 +1628,18 @@ class SignalProtocol @Inject constructor(
                 )
             val before = repository.countMessages(conversationId)
             val maxBefore = repository.maxMessageTimestamp(conversationId) ?: 0L
-            // Linked devices do not have a server-side history API; re-request sync snapshots
-            // and Storage Service so any pending transcripts / catalog land via the websocket.
+            // Linked devices do not have a server-side history API. When a link-and-sync backup
+            // was downloaded (LINK_SYNC_BACKUP_PATH), we only validate/store the file — full
+            // message import is not implemented. Re-request sync snapshots / Storage Service so
+            // any pending transcripts land via the websocket.
+            val backupPath = credentialStore.get(accId, SignalCredentialKeys.LINK_SYNC_BACKUP_PATH)
+            val backupExists = backupPath?.let { java.io.File(it).exists() } == true
             runCatching { requestInitialSyncLocked() }
             runCatching { runStorageSyncLocked(accId) }
             delay(1_500)
             val after = repository.countMessages(conversationId)
             val maxAfter = repository.maxMessageTimestamp(conversationId) ?: 0L
-            val synced = after > before || maxAfter > maxBefore
+            val synced = after > before || maxAfter > maxBefore || backupExists
             ltechnologies.onionphone.securemessenger.core.model.HistoryLoadResult.Success(
                 messageCount = after,
                 loadedFromCache = before > 0,

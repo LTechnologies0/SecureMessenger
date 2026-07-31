@@ -735,23 +735,63 @@ class TelegramProtocol @Inject constructor(
         accountId: String?,
         asGroup: Boolean,
     ): SendResult {
-        if (asGroup) {
-            return SendResult.Failure(
-                "Création de groupe Telegram non supportée — ouvrez un chat/groupe existant",
-            )
-        }
         val accId = accountId ?: sessions.keys.singleOrNull()
             ?: return SendResult.Failure("Not connected")
         val session = sessions[accId] ?: return SendResult.Failure("Not connected")
+        val trimmed = remoteId.trim()
+
+        if (asGroup) {
+            val createParts = parseTelegramGroupCreate(trimmed)
+            if (createParts != null) {
+                val (title, userIds) = createParts
+                val created = withContext(session.dispatcher) {
+                    session.facade.createNewBasicGroupChat(title, userIds)
+                } ?: return SendResult.Failure(
+                    "Impossible de créer le groupe Telegram « $title »",
+                )
+                val convId = TdLibMapper.conversationId(accId, created.id)
+                repository.upsertConversation(TdLibMapper.toConversation(accId, created))
+                return if (initialMessage != null) {
+                    when (val send = sendMessage(convId, initialMessage, accId)) {
+                        is SendResult.Failure -> send
+                        else -> SendResult.Success(convId)
+                    }
+                } else {
+                    SendResult.Success(convId)
+                }
+            }
+            // Open existing group/channel — do not fail immediately.
+            val chat = withContext(session.dispatcher) {
+                val asChatId = trimmed.toLongOrNull()
+                if (asChatId != null) {
+                    session.facade.getChat(asChatId)
+                } else {
+                    session.facade.searchPublicChat(trimmed)
+                }
+            } ?: return SendResult.Failure(
+                "Groupe Telegram introuvable : $trimmed " +
+                    "(chat ID / @canal, ou Titre|userId1,userId2 pour créer)",
+            )
+            val convId = TdLibMapper.conversationId(accId, chat.id)
+            repository.upsertConversation(TdLibMapper.toConversation(accId, chat))
+            return if (initialMessage != null) {
+                when (val send = sendMessage(convId, initialMessage, accId)) {
+                    is SendResult.Failure -> send
+                    else -> SendResult.Success(convId)
+                }
+            } else {
+                SendResult.Success(convId)
+            }
+        }
 
         val chat = withContext(session.dispatcher) {
-            val asChatId = remoteId.toLongOrNull()
+            val asChatId = trimmed.toLongOrNull()
             if (asChatId != null) {
                 session.facade.getChat(asChatId)
             } else {
-                session.facade.searchPublicChat(remoteId)
+                session.facade.searchPublicChat(trimmed)
             }
-        } ?: return SendResult.Failure("Utilisateur ou chat introuvable : $remoteId")
+        } ?: return SendResult.Failure("Utilisateur ou chat introuvable : $trimmed")
 
         val convId = TdLibMapper.conversationId(accId, chat.id)
         repository.upsertConversation(TdLibMapper.toConversation(accId, chat))
@@ -763,6 +803,21 @@ class TelegramProtocol @Inject constructor(
         } else {
             SendResult.Success(convId)
         }
+    }
+
+    /** Parses `Title|+userId1,+userId2` / `Title|123,456` (positive Telegram user ids). */
+    private fun parseTelegramGroupCreate(remoteId: String): Pair<String, LongArray>? {
+        val sep = remoteId.indexOf('|')
+        if (sep <= 0) return null
+        val title = remoteId.substring(0, sep).trim()
+        if (title.isEmpty()) return null
+        val ids = remoteId.substring(sep + 1)
+            .split(',')
+            .map { it.trim().removePrefix("+") }
+            .filter { it.isNotEmpty() }
+            .mapNotNull { it.toLongOrNull()?.takeIf { id -> id > 0L } }
+        if (ids.isEmpty()) return null
+        return title to ids.toLongArray()
     }
 
     override suspend fun sendMessage(conversationId: String, body: SanitizedText, accountId: String?): SendResult {

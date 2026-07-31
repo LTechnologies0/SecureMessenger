@@ -109,13 +109,68 @@ internal class SignalMessageHandler(
             content.nullMessage != null ->
                 Timber.d("Signal nullMessage (keepalive) for $accountId")
             content.callMessage != null ->
-                Timber.d("Ignoring Signal callMessage")
+                persistIgnoredSystemNotice(
+                    result.metadata,
+                    kindSuffix = "call",
+                    body = "Appel Signal (non supporté)",
+                )
             content.storyMessage != null ->
-                Timber.d("Ignoring Signal storyMessage")
+                persistIgnoredSystemNotice(
+                    result.metadata,
+                    kindSuffix = "story",
+                    body = "Story Signal (ignorée)",
+                )
             content.senderKeyDistributionMessage != null ->
                 Unit // already handled
             else -> Timber.d("Ignoring unsupported Signal content type")
         }
+    }
+
+    /**
+     * Surfaces ignored call/story envelopes as a single SYSTEM stub per (conversation, kind, day)
+     * so the UI is honest without spam.
+     */
+    private suspend fun persistIgnoredSystemNotice(
+        metadata: EnvelopeMetadata,
+        kindSuffix: String,
+        body: String,
+    ) {
+        val remoteId = metadata.sourceE164?.takeIf { it.isNotBlank() }
+            ?: metadata.sourceServiceId.toString()
+        val conversationId = signalConversationId(accountId, remoteId)
+        val day = java.util.concurrent.TimeUnit.MILLISECONDS.toDays(System.currentTimeMillis())
+        val messageId = "${conversationId}_${kindSuffix}_$day"
+        if (repository.getMessage(messageId) != null) {
+            Timber.d("Skipping duplicate Signal %s notice for %s", kindSuffix, remoteId)
+            return
+        }
+        val now = System.currentTimeMillis()
+        repository.upsertConversation(
+            Conversation(
+                id = conversationId,
+                protocol = ProtocolId.SIGNAL,
+                accountId = accountId,
+                remoteId = remoteId,
+                title = metadata.sourceE164 ?: remoteId,
+                lastMessagePreview = body,
+                lastMessageAt = now,
+                unreadCount = 1,
+            ),
+        )
+        repository.upsertMessage(
+            Message(
+                id = messageId,
+                conversationId = conversationId,
+                protocol = ProtocolId.SIGNAL,
+                body = body,
+                timestamp = now,
+                direction = MessageDirection.INCOMING,
+                deliveryState = DeliveryState.DELIVERED,
+                senderDisplayName = metadata.sourceE164 ?: metadata.sourceServiceId.toString(),
+                kind = MessageKind.SYSTEM,
+            ),
+        )
+        Timber.d("Persisted Signal %s system notice in %s", kindSuffix, conversationId)
     }
 
     private suspend fun handleSyncMessage(sync: SyncMessage) {

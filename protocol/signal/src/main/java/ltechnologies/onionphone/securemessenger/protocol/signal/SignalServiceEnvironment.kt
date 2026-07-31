@@ -86,6 +86,8 @@ internal object SignalCredentialKeys {
     const val ACCOUNT_ENTROPY_POOL = "accountEntropyPool"
     const val MEDIA_ROOT_BACKUP_KEY = "mediaRootBackupKey"
     const val EPHEMERAL_BACKUP_KEY = "ephemeralBackupKey"
+    /** Absolute path of a downloaded link-and-sync backup (not fully imported). */
+    const val LINK_SYNC_BACKUP_PATH = "linkSyncBackupPath"
     const val STORAGE_MANIFEST_VERSION = "storageManifestVersion"
     const val LAST_DEVICE_NAME_CHANGE = "lastDeviceNameChange"
     const val INITIAL_SYNC_DONE = "initialSyncDone"

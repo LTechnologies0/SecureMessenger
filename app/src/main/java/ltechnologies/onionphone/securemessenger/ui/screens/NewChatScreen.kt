@@ -83,11 +83,11 @@ fun NewChatScreen(
             "Room ID (!abc:server)"
         protocol == ProtocolId.MATRIX -> "Room ID ou @user:server"
         protocol == ProtocolId.TELEGRAM && asGroup ->
-            "Chat ID groupe / @channel"
+            "Chat ID / @canal — ou Titre|userId1,userId2 pour créer"
         protocol == ProtocolId.TELEGRAM ->
             "Chat ID, @username ou téléphone (+33…)"
         protocol == ProtocolId.SIGNAL && asGroup ->
-            "Identifiant gv2:… (groupe existant)"
+            "gv2:… ou Titre|+33…,+44… / Titre|aci,aci"
         protocol == ProtocolId.SIGNAL -> "Numéro E.164 (+33…) ou ACI"
         protocol == ProtocolId.EMAIL -> "Adresse email (user@domain)"
         else -> "Identifiant distant"
@@ -105,12 +105,12 @@ fun NewChatScreen(
             "Exemple : @ami:matrix.org"
         }
         ProtocolId.TELEGRAM -> if (asGroup) {
-            "ID numérique négatif ou @canal"
+            "Ouvrir un groupe existant, ou créer via Titre|userId1,userId2"
         } else {
             "Recherche téléphone disponible ci-dessous"
         }
         ProtocolId.SIGNAL -> if (asGroup) {
-            "Collez l'identifiant de groupe Signal"
+            "gv2:masterKey pour ouvrir, ou Titre|+e164 / ACI pour créer"
         } else {
             "Format international obligatoire (+…)"
         }

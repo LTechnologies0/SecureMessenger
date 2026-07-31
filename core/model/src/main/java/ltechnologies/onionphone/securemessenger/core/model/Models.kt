@@ -224,6 +224,11 @@ sealed class OutgoingContent {
     data class Sticker(
         val localPath: String,
         val emoji: String = "⭐",
+        /** Signal pack id (hex) when sending a real Signal sticker. */
+        val packId: String? = null,
+        /** Signal pack key (hex) when sending a real Signal sticker. */
+        val packKey: String? = null,
+        val stickerId: Int? = null,
     ) : OutgoingContent()
 
     data class Ephemeral(
