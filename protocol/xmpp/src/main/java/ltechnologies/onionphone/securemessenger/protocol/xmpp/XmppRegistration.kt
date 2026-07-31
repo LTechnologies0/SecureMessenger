@@ -32,7 +32,7 @@ internal class XmppRegistration(private val context: Context) {
     private data class PendingRegistration(val server: String, val username: String, val password: String)
 
     /** Keyed by our own sessionId, since the UI only knows about that id. */
-    private val pending = mutableMapOf<String, PendingRegistration>()
+    private val pending = java.util.concurrent.ConcurrentHashMap<String, PendingRegistration>()
 
     fun rememberPending(sessionId: String, server: String, username: String, password: String) {
         pending[sessionId] = PendingRegistration(server, username, password)

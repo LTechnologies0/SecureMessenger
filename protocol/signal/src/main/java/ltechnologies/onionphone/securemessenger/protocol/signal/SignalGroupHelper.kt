@@ -59,6 +59,13 @@ internal class SignalGroupHelper(
     fun cachedTitle(masterKeyBytes: ByteArray): String? =
         credentialStore.get(accountId, titleKey(masterKeyBytes))
 
+    /** Best-effort GroupsV2 refresh used by Storage Service catalog seeding. */
+    fun refreshFromNetwork(session: SignalSessionContext, masterKeyBytes: ByteArray) {
+        val masterKey = GroupMasterKey(masterKeyBytes)
+        val secretParams = GroupSecretParams.deriveFromMasterKey(masterKey)
+        fetchGroupState(session, masterKeyBytes, secretParams)
+    }
+
     fun distributionId(masterKeyBytes: ByteArray): DistributionId {
         val key = distKey(masterKeyBytes)
         val existing = credentialStore.get(accountId, key)

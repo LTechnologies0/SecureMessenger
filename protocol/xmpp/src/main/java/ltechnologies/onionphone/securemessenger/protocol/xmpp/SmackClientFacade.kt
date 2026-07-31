@@ -65,6 +65,7 @@ class SmackClientFacade(
         private set
 
     private val joinedMucs = ConcurrentHashMap<String, MultiUserChat>()
+    private val mucMessageListeners = ConcurrentHashMap<String, MessageListener>()
 
     val chatManager: ChatManager?
         get() = connection?.let { ChatManager.getInstanceFor(it) }
@@ -361,8 +362,12 @@ class SmackClientFacade(
             muc.join(Resourcepart.from(nickname))
         }
         onMessage?.let { handler ->
+            mucMessageListeners.remove(roomJid)?.let { old ->
+                runCatching { muc.removeMessageListener(old) }
+            }
             val listener = MessageListener { message -> handler(message) }
             muc.addMessageListener(listener)
+            mucMessageListeners[roomJid] = listener
         }
         joinedMucs[roomJid] = muc
     }
@@ -430,6 +435,7 @@ class SmackClientFacade(
     }
 
     fun disconnect() {
+        mucMessageListeners.clear()
         joinedMucs.clear()
         try {
             connection?.disconnect()

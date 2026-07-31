@@ -8,6 +8,7 @@ import javax.inject.Singleton
 import ltechnologies.onionphone.securemessenger.core.model.ProtocolId
 import ltechnologies.onionphone.securemessenger.protocol.api.MessengerProtocol
 import ltechnologies.onionphone.securemessenger.protocol.api.ProtocolRegistry
+import ltechnologies.onionphone.securemessenger.protocol.email.EmailProtocol
 import ltechnologies.onionphone.securemessenger.protocol.matrix.MatrixProtocol
 import ltechnologies.onionphone.securemessenger.protocol.signal.SignalProtocol
 import ltechnologies.onionphone.securemessenger.protocol.telegram.TelegramProtocol
@@ -27,12 +28,14 @@ object ProtocolModule {
         matrix: dagger.Lazy<MatrixProtocol>,
         telegram: dagger.Lazy<TelegramProtocol>,
         signal: dagger.Lazy<SignalProtocol>,
+        email: dagger.Lazy<EmailProtocol>,
     ): ProtocolRegistry = object : ProtocolRegistry {
         override fun get(id: ProtocolId): MessengerProtocol? = when (id) {
             ProtocolId.XMPP -> xmpp.get()
             ProtocolId.MATRIX -> matrix.get()
             ProtocolId.TELEGRAM -> telegram.get()
             ProtocolId.SIGNAL -> signal.get()
+            ProtocolId.EMAIL -> email.get()
         }
 
         override fun all(): List<MessengerProtocol> = listOf(
@@ -40,6 +43,7 @@ object ProtocolModule {
             matrix.get(),
             telegram.get(),
             signal.get(),
+            email.get(),
         )
     }
 }

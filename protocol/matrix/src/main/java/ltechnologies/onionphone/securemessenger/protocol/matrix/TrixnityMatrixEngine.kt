@@ -8,16 +8,17 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.firstOrNull
-import kotlinx.coroutines.flow.flowOf
-import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.BufferedOutputStream
 import ltechnologies.onionphone.securemessenger.core.model.Attachment
 import ltechnologies.onionphone.securemessenger.core.model.AttachmentState
 import ltechnologies.onionphone.securemessenger.core.model.Contact
@@ -686,15 +687,18 @@ class TrixnityMatrixEngine(
                 } else {
                     mediaService.getMedia(mxc, progress, false).getOrThrow()
                 }
-                val chunks = platformMedia.toList()
-                val bytes = if (chunks.isEmpty()) {
-                    ByteArray(0)
-                } else {
-                    chunks.reduce { acc, chunk -> acc + chunk }
-                }
                 val safeName = (base.fileName ?: "media").replace(Regex("[^A-Za-z0-9._-]"), "_")
                 val out = File(destDir, "${base.id}_$safeName")
-                out.writeBytes(bytes)
+                var total = 0L
+                BufferedOutputStream(out.outputStream()).use { fos ->
+                    platformMedia.collect { chunk ->
+                        total += chunk.size
+                        if (total > MAX_MEDIA_BYTES) {
+                            error("Media exceeds $MAX_MEDIA_BYTES bytes")
+                        }
+                        fos.write(chunk)
+                    }
+                }
                 base.copy(
                     localPath = out.absolutePath,
                     sizeBytes = out.length(),
@@ -736,8 +740,10 @@ class TrixnityMatrixEngine(
         if (!file.exists()) {
             return@withContext Result.failure(IllegalStateException("File not found"))
         }
+        if (file.length() > MAX_MEDIA_BYTES) {
+            return@withContext Result.failure(IllegalStateException("File too large"))
+        }
         val roomService = matrixClient.di.get<RoomService>()
-        val bytes = file.readBytes()
         val displayName = fileName ?: file.name
         val body = caption?.takeIf { it.isNotBlank() } ?: displayName
         val normalizedMime = when {
@@ -748,13 +754,14 @@ class TrixnityMatrixEngine(
         }
         val contentType = runCatching { ContentType.parse(normalizedMime) }
             .getOrDefault(ContentType.Application.OctetStream)
+        val mediaFlow = fileChunkFlow(file)
         return@withContext runCatching {
             roomService.sendMessage(RoomId(roomId)) {
                 when {
                     kind == MessageKind.VIDEO || normalizedMime.startsWith("video/") -> {
                         video(
                             body = body,
-                            video = flowOf(bytes),
+                            video = mediaFlow,
                             fileName = displayName,
                             type = contentType,
                             size = file.length(),
@@ -763,7 +770,7 @@ class TrixnityMatrixEngine(
                     kind == MessageKind.VOICE || normalizedMime.startsWith("audio/") -> {
                         audio(
                             body = body,
-                            audio = flowOf(bytes),
+                            audio = mediaFlow,
                             fileName = displayName,
                             type = contentType,
                             size = file.length(),
@@ -774,7 +781,7 @@ class TrixnityMatrixEngine(
                         normalizedMime.startsWith("image/") -> {
                         image(
                             body = body,
-                            image = flowOf(bytes),
+                            image = mediaFlow,
                             fileName = displayName,
                             type = contentType,
                             size = file.length(),
@@ -783,7 +790,7 @@ class TrixnityMatrixEngine(
                     else -> {
                         file(
                             body = body,
-                            file = flowOf(bytes),
+                            file = mediaFlow,
                             fileName = displayName,
                             type = contentType,
                             size = file.length(),
@@ -807,8 +814,10 @@ class TrixnityMatrixEngine(
         if (!file.exists()) {
             return@withContext Result.failure(IllegalStateException("File not found"))
         }
+        if (file.length() > MAX_MEDIA_BYTES) {
+            return@withContext Result.failure(IllegalStateException("File too large"))
+        }
         val roomService = matrixClient.di.get<RoomService>()
-        val bytes = file.readBytes()
         val displayName = fileName ?: file.name
         val audioMime = mimeType.ifBlank { "audio/ogg" }
         val contentType = runCatching { ContentType.parse(audioMime) }
@@ -817,7 +826,7 @@ class TrixnityMatrixEngine(
             roomService.sendMessage(RoomId(roomId)) {
                 audio(
                     body = displayName,
-                    audio = flowOf(bytes),
+                    audio = fileChunkFlow(file),
                     fileName = displayName,
                     type = contentType,
                     size = file.length(),
@@ -825,6 +834,17 @@ class TrixnityMatrixEngine(
                 )
             }
             Unit
+        }
+    }
+
+    private fun fileChunkFlow(file: File, chunkSize: Int = MEDIA_CHUNK_BYTES) = flow {
+        file.inputStream().buffered().use { input ->
+            val buf = ByteArray(chunkSize)
+            while (true) {
+                val n = input.read(buf)
+                if (n < 0) break
+                emit(if (n == buf.size) buf.copyOf() else buf.copyOf(n))
+            }
         }
     }
 
@@ -869,12 +889,16 @@ class TrixnityMatrixEngine(
         } catch (_: Exception) {
         }
         client = null
+        scope.cancel()
     }
 
     private fun proxiedOkHttp(proxy: ProxyConfig): OkHttpClient =
         MatrixHttpClientFactory.buildOkHttp(proxy)
 
     companion object {
+        private const val MAX_MEDIA_BYTES = 100L * 1024L * 1024L
+        private const val MEDIA_CHUNK_BYTES = 64 * 1024
+
         fun wipeAccountStore(filesDir: File, accountId: String) {
             runCatching {
                 filesDir.resolve("matrix_crypto_$accountId").deleteRecursively()

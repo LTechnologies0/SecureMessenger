@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.os.Build
 import dagger.hilt.android.HiltAndroidApp
 import ltechnologies.onionphone.securemessenger.core.security.LogRedactor
+import ltechnologies.onionphone.securemessenger.protocol.signal.SignalLogging
 import ltechnologies.onionphone.securemessenger.service.MessengerForegroundService
 import timber.log.Timber
 
@@ -15,6 +16,7 @@ class SecureMessengerApplication : Application() {
         super.onCreate()
         System.loadLibrary("sqlcipher")
         createNotificationChannel()
+        SignalLogging.install()
         if (BuildConfig.DEBUG) {
             Timber.plant(
                 object : Timber.DebugTree() {

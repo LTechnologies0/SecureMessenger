@@ -163,6 +163,20 @@ internal object SignalFeatureHelpers {
         if (hasVoiceAttachment && kind == MessageKind.TEXT) {
             kind = MessageKind.VOICE
         }
+        val bodyHint = dataMessage.body?.trim().orEmpty()
+        if (kind == MessageKind.TEXT && bodyHint.startsWith("geo:", ignoreCase = true)) {
+            kind = MessageKind.LOCATION
+            val coords = bodyHint.removePrefix("geo:").removePrefix("GEO:").substringBefore(';')
+            val parts = coords.split(',')
+            if (parts.size >= 2) {
+                payload.put(
+                    "location",
+                    JSONObject()
+                        .put("latitude", parts[0].toDoubleOrNull())
+                        .put("longitude", parts[1].toDoubleOrNull()),
+                )
+            }
+        }
         val isExpirationUpdate = (dataMessage.flags ?: 0) and
             (DataMessage.Flags.EXPIRATION_TIMER_UPDATE.value) != 0
         if (isExpirationUpdate && kind == MessageKind.TEXT) {
@@ -176,11 +190,13 @@ internal object SignalFeatureHelpers {
     }
 
     fun hasRichContent(dataMessage: DataMessage): Boolean {
+        val body = dataMessage.body?.trim().orEmpty()
         return dataMessage.sticker != null ||
             dataMessage.pollCreate != null ||
             dataMessage.contact.isNotEmpty() ||
             dataMessage.reaction != null ||
             dataMessage.quote != null ||
+            body.startsWith("geo:", ignoreCase = true) ||
             (dataMessage.expireTimer?.let { it > 0 } == true) ||
             ((dataMessage.flags ?: 0) != 0)
     }

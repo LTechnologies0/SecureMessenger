@@ -443,7 +443,7 @@ class MatrixProtocol @Inject constructor(
                         "Historique Matrix nécessite une session Trixnity E2EE",
                     )
                 val persisted = engine.loadHistory(accId, roomId, limit = 50)
-                val inDb = repository.observeMessages(conversationId).first().size
+                val inDb = repository.countMessages(conversationId)
                 HistoryLoadResult.Success(
                     messageCount = inDb.coerceAtLeast(persisted),
                     loadedFromCache = inDb > 0,

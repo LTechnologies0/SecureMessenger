@@ -2,7 +2,7 @@ package ltechnologies.onionphone.securemessenger.protocol.telegram
 
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
-import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.ExecutorCoroutineDispatcher
 import kotlinx.coroutines.asCoroutineDispatcher
 import ltechnologies.onionphone.securemessenger.core.model.AuthStepKind
 import ltechnologies.onionphone.securemessenger.core.model.ProxyConfig
@@ -16,9 +16,10 @@ internal class TelegramSession(
     val accountId: String,
     val facade: TdLibFacade,
 ) {
-    val dispatcher: CoroutineDispatcher = Executors.newSingleThreadExecutor { r ->
+    private val executor = Executors.newSingleThreadExecutor { r ->
         Thread(r, "tdlib-$accountId")
-    }.asCoroutineDispatcher()
+    }
+    val dispatcher: ExecutorCoroutineDispatcher = executor.asCoroutineDispatcher()
 
     var nativeAvailable: Boolean = false
     var awaitingAuth: AuthStepKind = AuthStepKind.NONE
@@ -39,6 +40,8 @@ internal class TelegramSession(
         facade.disableProxy()
         facade.close()
         fileDownloads.clear()
+        runCatching { dispatcher.close() }
+        runCatching { executor.shutdown() }
     }
 }
 

@@ -78,6 +78,20 @@ internal object SignalCredentialKeys {
     const val CDSI_TOKEN = "cdsiToken"
     const val PROFILE_NAME = "profileName"
     const val PROFILE_ABOUT = "profileAbout"
+    const val CONFIG_READ_RECEIPTS = "configReadReceipts"
+    const val CONFIG_TYPING_INDICATORS = "configTypingIndicators"
+    const val CONFIG_LINK_PREVIEWS = "configLinkPreviews"
+    const val CONFIG_UDI = "configUnidentifiedDeliveryIndicators"
+    const val BLOCKED_LIST = "blockedList"
+    const val ACCOUNT_ENTROPY_POOL = "accountEntropyPool"
+    const val MEDIA_ROOT_BACKUP_KEY = "mediaRootBackupKey"
+    const val EPHEMERAL_BACKUP_KEY = "ephemeralBackupKey"
+    const val STORAGE_MANIFEST_VERSION = "storageManifestVersion"
+    const val LAST_DEVICE_NAME_CHANGE = "lastDeviceNameChange"
+    const val INITIAL_SYNC_DONE = "initialSyncDone"
+    const val PEER_PROFILE_KEY_PREFIX = "peerProfileKey:"
+
+    fun peerProfileKey(aci: String): String = "$PEER_PROFILE_KEY_PREFIX$aci"
 }
 
 internal fun generateSignalPassword(): String {

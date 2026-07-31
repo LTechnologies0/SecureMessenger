@@ -48,7 +48,7 @@ internal class SignalLinkFlow(
         }
 
         return ProvisioningSocket.start<ProvisionMessage>(
-            mode = ProvisioningSocket.Mode.Link(linkAndSyncCapable = false),
+            mode = ProvisioningSocket.Mode.Link(linkAndSyncCapable = true),
             identityKeyPair = ephemeralIdentity,
             configuration = configuration,
             handler = { id, throwable ->
@@ -116,7 +116,7 @@ internal class SignalLinkFlow(
         val api = registrationApi(e164, password)
         val attributes = preKeys.buildDeviceAttributes(deviceName, aciIdentity)
 
-        Timber.i("Signal link: PUT /v1/devices/link for %s", e164)
+        Timber.i("Signal link: PUT /v1/devices/link")
         return when (
             val result = api.registerAsSecondaryDevice(
                 verificationCode = provisioningCode,
@@ -142,6 +142,21 @@ internal class SignalLinkFlow(
                         put(
                             SignalCredentialKeys.PROFILE_KEY,
                             android.util.Base64.encodeToString(pk.toByteArray(), android.util.Base64.NO_WRAP),
+                        )
+                    }
+                    message.accountEntropyPool?.takeIf { it.isNotBlank() }?.let {
+                        put(SignalCredentialKeys.ACCOUNT_ENTROPY_POOL, it)
+                    }
+                    message.mediaRootBackupKey?.takeIf { it.size > 0 }?.let { key ->
+                        put(
+                            SignalCredentialKeys.MEDIA_ROOT_BACKUP_KEY,
+                            android.util.Base64.encodeToString(key.toByteArray(), android.util.Base64.NO_WRAP),
+                        )
+                    }
+                    message.ephemeralBackupKey?.takeIf { it.size > 0 }?.let { key ->
+                        put(
+                            SignalCredentialKeys.EPHEMERAL_BACKUP_KEY,
+                            android.util.Base64.encodeToString(key.toByteArray(), android.util.Base64.NO_WRAP),
                         )
                     }
                 }

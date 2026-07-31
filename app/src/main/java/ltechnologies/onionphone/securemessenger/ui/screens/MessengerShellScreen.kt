@@ -73,6 +73,7 @@ private enum class ShellOverlay {
     ADD_ACCOUNT_PICKER,
     ADD_TELEGRAM,
     ADD_SIGNAL,
+    ADD_EMAIL,
     ADD_PROTOCOL,
     SETTINGS,
     PROXY,
@@ -119,6 +120,7 @@ fun MessengerShellScreen(
                     onClose = { overlay = ShellOverlay.NONE },
                     onPickTelegram = { overlay = ShellOverlay.ADD_TELEGRAM },
                     onPickSignal = { overlay = ShellOverlay.ADD_SIGNAL },
+                    onPickEmail = { overlay = ShellOverlay.ADD_EMAIL },
                     onPickProtocol = { protocol ->
                         addProtocol = protocol.name
                         overlay = ShellOverlay.ADD_PROTOCOL
@@ -144,6 +146,20 @@ fun MessengerShellScreen(
         ShellOverlay.ADD_SIGNAL -> {
             Scaffold { padding ->
                 SignalLoginScreen(
+                    modifier = Modifier.padding(padding),
+                    viewModel = viewModel,
+                    onClose = { overlay = ShellOverlay.ADD_ACCOUNT_PICKER },
+                    onConnected = { accountId ->
+                        selectedAccountId = accountId
+                        overlay = ShellOverlay.NONE
+                    },
+                )
+            }
+            return
+        }
+        ShellOverlay.ADD_EMAIL -> {
+            Scaffold { padding ->
+                EmailLoginScreen(
                     modifier = Modifier.padding(padding),
                     viewModel = viewModel,
                     onClose = { overlay = ShellOverlay.ADD_ACCOUNT_PICKER },

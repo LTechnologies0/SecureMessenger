@@ -12,6 +12,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.FilterChip
@@ -34,6 +35,7 @@ import ltechnologies.onionphone.securemessenger.core.model.ProtocolId
 import ltechnologies.onionphone.securemessenger.ui.theme.ConnectedGreen
 import ltechnologies.onionphone.securemessenger.ui.theme.ConnectedGreenDark
 import ltechnologies.onionphone.securemessenger.ui.theme.ConnectingAmber
+import ltechnologies.onionphone.securemessenger.ui.theme.EmailRose
 import ltechnologies.onionphone.securemessenger.ui.theme.PrimaryBlue
 import ltechnologies.onionphone.securemessenger.ui.theme.SecondaryTeal
 import ltechnologies.onionphone.securemessenger.ui.theme.SignalBlue
@@ -44,6 +46,7 @@ fun protocolShortPrefix(protocol: ProtocolId): String = when (protocol) {
     ProtocolId.MATRIX -> "Matrix"
     ProtocolId.XMPP -> "XMPP"
     ProtocolId.SIGNAL -> "Signal"
+    ProtocolId.EMAIL -> "Mail"
 }
 
 fun protocolDisplayName(protocol: ProtocolId): String = when (protocol) {
@@ -51,6 +54,7 @@ fun protocolDisplayName(protocol: ProtocolId): String = when (protocol) {
     ProtocolId.MATRIX -> "Matrix"
     ProtocolId.XMPP -> "XMPP"
     ProtocolId.SIGNAL -> "Signal"
+    ProtocolId.EMAIL -> "Email"
 }
 
 fun accountRailLabel(account: Account, indexAmongProtocol: Int): String {
@@ -63,6 +67,7 @@ fun protocolAccentColor(protocol: ProtocolId): Color = when (protocol) {
     ProtocolId.MATRIX -> SecondaryTeal
     ProtocolId.XMPP -> TertiaryAmber
     ProtocolId.SIGNAL -> SignalBlue
+    ProtocolId.EMAIL -> EmailRose
 }
 
 fun protocolIcon(protocol: ProtocolId): ImageVector = when (protocol) {
@@ -70,6 +75,7 @@ fun protocolIcon(protocol: ProtocolId): ImageVector = when (protocol) {
     ProtocolId.MATRIX -> Icons.Default.Forum
     ProtocolId.XMPP -> Icons.AutoMirrored.Filled.Chat
     ProtocolId.SIGNAL -> Icons.AutoMirrored.Filled.Chat
+    ProtocolId.EMAIL -> Icons.Default.Email
 }
 
 fun connectionStateLabel(state: ConnectionState): String = when (state) {

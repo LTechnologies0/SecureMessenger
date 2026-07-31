@@ -89,6 +89,7 @@ fun NewChatScreen(
         protocol == ProtocolId.SIGNAL && asGroup ->
             "Identifiant gv2:… (groupe existant)"
         protocol == ProtocolId.SIGNAL -> "Numéro E.164 (+33…) ou ACI"
+        protocol == ProtocolId.EMAIL -> "Adresse email (user@domain)"
         else -> "Identifiant distant"
     }
 
@@ -113,6 +114,7 @@ fun NewChatScreen(
         } else {
             "Format international obligatoire (+…)"
         }
+        ProtocolId.EMAIL -> "Exemple : ami@example.com"
     }
 
     Scaffold(
@@ -188,6 +190,7 @@ fun NewChatScreen(
                                 ProtocolId.MATRIX -> "Room"
                                 ProtocolId.TELEGRAM -> "Groupe"
                                 ProtocolId.SIGNAL -> "Groupe"
+                                ProtocolId.EMAIL -> "Groupe"
                             },
                         )
                     }

@@ -350,8 +350,12 @@ class XmppProtocol @Inject constructor(
             return
         }
 
-        val omemoBody = smack.omemoHelper?.tryDecrypt(remoteJid, smackMessage)
-        val body = omemoBody ?: smackMessage.body ?: return
+        val hasOmemo = smack.omemoHelper?.hasOmemoPayload(smackMessage) == true
+        val omemoBody = if (hasOmemo) smack.omemoHelper?.tryDecrypt(remoteJid, smackMessage) else null
+        val body = when {
+            hasOmemo -> omemoBody ?: return // fail-closed: never store plaintext beside broken ciphertext
+            else -> smackMessage.body ?: return
+        }
         val convId = conversationId(accId, remoteJid)
         val ts = SmackClientFacade.extractDelayTimestamp(smackMessage) ?: System.currentTimeMillis()
         val myJid = smack.myBareJid()
@@ -475,9 +479,8 @@ class XmppProtocol @Inject constructor(
     ) {
         if (stanzaId.isBlank()) return
         val convId = conversationId(accId, remoteJid)
-        val messages = repository.observeMessages(convId).first()
-        val target = messages.firstOrNull { it.id == "${convId}_$stanzaId" }
-            ?: messages.firstOrNull { it.id.endsWith("_$stanzaId") }
+        val messageKey = "${convId}_$stanzaId"
+        val target = repository.getMessage(messageKey)
             ?: return
         val ranked = mapOf(
             DeliveryState.PENDING to 0,
@@ -838,7 +841,7 @@ class XmppProtocol @Inject constructor(
                 val smack = sessions[accId]
                     ?: return@withContext HistoryLoadResult.Failure("Compte XMPP non connecté")
                 val synced = XmppMamSync.syncHistory(smack, accId, repository, remoteJid)
-                val count = repository.observeMessages(conversationId).first().size
+                val count = repository.countMessages(conversationId)
                 HistoryLoadResult.Success(
                     messageCount = count,
                     loadedFromCache = count > 0,
@@ -914,10 +917,7 @@ class XmppProtocol @Inject constructor(
             val smack = sessions[accId] ?: return@withContext
             if (smack.isMucRoom(remoteJid)) return@withContext
             val stanzaId = messageId?.removePrefix("${conversationId}_")
-                ?: repository.observeMessages(conversationId).first()
-                    .lastOrNull { it.direction == MessageDirection.INCOMING }
-                    ?.id
-                    ?.removePrefix("${conversationId}_")
+                ?: repository.latestMessageId(conversationId)?.removePrefix("${conversationId}_")
                 ?: return@withContext
             if (stanzaId.isBlank()) return@withContext
             runCatching { smack.markDisplayed(remoteJid, stanzaId) }
@@ -981,6 +981,7 @@ class XmppProtocol @Inject constructor(
             }
             toClose.forEach { (id, facade) ->
                 facade.disconnect()
+                typingFlows.keys.filter { it.startsWith("${id}_") }.forEach { typingFlows.remove(it) }
                 repository.upsertAccount(
                     ltechnologies.onionphone.securemessenger.core.model.Account(
                         id = id,
@@ -989,6 +990,9 @@ class XmppProtocol @Inject constructor(
                         connectionState = ConnectionState.DISCONNECTED,
                     ),
                 )
+            }
+            if (accountId == null) {
+                typingFlows.clear()
             }
             if (sessions.isEmpty()) {
                 _connectionState.value = ConnectionState.DISCONNECTED

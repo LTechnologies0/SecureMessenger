@@ -33,17 +33,21 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.withContext
 import ltechnologies.onionphone.securemessenger.core.model.AuthStepKind
 import ltechnologies.onionphone.securemessenger.core.model.ConnectionResult
 import ltechnologies.onionphone.securemessenger.core.model.ConnectionState
@@ -171,7 +175,11 @@ fun SignalLoginScreen(
 
     DisposableEffect(Unit) {
         onDispose {
-            viewModel.cancelSignalDeviceLink()
+            // Only tear down an in-flight QR link. Once CONNECTED, leave the session alone.
+            val protocol = viewModel.signalProtocol()
+            if (protocol?.connectionState?.value != ConnectionState.CONNECTED) {
+                viewModel.cancelSignalDeviceLink()
+            }
         }
     }
 
@@ -267,12 +275,20 @@ fun SignalLoginScreen(
                     )
                 }
                 if (url != null) {
-                    val qr = remember(url) { qrImageBitmap(url) }
-                    Image(
-                        bitmap = qr,
-                        contentDescription = "QR de liaison Signal",
+                    val qr by produceState<ImageBitmap?>(initialValue = null, url) {
+                        value = withContext(Dispatchers.Default) { qrImageBitmap(url) }
+                    }
+                    qr?.let { bitmap ->
+                        Image(
+                            bitmap = bitmap,
+                            contentDescription = "QR de liaison Signal",
+                            modifier = Modifier
+                                .size(280.dp)
+                                .align(Alignment.CenterHorizontally),
+                        )
+                    } ?: CircularProgressIndicator(
                         modifier = Modifier
-                            .size(280.dp)
+                            .padding(8.dp)
                             .align(Alignment.CenterHorizontally),
                     )
                     Text(

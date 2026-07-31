@@ -742,15 +742,18 @@ class TdLibFacade(private val client: TdLibClient) {
         chatId: Long,
         onlyLocal: Boolean,
         pageSize: Int = 100,
+        maxPages: Int = Int.MAX_VALUE,
         onPage: suspend (List<TdApi.Message>) -> Unit,
     ): Int {
         var fromMessageId = 0L
         var total = 0
-        while (true) {
+        var pages = 0
+        while (pages < maxPages) {
             val page = getChatHistory(chatId, fromMessageId, pageSize, onlyLocal)
             if (page.isEmpty()) break
             onPage(page)
             total += page.size
+            pages++
             if (page.size < pageSize) break
             val oldestId = page.last().id
             if (oldestId == fromMessageId) break
@@ -766,11 +769,12 @@ class TdLibFacade(private val client: TdLibClient) {
         chatId: Long,
         pageSize: Int = 100,
         syncRemote: Boolean = true,
+        maxPages: Int = 20,
         onPage: suspend (List<TdApi.Message>) -> Unit,
     ): Pair<Int, Int> {
-        val local = paginateChatHistory(chatId, onlyLocal = true, pageSize, onPage)
+        val local = paginateChatHistory(chatId, onlyLocal = true, pageSize, maxPages, onPage)
         val remote = if (syncRemote) {
-            paginateChatHistory(chatId, onlyLocal = false, pageSize, onPage)
+            paginateChatHistory(chatId, onlyLocal = false, pageSize, maxPages, onPage)
         } else {
             0
         }
