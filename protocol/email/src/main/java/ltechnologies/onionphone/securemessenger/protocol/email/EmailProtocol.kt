@@ -268,6 +268,11 @@ class EmailProtocol @Inject constructor(
         }
         val result = when (session.config.storeKind) {
             EmailStoreKind.JMAP -> {
+                if (attachments.isNotEmpty()) {
+                    return SendResult.Failure(
+                        "Pièces jointes JMAP non supportées — utilisez IMAP/SMTP",
+                    )
+                }
                 session.jmapClient?.submit(to, subject, body, inReplyTo)
                     ?: SendResult.Failure("JMAP client missing")
             }
@@ -405,6 +410,36 @@ class EmailProtocol @Inject constructor(
         } catch (e: Exception) {
             Timber.w(e, "Email history sync failed")
             HistoryLoadResult.Failure(e.message ?: "History sync failed")
+        }
+    }
+
+    override suspend fun markRead(conversationId: String, messageId: String?) {
+        withContext(Dispatchers.IO) {
+            val conversation = repository.getConversation(conversationId) ?: return@withContext
+            val accountId = conversation.accountId
+            val session = sessions[accountId]
+            if (session?.config?.storeKind == EmailStoreKind.IMAP) {
+                runCatching {
+                    val messages = repository.listMessagesPage(conversationId, limit = 200, offset = 0)
+                    val targets = if (messageId != null) {
+                        messages.filter { it.id == messageId }
+                    } else {
+                        messages.filter { it.direction == MessageDirection.INCOMING }
+                    }
+                    val ids = targets.mapNotNull { msg ->
+                        msg.payloadJson
+                            ?.let { runCatching { JSONObject(it) }.getOrNull() }
+                            ?.optString("messageId")
+                            ?.takeIf { it.isNotBlank() }
+                    }
+                    if (ids.isNotEmpty()) {
+                        imapEngines[accountId]?.markSeen(session, ids)
+                    }
+                }.onFailure { Timber.w(it, "IMAP markRead failed for $conversationId") }
+            }
+            if (conversation.unreadCount > 0) {
+                repository.upsertConversation(conversation.copy(unreadCount = 0))
+            }
         }
     }
 

@@ -86,13 +86,13 @@ class SignalProtocol @Inject constructor(
         contacts = true,
         profileEdit = true,
         voiceNotes = true,
-        stickers = true,
+        stickers = false,
         gifs = true,
         locationShare = true,
         polls = true,
         contactShare = true,
         ephemeralMessages = true,
-        messageHistory = true,
+        messageHistory = false,
         backupExport = true,
     )
 
@@ -637,6 +637,11 @@ class SignalProtocol @Inject constructor(
         accountId: String?,
         asGroup: Boolean,
     ): SendResult = withContext(signalDispatcher) {
+        if (asGroup) {
+            return@withContext SendResult.Failure(
+                "Création de groupe Signal non supportée — rejoignez via un message entrant",
+            )
+        }
         val accId = accountId ?: this@SignalProtocol.accountId ?: return@withContext SendResult.Failure("Compte non connecté")
         val activeSession = session ?: return@withContext SendResult.Failure("Session Signal indisponible")
         return@withContext try {
@@ -1218,10 +1223,17 @@ class SignalProtocol @Inject constructor(
                     SignalServiceTypingMessage.Action.STOPPED
                 }
                 val masterKey = SignalGroupHelper.parseMasterKey(remoteId)
-                val groupId = masterKey?.let {
-                    // GroupId for typing is derived from master key via helper when available; optional empty for fan-out.
-                    Optional.empty<ByteArray>()
-                } ?: Optional.empty()
+                val groupId = if (masterKey != null) {
+                    Optional.of(
+                        org.signal.libsignal.zkgroup.groups.GroupSecretParams
+                            .deriveFromMasterKey(
+                                org.signal.libsignal.zkgroup.groups.GroupMasterKey(masterKey),
+                            )
+                            .publicParams.groupIdentifier.serialize(),
+                    )
+                } else {
+                    Optional.empty()
+                }
                 val typingMessage = SignalServiceTypingMessage(action, System.currentTimeMillis(), groupId)
                 if (masterKey != null) {
                     val helper = groupHelper ?: return@withContext

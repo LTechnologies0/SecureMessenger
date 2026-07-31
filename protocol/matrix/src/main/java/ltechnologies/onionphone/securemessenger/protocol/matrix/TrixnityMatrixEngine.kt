@@ -54,8 +54,10 @@ import net.folivo.trixnity.client.store.sender
 import net.folivo.trixnity.client.user.UserService
 import net.folivo.trixnity.clientserverapi.model.authentication.IdentifierType
 import net.folivo.trixnity.clientserverapi.model.media.FileTransferProgress
+import net.folivo.trixnity.clientserverapi.model.rooms.CreateRoom
 import net.folivo.trixnity.clientserverapi.model.rooms.GetEvents
 import net.folivo.trixnity.core.model.EventId
+import net.folivo.trixnity.core.model.RoomAliasId
 import net.folivo.trixnity.core.model.RoomId
 import net.folivo.trixnity.core.model.UserId
 import net.folivo.trixnity.core.model.events.m.ReceiptType
@@ -428,6 +430,48 @@ class TrixnityMatrixEngine(
         val list = contacts.values.toList()
         repository.replaceContacts(accountId, list)
         list.size
+    }
+
+    /**
+     * Resolves [remoteId] to a joined Matrix room id (`!…`).
+     * Creates a DM / group or joins an existing room / alias as needed.
+     */
+    suspend fun ensureRoom(remoteId: String, asGroup: Boolean): Result<String> = withContext(Dispatchers.IO) {
+        val matrixClient = client ?: return@withContext Result.failure(IllegalStateException("Not connected"))
+        runCatching {
+            when {
+                remoteId.startsWith("!") -> {
+                    val roomId = RoomId(remoteId)
+                    val roomService = matrixClient.di.get<RoomService>()
+                    val known = roomService.getById(roomId).firstOrNull()
+                    if (known == null) {
+                        matrixClient.api.room.joinRoom(roomId = roomId).getOrThrow()
+                    }
+                    roomId.full
+                }
+                remoteId.startsWith("#") -> {
+                    matrixClient.api.room.joinRoom(roomAliasId = RoomAliasId(remoteId)).getOrThrow().full
+                }
+                remoteId.startsWith("@") && !asGroup -> {
+                    matrixClient.api.room.createRoom(
+                        invite = setOf(UserId(remoteId)),
+                        isDirect = true,
+                        preset = CreateRoom.Request.Preset.TRUSTED_PRIVATE,
+                    ).getOrThrow().full
+                }
+                asGroup -> {
+                    val invitees = if (remoteId.startsWith("@")) setOf(UserId(remoteId)) else emptySet()
+                    val name = if (!remoteId.startsWith("@")) remoteId else null
+                    matrixClient.api.room.createRoom(
+                        name = name,
+                        invite = invitees,
+                        isDirect = false,
+                        preset = CreateRoom.Request.Preset.PRIVATE,
+                    ).getOrThrow().full
+                }
+                else -> error("Identifiant Matrix invalide: $remoteId (attendu @user, !room ou #alias)")
+            }
+        }
     }
 
     suspend fun setTyping(roomIdFull: String, typing: Boolean): Result<Unit> = withContext(Dispatchers.IO) {

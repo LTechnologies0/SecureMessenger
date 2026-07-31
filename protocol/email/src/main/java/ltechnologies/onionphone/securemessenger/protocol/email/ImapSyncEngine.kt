@@ -145,4 +145,38 @@ class ImapSyncEngine(
         )
         // Seen flag not written (folder opened READ_ONLY).
     }
+
+    /**
+     * Best-effort: open the mailbox READ_WRITE and set [Flags.Flag.SEEN] on messages whose
+     * Message-ID matches [messageIds]. Returns how many flags were written.
+     */
+    suspend fun markSeen(session: EmailSession, messageIds: Collection<String>): Int {
+        if (messageIds.isEmpty()) return 0
+        val store = session.store ?: return 0
+        val normalized = messageIds.map { EmailThreading.normalizeMessageId(it) }.toSet()
+        val folder = store.getFolder(session.config.folder)
+        if (!folder.exists()) return 0
+        folder.open(Folder.READ_WRITE)
+        return try {
+            var marked = 0
+            val count = folder.messageCount
+            if (count <= 0) return 0
+            // Scan recent window — full-folder scan is too expensive for mark-read.
+            val start = (count - 499).coerceAtLeast(1)
+            val messages = folder.getMessages(start, count)
+            for (mail in messages) {
+                if (mail == null) continue
+                val mime = mail as? MimeMessage ?: continue
+                val mid = EmailThreading.normalizeMessageId(
+                    mime.messageID?.takeIf { it.isNotBlank() } ?: continue,
+                )
+                if (mid !in normalized) continue
+                mime.setFlag(jakarta.mail.Flags.Flag.SEEN, true)
+                marked++
+            }
+            marked
+        } finally {
+            runCatching { folder.close(false) }
+        }
+    }
 }

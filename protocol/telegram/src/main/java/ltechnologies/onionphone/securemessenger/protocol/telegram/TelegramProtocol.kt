@@ -735,6 +735,11 @@ class TelegramProtocol @Inject constructor(
         accountId: String?,
         asGroup: Boolean,
     ): SendResult {
+        if (asGroup) {
+            return SendResult.Failure(
+                "Création de groupe Telegram non supportée — ouvrez un chat/groupe existant",
+            )
+        }
         val accId = accountId ?: sessions.keys.singleOrNull()
             ?: return SendResult.Failure("Not connected")
         val session = sessions[accId] ?: return SendResult.Failure("Not connected")
