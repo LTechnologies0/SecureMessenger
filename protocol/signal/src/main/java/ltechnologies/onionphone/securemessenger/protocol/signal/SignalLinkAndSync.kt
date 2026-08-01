@@ -5,6 +5,9 @@ import android.util.Base64
 import java.io.File
 import java.io.FileInputStream
 import kotlin.time.Duration.Companion.seconds
+import kotlinx.coroutines.runBlocking
+import ltechnologies.onionphone.securemessenger.core.security.EncryptedCredentialStore
+import ltechnologies.onionphone.securemessenger.data.MessengerRepository
 import org.signal.core.models.backup.MessageBackupKey
 import org.signal.libsignal.messagebackup.MessageBackup
 import org.signal.network.NetworkResult
@@ -14,11 +17,10 @@ import org.whispersystems.signalservice.api.SignalServiceMessageReceiver
 import org.whispersystems.signalservice.api.fromWebSocketRequest
 import org.whispersystems.signalservice.api.link.TransferArchiveResponse
 import timber.log.Timber
-import ltechnologies.onionphone.securemessenger.core.security.EncryptedCredentialStore
 
 /**
  * Secondary-device link-and-sync: long-poll for a primary-provided transfer archive,
- * download + validate it, and store the local path. Does not import messages.
+ * download + validate, then import frames into local conversations/messages.
  */
 internal object SignalLinkAndSync {
     private const val POLL_TIMEOUT_SEC = 30L
@@ -28,11 +30,20 @@ internal object SignalLinkAndSync {
         accountId: String,
         session: SignalSessionContext,
         credentialStore: EncryptedCredentialStore,
+        repository: MessengerRepository,
     ) {
         val encodedKey = credentialStore.get(accountId, SignalCredentialKeys.EPHEMERAL_BACKUP_KEY)
             ?: return
-        if (credentialStore.get(accountId, SignalCredentialKeys.LINK_SYNC_BACKUP_PATH) != null) {
-            Timber.d("Link-and-sync backup already stored for %s", accountId)
+        if (credentialStore.get(accountId, SignalCredentialKeys.LINK_SYNC_IMPORTED) == "1") {
+            Timber.d("Link-and-sync already imported for %s", accountId)
+            return
+        }
+
+        val existingPath = credentialStore.get(accountId, SignalCredentialKeys.LINK_SYNC_BACKUP_PATH)
+        if (existingPath != null && File(existingPath).exists()) {
+            runBlocking {
+                SignalBackupImporter.importIfNeeded(accountId, session, credentialStore, repository)
+            }
             return
         }
 
@@ -52,6 +63,7 @@ internal object SignalLinkAndSync {
                     accountId,
                     session,
                     credentialStore,
+                    repository,
                     encodedKey,
                     result.result,
                 )
@@ -79,6 +91,7 @@ internal object SignalLinkAndSync {
         accountId: String,
         session: SignalSessionContext,
         credentialStore: EncryptedCredentialStore,
+        repository: MessengerRepository,
         encodedEphemeralKey: String,
         response: TransferArchiveResponse,
     ) {
@@ -91,24 +104,26 @@ internal object SignalLinkAndSync {
                 when (val dl = receiver.retrieveLinkAndSyncBackup(cdn, key, dest, null)) {
                     is NetworkResult.Success -> {
                         val valid = validateBackup(session, encodedEphemeralKey, dest)
-                        if (valid) {
-                            credentialStore.put(
-                                accountId,
-                                SignalCredentialKeys.LINK_SYNC_BACKUP_PATH,
-                                dest.absolutePath,
-                            )
+                        credentialStore.put(
+                            accountId,
+                            SignalCredentialKeys.LINK_SYNC_BACKUP_PATH,
+                            dest.absolutePath,
+                        )
+                        if (!valid) {
+                            Timber.w("Link-and-sync backup validation failed; attempting import anyway")
+                        } else {
                             Timber.i(
                                 "Link-and-sync backup stored path=%s size=%d",
                                 dest.absolutePath,
                                 dest.length(),
                             )
-                        } else {
-                            Timber.w("Link-and-sync backup validation failed; keeping file for debug")
-                            // Still store path so history honesty can detect presence.
-                            credentialStore.put(
+                        }
+                        runBlocking {
+                            SignalBackupImporter.importIfNeeded(
                                 accountId,
-                                SignalCredentialKeys.LINK_SYNC_BACKUP_PATH,
-                                dest.absolutePath,
+                                session,
+                                credentialStore,
+                                repository,
                             )
                         }
                     }

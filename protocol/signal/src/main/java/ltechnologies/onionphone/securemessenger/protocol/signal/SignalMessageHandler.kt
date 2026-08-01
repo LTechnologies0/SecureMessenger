@@ -26,24 +26,34 @@ import org.signal.libsignal.protocol.groups.GroupSessionBuilder
 import org.signal.libsignal.protocol.message.DecryptionErrorMessage
 import org.signal.libsignal.protocol.message.SenderKeyDistributionMessage
 import org.whispersystems.signalservice.api.SignalServiceMessageReceiver
+import org.whispersystems.signalservice.api.SignalServiceMessageSender
 import org.whispersystems.signalservice.api.crypto.AttachmentCipherInputStream
 import org.whispersystems.signalservice.api.crypto.EnvelopeMetadata
+import org.whispersystems.signalservice.api.crypto.SealedSenderAccess
 import org.whispersystems.signalservice.api.crypto.SignalGroupSessionBuilder
 import org.whispersystems.signalservice.api.crypto.SignalServiceCipherResult
 import org.whispersystems.signalservice.api.messages.EnvelopeResponse
+import org.whispersystems.signalservice.api.messages.calls.BusyMessage
+import org.whispersystems.signalservice.api.messages.calls.SignalServiceCallMessage
 import org.whispersystems.signalservice.api.messages.multidevice.DeviceContactsInputStream
+import org.whispersystems.signalservice.api.push.SignalServiceAddress
 import org.whispersystems.signalservice.api.util.AttachmentPointerUtil
 import org.whispersystems.signalservice.internal.push.AttachmentPointer
+import org.whispersystems.signalservice.internal.push.CallMessage
 import org.whispersystems.signalservice.internal.push.ConversationIdentifier
 import org.whispersystems.signalservice.internal.push.DataMessage
 import org.whispersystems.signalservice.internal.push.EditMessage
 import org.whispersystems.signalservice.internal.push.Envelope
 import org.whispersystems.signalservice.internal.push.ReceiptMessage
+import org.whispersystems.signalservice.internal.push.StoryMessage
 import org.whispersystems.signalservice.internal.push.SyncMessage
 import org.whispersystems.signalservice.internal.push.TypingMessage
 import org.whispersystems.signalservice.internal.push.Verified
 import timber.log.Timber
 import okio.ByteString
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 /**
  * Decrypts envelopes and maps Signal content onto Room + credential store.
@@ -61,11 +71,13 @@ internal class SignalMessageHandler(
     private val messageReceiver: SignalServiceMessageReceiver,
     private val groupHelper: SignalGroupHelper,
     private val protocolStore: ltechnologies.onionphone.securemessenger.protocol.signal.store.AndroidSignalProtocolStore,
+    private val messageSender: SignalServiceMessageSender,
     private val onTyping: (conversationId: String, peerLabel: String, started: Boolean) -> Unit = { _, _, _ -> },
     private val onContactsSynced: (count: Int) -> Unit = {},
     private val onKeysSynced: () -> Unit = {},
     private val onFetchLatest: (SyncMessage.FetchLatest.Type?) -> Unit = {},
 ) {
+    private val ioScope = CoroutineScope(Dispatchers.IO)
     suspend fun processBatch(batch: List<EnvelopeResponse>) {
         for ((index, response) in batch.withIndex()) {
             try {
@@ -109,42 +121,42 @@ internal class SignalMessageHandler(
             content.nullMessage != null ->
                 Timber.d("Signal nullMessage (keepalive) for $accountId")
             content.callMessage != null ->
-                persistIgnoredSystemNotice(
-                    result.metadata,
-                    kindSuffix = "call",
-                    body = "Appel Signal (non supporté)",
-                )
+                handleCallMessage(content.callMessage!!, result.metadata)
             content.storyMessage != null ->
-                persistIgnoredSystemNotice(
-                    result.metadata,
-                    kindSuffix = "story",
-                    body = "Story Signal (ignorée)",
-                )
+                handleStoryMessage(content.storyMessage!!, result.metadata, envelope)
             content.senderKeyDistributionMessage != null ->
                 Unit // already handled
             else -> Timber.d("Ignoring unsupported Signal content type")
         }
     }
 
-    /**
-     * Surfaces ignored call/story envelopes as a single SYSTEM stub per (conversation, kind, day)
-     * so the UI is honest without spam.
-     */
-    private suspend fun persistIgnoredSystemNotice(
-        metadata: EnvelopeMetadata,
-        kindSuffix: String,
-        body: String,
-    ) {
+    private suspend fun handleCallMessage(call: CallMessage, metadata: EnvelopeMetadata) {
+        // ICE/opaque are media-path noise without RingRTC — skip spam.
+        if (call.offer == null && call.answer == null && call.hangup == null && call.busy == null) {
+            Timber.d("Ignoring Signal call ICE/opaque for %s", metadata.sourceServiceId)
+            return
+        }
         val remoteId = metadata.sourceE164?.takeIf { it.isNotBlank() }
             ?: metadata.sourceServiceId.toString()
         val conversationId = signalConversationId(accountId, remoteId)
-        val day = java.util.concurrent.TimeUnit.MILLISECONDS.toDays(System.currentTimeMillis())
-        val messageId = "${conversationId}_${kindSuffix}_$day"
-        if (repository.getMessage(messageId) != null) {
-            Timber.d("Skipping duplicate Signal %s notice for %s", kindSuffix, remoteId)
-            return
+        val (body, event, callId, media) = when {
+            call.offer != null -> {
+                val offer = call.offer!!
+                val video = offer.type == CallMessage.Offer.Type.OFFER_VIDEO_CALL
+                val mediaLabel = if (video) "video" else "audio"
+                val label = if (video) "Appel vidéo entrant" else "Appel audio entrant"
+                CallEvent(label, "offer", offer.id ?: 0L, mediaLabel)
+            }
+            call.answer != null ->
+                CallEvent("Appel accepté", "answer", call.answer!!.id ?: 0L, null)
+            call.hangup != null ->
+                CallEvent("Appel terminé", "hangup", call.hangup!!.id ?: 0L, null)
+            call.busy != null ->
+                CallEvent("Occupé", "busy", call.busy!!.id ?: 0L, null)
+            else -> return
         }
         val now = System.currentTimeMillis()
+        val messageId = "${conversationId}_call_${event}_${callId}_$now"
         repository.upsertConversation(
             Conversation(
                 id = conversationId,
@@ -167,10 +179,87 @@ internal class SignalMessageHandler(
                 direction = MessageDirection.INCOMING,
                 deliveryState = DeliveryState.DELIVERED,
                 senderDisplayName = metadata.sourceE164 ?: metadata.sourceServiceId.toString(),
-                kind = MessageKind.SYSTEM,
+                kind = MessageKind.CALL,
+                payloadJson = JSONObject()
+                    .put("type", event)
+                    .put("callId", callId)
+                    .put("media", media ?: JSONObject.NULL)
+                    .toString(),
             ),
         )
-        Timber.d("Persisted Signal %s system notice in %s", kindSuffix, conversationId)
+        // Without RingRTC we cannot answer — auto-busy so the peer stops ringing.
+        if (event == "offer" && callId != 0L) {
+            val destDevice = call.destinationDeviceId ?: metadata.sourceDeviceId
+            ioScope.launch {
+                runCatching {
+                    val address = SignalServiceAddress(metadata.sourceServiceId)
+                    messageSender.sendCallMessage(
+                        address,
+                        SealedSenderAccess.NONE,
+                        SignalServiceCallMessage.forBusy(BusyMessage(callId), destDevice),
+                    )
+                    Timber.i("Auto-busy sent for Signal call %s from %s", callId, remoteId)
+                }.onFailure { Timber.w(it, "Failed to auto-busy Signal call %s", callId) }
+            }
+        }
+    }
+
+    private data class CallEvent(
+        val body: String,
+        val event: String,
+        val callId: Long,
+        val media: String?,
+    )
+
+    private suspend fun handleStoryMessage(
+        story: StoryMessage,
+        metadata: EnvelopeMetadata,
+        envelope: Envelope,
+    ) {
+        val sourceAci = metadata.sourceServiceId.toString()
+        val remoteId = "story:$sourceAci"
+        val conversationId = signalConversationId(accountId, remoteId)
+        val text = story.textAttachment?.text?.takeIf { it.isNotBlank() }
+        val body = when {
+            text != null -> text
+            story.fileAttachment != null -> "📷 Story"
+            else -> "Story"
+        }
+        val now = envelope.clientTimestamp?.takeIf { it > 0 }
+            ?: envelope.serverTimestamp?.takeIf { it > 0 }
+            ?: System.currentTimeMillis()
+        val messageId = envelope.serverGuid?.let { UuidUtil.parseOrNull(it)?.toString() }
+            ?: "${conversationId}_$now"
+        if (repository.getMessage(messageId) != null) return
+        repository.upsertConversation(
+            Conversation(
+                id = conversationId,
+                protocol = ProtocolId.SIGNAL,
+                accountId = accountId,
+                remoteId = remoteId,
+                title = "Story · ${metadata.sourceE164 ?: sourceAci.take(8)}",
+                lastMessagePreview = body,
+                lastMessageAt = now,
+                unreadCount = 1,
+            ),
+        )
+        repository.upsertMessage(
+            Message(
+                id = messageId,
+                conversationId = conversationId,
+                protocol = ProtocolId.SIGNAL,
+                body = body,
+                timestamp = now,
+                direction = MessageDirection.INCOMING,
+                deliveryState = DeliveryState.DELIVERED,
+                senderDisplayName = metadata.sourceE164 ?: sourceAci,
+                kind = MessageKind.STORY,
+                payloadJson = JSONObject()
+                    .put("allowsReplies", story.allowsReplies == true)
+                    .put("hasFile", story.fileAttachment != null)
+                    .toString(),
+            ),
+        )
     }
 
     private suspend fun handleSyncMessage(sync: SyncMessage) {
@@ -670,6 +759,37 @@ internal class SignalMessageHandler(
     }
 
     private suspend fun handleSentTranscript(sent: SyncMessage.Sent) {
+        sent.storyMessage?.let { story ->
+            val text = story.textAttachment?.text?.takeIf { it.isNotBlank() }
+            val body = text ?: if (story.fileAttachment != null) "📷 Story" else "Story"
+            val remoteId = "story:my"
+            val conversationId = signalConversationId(accountId, remoteId)
+            val timestamp = sent.timestamp ?: System.currentTimeMillis()
+            repository.upsertConversation(
+                Conversation(
+                    id = conversationId,
+                    protocol = ProtocolId.SIGNAL,
+                    accountId = accountId,
+                    remoteId = remoteId,
+                    title = "My Story",
+                    lastMessagePreview = body,
+                    lastMessageAt = timestamp,
+                ),
+            )
+            repository.upsertMessage(
+                Message(
+                    id = "${conversationId}_$timestamp",
+                    conversationId = conversationId,
+                    protocol = ProtocolId.SIGNAL,
+                    body = body,
+                    timestamp = timestamp,
+                    direction = MessageDirection.OUTGOING,
+                    deliveryState = DeliveryState.SENT,
+                    kind = MessageKind.STORY,
+                ),
+            )
+            return
+        }
         val dataMessage = sent.message ?: return
         val body = dataMessage.body?.trim().orEmpty()
         val groupMasterKey = dataMessage.groupV2?.masterKey

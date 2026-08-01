@@ -74,29 +74,38 @@ class SignalProtocol @Inject constructor(
 
     override val id: ProtocolId = ProtocolId.SIGNAL
 
-    override val capabilities = ProtocolCapabilities(
-        directMessages = true,
-        groupChats = true,
-        mediaSend = true,
-        mediaReceive = true,
-        typingIndicators = true,
-        readReceipts = true,
-        endToEndEncryption = true,
-        requiresPhoneAuth = true,
-        contacts = true,
-        profileEdit = true,
-        voiceNotes = true,
-        stickers = true,
-        gifs = true,
-        locationShare = true,
-        polls = true,
-        contactShare = true,
-        ephemeralMessages = true,
-        // Linked devices have no server history API. A link-and-sync backup may be
-        // downloaded (LINK_SYNC_BACKUP_PATH) but is not message-imported yet, so keep false.
-        messageHistory = false,
-        backupExport = true,
-    )
+    override val capabilities: ProtocolCapabilities
+        get() {
+            val imported = accountId?.let {
+                credentialStore.get(it, SignalCredentialKeys.LINK_SYNC_IMPORTED) == "1"
+            } == true
+            return ProtocolCapabilities(
+                directMessages = true,
+                groupChats = true,
+                mediaSend = true,
+                mediaReceive = true,
+                typingIndicators = true,
+                readReceipts = true,
+                endToEndEncryption = true,
+                requiresPhoneAuth = true,
+                contacts = true,
+                profileEdit = true,
+                voiceNotes = true,
+                stickers = true,
+                gifs = true,
+                locationShare = true,
+                polls = true,
+                contactShare = true,
+                ephemeralMessages = true,
+                // History via imported link-and-sync archive (no server history API).
+                messageHistory = imported,
+                backupExport = true,
+                // Signaling only — A/V media needs RingRTC.
+                voiceCalls = true,
+                videoCalls = true,
+                stories = true,
+            )
+        }
 
     private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val signalDispatcher = Dispatchers.IO.limitedParallelism(1)
@@ -204,7 +213,7 @@ class SignalProtocol @Inject constructor(
             delay(1_500)
             val active = session ?: return@launch
             if (accountId != accId) return@launch
-            SignalLinkAndSync.maybeFetchBackup(context, accId, active, credentialStore)
+            SignalLinkAndSync.maybeFetchBackup(context, accId, active, credentialStore, repository)
         }
     }
 
@@ -1080,6 +1089,8 @@ class SignalProtocol @Inject constructor(
             is OutgoingContent.Sticker -> sendSticker(conversationId, content, accountId)
             is OutgoingContent.Poll -> sendPoll(conversationId, content, accountId)
             is OutgoingContent.ContactCard -> sendContactCard(conversationId, content, accountId)
+            is OutgoingContent.CallAction -> sendCallAction(conversationId, content, accountId)
+            is OutgoingContent.Story -> sendStory(conversationId, content, accountId)
         }
     }
 
@@ -1601,22 +1612,226 @@ class SignalProtocol @Inject constructor(
         activeSession: SignalSessionContext,
         recipient: SignalServiceAddress,
     ): SealedSenderAccess? {
-        val aci = recipient.identifier
-        val encoded = credentialStore.get(accountId ?: return SealedSenderAccess.NONE, SignalCredentialKeys.peerProfileKey(aci))
+        val ua = resolveUnidentifiedAccess(activeSession, recipient, unrestrictedForStory = false)
             ?: return SealedSenderAccess.NONE
-        val profileKey = SignalFeatureHelpers.decodeProfileKey(encoded) ?: return SealedSenderAccess.NONE
+        return SealedSenderAccess.forIndividual(ua) ?: SealedSenderAccess.NONE
+    }
+
+    private fun resolveUnidentifiedAccessForStory(
+        activeSession: SignalSessionContext,
+        recipient: SignalServiceAddress,
+    ): org.whispersystems.signalservice.api.crypto.UnidentifiedAccess {
+        return resolveUnidentifiedAccess(activeSession, recipient, unrestrictedForStory = true)
+            ?: org.whispersystems.signalservice.api.crypto.UnidentifiedAccess(
+                ByteArray(16),
+                ByteArray(0),
+                /* isUnrestrictedForStory = */ true,
+            )
+    }
+
+    private fun resolveUnidentifiedAccess(
+        activeSession: SignalSessionContext,
+        recipient: SignalServiceAddress,
+        unrestrictedForStory: Boolean,
+    ): org.whispersystems.signalservice.api.crypto.UnidentifiedAccess? {
+        val aci = recipient.identifier
+        val encoded = credentialStore.get(accountId ?: return null, SignalCredentialKeys.peerProfileKey(aci))
+            ?: return null
+        val profileKey = SignalFeatureHelpers.decodeProfileKey(encoded) ?: return null
         return try {
             val certBytes = activeSession.pushServiceSocket.senderCertificate
             val accessKey = org.whispersystems.signalservice.api.crypto.UnidentifiedAccess.deriveAccessKeyFrom(profileKey)
-            val ua = org.whispersystems.signalservice.api.crypto.UnidentifiedAccess(
+            org.whispersystems.signalservice.api.crypto.UnidentifiedAccess(
                 accessKey,
                 certBytes,
-                /* isUnrestrictedForStory = */ false,
+                unrestrictedForStory,
             )
-            SealedSenderAccess.forIndividual(ua)
         } catch (e: Exception) {
-            Timber.d(e, "Sealed sender unavailable for %s", aci)
-            SealedSenderAccess.NONE
+            Timber.d(e, "Unidentified access unavailable for %s", aci)
+            null
+        }
+    }
+
+    private suspend fun sendCallAction(
+        conversationId: String,
+        content: OutgoingContent.CallAction,
+        accountId: String?,
+    ): SendResult {
+        val accId = accountId ?: this.accountId ?: return SendResult.Failure("Compte non connecté")
+        val activeSession = session ?: return SendResult.Failure("Session Signal indisponible")
+        val remoteId = conversationId.removePrefix("${accId}_")
+        if (remoteId == conversationId || remoteId.startsWith("gv2:") || remoteId.startsWith("story:")) {
+            return SendResult.Failure("Appel Signal 1:1 uniquement")
+        }
+        val callId = content.callId ?: System.currentTimeMillis()
+        return try {
+            val address = resolveSignalAddress(remoteId)
+            val callMessage = when (content.action) {
+                ltechnologies.onionphone.securemessenger.core.model.CallSignalAction.BUSY ->
+                    org.whispersystems.signalservice.api.messages.calls.SignalServiceCallMessage.forBusy(
+                        org.whispersystems.signalservice.api.messages.calls.BusyMessage(callId),
+                        null,
+                    )
+                ltechnologies.onionphone.securemessenger.core.model.CallSignalAction.HANGUP ->
+                    org.whispersystems.signalservice.api.messages.calls.SignalServiceCallMessage.forHangup(
+                        org.whispersystems.signalservice.api.messages.calls.HangupMessage(
+                            callId,
+                            org.whispersystems.signalservice.api.messages.calls.HangupMessage.Type.NORMAL,
+                            0,
+                        ),
+                        null,
+                    )
+            }
+            activeSession.messageSender.sendCallMessage(
+                address,
+                resolveSealedSenderAccess(activeSession, address),
+                callMessage,
+            )
+            val now = System.currentTimeMillis()
+            val body = when (content.action) {
+                ltechnologies.onionphone.securemessenger.core.model.CallSignalAction.BUSY -> "Occupé (envoyé)"
+                ltechnologies.onionphone.securemessenger.core.model.CallSignalAction.HANGUP -> "Appel terminé (envoyé)"
+            }
+            repository.upsertMessage(
+                Message(
+                    id = "${conversationId}_call_out_${content.action}_$now",
+                    conversationId = conversationId,
+                    protocol = ProtocolId.SIGNAL,
+                    body = body,
+                    timestamp = now,
+                    direction = ltechnologies.onionphone.securemessenger.core.model.MessageDirection.OUTGOING,
+                    deliveryState = ltechnologies.onionphone.securemessenger.core.model.DeliveryState.SENT,
+                    kind = MessageKind.CALL,
+                    payloadJson = JSONObject()
+                        .put("type", content.action.name.lowercase())
+                        .put("callId", callId)
+                        .toString(),
+                ),
+            )
+            SendResult.Success("${conversationId}_call_out_${content.action}_$now")
+        } catch (e: Exception) {
+            Timber.e(e, "Signal call action failed")
+            SendResult.Failure(e.message ?: "Échec signalisation d'appel")
+        }
+    }
+
+    private suspend fun sendStory(
+        conversationId: String,
+        content: OutgoingContent.Story,
+        accountId: String?,
+    ): SendResult {
+        val accId = accountId ?: this.accountId ?: return SendResult.Failure("Compte non connecté")
+        val activeSession = session ?: return SendResult.Failure("Session Signal indisponible")
+        val profileKey = activeSession.profileKey?.serialize()
+            ?: return SendResult.Failure("Clé de profil Signal manquante pour les stories")
+        val text = content.text?.trim()?.takeIf { it.isNotBlank() }
+        if (text == null && content.attachment?.localPath == null) {
+            return SendResult.Failure("Story vide")
+        }
+        return try {
+            val storyMessage = if (content.attachment?.localPath != null) {
+                val file = File(content.attachment!!.localPath!!)
+                if (!file.exists()) return SendResult.Failure("Fichier story introuvable")
+                val (pointer, _) = uploadLocalAttachment(
+                    activeSession,
+                    file,
+                    content.attachment!!.mimeType.ifBlank { "image/jpeg" },
+                    content.attachment!!.fileName ?: file.name,
+                )
+                org.whispersystems.signalservice.api.messages.SignalServiceStoryMessage.forFileAttachment(
+                    profileKey,
+                    null,
+                    pointer,
+                    content.allowsReplies,
+                    emptyList(),
+                )
+            } else {
+                val textAttachment =
+                    org.whispersystems.signalservice.api.messages.SignalServiceTextAttachment.forSolidBackground(
+                        Optional.of(text!!),
+                        Optional.empty(),
+                        Optional.empty(),
+                        Optional.empty(),
+                        Optional.empty(),
+                        0xFF1B1B1B.toInt(),
+                    )
+                org.whispersystems.signalservice.api.messages.SignalServiceStoryMessage.forTextAttachment(
+                    profileKey,
+                    null,
+                    textAttachment,
+                    content.allowsReplies,
+                    emptyList(),
+                )
+            }
+            val timestamp = System.currentTimeMillis()
+            val peers = repository.listConversationsForAccount(accId)
+                .map { it.remoteId }
+                .filter { !it.startsWith("gv2:") && !it.startsWith("story:") }
+                .distinct()
+                .take(50)
+            val addresses = peers.mapNotNull { runCatching { resolveSignalAddress(it) }.getOrNull() }
+            val unidentified = addresses.map { addr ->
+                resolveUnidentifiedAccessForStory(activeSession, addr)
+            }
+            val manifest = addresses.map {
+                org.whispersystems.signalservice.api.messages.SignalServiceStoryMessageRecipient(
+                    it,
+                    listOf(org.whispersystems.signalservice.api.push.DistributionId.MY_STORY.toString()),
+                    content.allowsReplies,
+                )
+            }.toSet()
+            if (addresses.isNotEmpty()) {
+                activeSession.messageSender.sendGroupStory(
+                    org.whispersystems.signalservice.api.push.DistributionId.MY_STORY,
+                    Optional.empty(),
+                    addresses,
+                    unidentified,
+                    null,
+                    false,
+                    storyMessage,
+                    timestamp,
+                    manifest,
+                    null,
+                )
+            } else {
+                // Sync to linked devices only when no fan-out recipients are known yet.
+                activeSession.messageSender.sendStorySyncMessage(
+                    storyMessage,
+                    timestamp,
+                    false,
+                    emptySet(),
+                )
+            }
+            val remoteId = "story:my"
+            val storyConv = signalConversationId(accId, remoteId)
+            val body = text ?: "📷 Story"
+            repository.upsertConversation(
+                Conversation(
+                    id = storyConv,
+                    protocol = ProtocolId.SIGNAL,
+                    accountId = accId,
+                    remoteId = remoteId,
+                    title = "My Story",
+                    lastMessagePreview = body,
+                    lastMessageAt = timestamp,
+                ),
+            )
+            repository.upsertMessage(
+                Message(
+                    id = "${storyConv}_$timestamp",
+                    conversationId = storyConv,
+                    protocol = ProtocolId.SIGNAL,
+                    body = body,
+                    timestamp = timestamp,
+                    direction = ltechnologies.onionphone.securemessenger.core.model.MessageDirection.OUTGOING,
+                    deliveryState = ltechnologies.onionphone.securemessenger.core.model.DeliveryState.SENT,
+                    kind = MessageKind.STORY,
+                ),
+            )
+            SendResult.Success("${storyConv}_$timestamp")
+        } catch (e: Exception) {
+            Timber.e(e, "Signal story send failed")
+            SendResult.Failure(e.message ?: "Échec envoi story")
         }
     }
 
@@ -1628,21 +1843,31 @@ class SignalProtocol @Inject constructor(
                 )
             val before = repository.countMessages(conversationId)
             val maxBefore = repository.maxMessageTimestamp(conversationId) ?: 0L
-            // Linked devices do not have a server-side history API. When a link-and-sync backup
-            // was downloaded (LINK_SYNC_BACKUP_PATH), we only validate/store the file — full
-            // message import is not implemented. Re-request sync snapshots / Storage Service so
-            // any pending transcripts land via the websocket.
-            val backupPath = credentialStore.get(accId, SignalCredentialKeys.LINK_SYNC_BACKUP_PATH)
-            val backupExists = backupPath?.let { java.io.File(it).exists() } == true
+            val imported = credentialStore.get(accId, SignalCredentialKeys.LINK_SYNC_IMPORTED) == "1"
+            if (!imported) {
+                val active = session
+                if (active != null) {
+                    runCatching {
+                        SignalLinkAndSync.maybeFetchBackup(
+                            context,
+                            accId,
+                            active,
+                            credentialStore,
+                            repository,
+                        )
+                    }
+                }
+            }
             runCatching { requestInitialSyncLocked() }
             runCatching { runStorageSyncLocked(accId) }
             delay(1_500)
             val after = repository.countMessages(conversationId)
             val maxAfter = repository.maxMessageTimestamp(conversationId) ?: 0L
-            val synced = after > before || maxAfter > maxBefore || backupExists
+            val nowImported = credentialStore.get(accId, SignalCredentialKeys.LINK_SYNC_IMPORTED) == "1"
+            val synced = after > before || maxAfter > maxBefore || nowImported
             ltechnologies.onionphone.securemessenger.core.model.HistoryLoadResult.Success(
                 messageCount = after,
-                loadedFromCache = before > 0,
+                loadedFromCache = before > 0 || nowImported,
                 syncedFromNetwork = synced,
             )
         }

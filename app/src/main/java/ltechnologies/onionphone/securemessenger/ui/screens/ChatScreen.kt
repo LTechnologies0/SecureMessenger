@@ -596,6 +596,8 @@ private fun KindChip(kind: MessageKind, expireSeconds: Int?) {
         MessageKind.POLL -> "Sondage"
         MessageKind.CONTACT -> "Contact"
         MessageKind.SYSTEM -> "Système"
+        MessageKind.CALL -> "Appel"
+        MessageKind.STORY -> "Story"
         MessageKind.UNKNOWN -> null
     }
     if (label == null && expireSeconds == null) return

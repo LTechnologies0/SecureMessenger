@@ -714,6 +714,8 @@ class XmppProtocol @Inject constructor(
             SendResult.Failure("Les stickers ne sont pas supportés en XMPP")
         is OutgoingContent.Ephemeral ->
             SendResult.Failure("Les messages éphémères ne sont pas supportés en XMPP")
+        is OutgoingContent.CallAction, is OutgoingContent.Story ->
+            SendResult.Failure("Non supporté en XMPP")
     }
 
     private suspend fun sendLocationContent(

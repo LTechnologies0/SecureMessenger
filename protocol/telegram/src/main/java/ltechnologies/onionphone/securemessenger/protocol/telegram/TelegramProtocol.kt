@@ -938,6 +938,8 @@ class TelegramProtocol @Inject constructor(
                         ?: facade.sendTextMessage(chatId, content.body.value)
                 }
             }
+            is OutgoingContent.CallAction, is OutgoingContent.Story ->
+                return SendResult.Failure("Non supporté par Telegram dans ce client")
         }
     }
 

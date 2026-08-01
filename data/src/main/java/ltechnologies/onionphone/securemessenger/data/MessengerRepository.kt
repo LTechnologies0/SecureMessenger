@@ -116,6 +116,11 @@ class MessengerRepository @Inject constructor(
         }
     }
 
+    suspend fun upsertContacts(contacts: List<Contact>) {
+        if (contacts.isEmpty()) return
+        database.get().contactDao().upsertAll(contacts.map { it.toEntity() })
+    }
+
     suspend fun deleteMessages(ids: List<String>) {
         if (ids.isEmpty()) return
         database.get().messageDao().deleteByIds(ids)

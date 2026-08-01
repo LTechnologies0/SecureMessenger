@@ -51,6 +51,7 @@ internal class SignalSyncEngine(
         messageReceiver = messageReceiver,
         groupHelper = groupHelper,
         protocolStore = session.protocolStore,
+        messageSender = session.messageSender,
         onTyping = onTyping,
         onContactsSynced = onContactsSynced,
         onKeysSynced = onKeysSynced,
