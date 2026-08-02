@@ -177,6 +177,72 @@ def patch_url_extensions() -> None:
     print(f"patched {path.relative_to(ROOT)}")
 
 
+def patch_jackson_kotlin_module() -> None:
+    """Jackson 2.19+ removed KotlinModule()'s no-arg ctor; use Builder."""
+    path = VENDOR / "network-jvm/src/main/java/org/signal/network/util/JsonUtil.java"
+    text = path.read_text()
+    old = "objectMapper.registerModule(new KotlinModule());"
+    new = "objectMapper.registerModule(new KotlinModule.Builder().build());"
+    if new in text:
+        print(f"already patched {path.relative_to(ROOT)}")
+        return
+    if old not in text:
+        die("patch block missing (jackson-kotlin-module)")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path.relative_to(ROOT)}")
+
+
+def patch_nowhere_buffered_sink_okio() -> None:
+    """Okio 3.18+ added BufferedSink.utf8Appendable(); Signal stub lacks it."""
+    path = (
+        VENDOR
+        / "libsignal-service/src/main/java/org/whispersystems/signalservice/internal/push/NowhereBufferedSink.java"
+    )
+    text = path.read_text()
+    if "utf8Appendable()" in text:
+        print(f"already patched {path.relative_to(ROOT)}")
+        return
+    needle = """  @Override
+  public Buffer getBuffer() {
+    return null;
+  }
+}
+"""
+    insert = """  @Override
+  public Buffer getBuffer() {
+    return null;
+  }
+
+  @Override
+  public Appendable utf8Appendable() {
+    return new Appendable() {
+      @Override
+      public Appendable append(CharSequence csq) {
+        return this;
+      }
+
+      @Override
+      public Appendable append(CharSequence csq, int start, int end) {
+        return this;
+      }
+
+      @Override
+      public Appendable append(char c) {
+        return this;
+      }
+    };
+  }
+}
+"""
+    if needle not in text:
+        die("patch block missing (nowhere-buffered-sink-okio)")
+    if "import java.lang.Appendable;" not in text and "import java.lang.Appendable" not in text:
+        # Appendable is java.lang; no import required, but keep file compiling as-is.
+        pass
+    path.write_text(text.replace(needle, insert, 1))
+    print(f"patched {path.relative_to(ROOT)}")
+
+
 def main() -> None:
     if not (VENDOR / "libsignal-service/src").is_dir():
         die("Signal vendor sources missing — run scripts/sync-signal-vendor.sh first")
@@ -192,6 +258,8 @@ def main() -> None:
     patch_push_socket()
     patch_websocket()
     patch_url_extensions()
+    patch_jackson_kotlin_module()
+    patch_nowhere_buffered_sink_okio()
     print("Signal overlays applied.")
 
 
