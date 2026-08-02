@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.6
+
+### Dependencies
+- Library and CI Actions updates via Dependabot (AGP/Kotlin/Compose/Room/Hilt/OkHttp/Jackson and related).
+- Signal vendor overlays adapted for Jackson KotlinModule and Okio 3.18 `utf8Appendable`.
+
 ## 1.0.4
 
 ### Network / Tor
