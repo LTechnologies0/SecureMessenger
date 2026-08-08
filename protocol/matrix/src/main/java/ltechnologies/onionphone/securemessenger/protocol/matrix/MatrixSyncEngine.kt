@@ -13,6 +13,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -36,7 +37,7 @@ class MatrixSyncEngine(
     private val repository: MessengerRepository,
     private val json: Json = Json { ignoreUnknownKeys = true },
 ) {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var job: Job? = null
 
     fun start(
@@ -50,6 +51,9 @@ class MatrixSyncEngine(
         onAuthExpired: () -> Unit = {},
     ) {
         stop()
+        if (!scope.isActive) {
+            scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        }
         job = scope.launch {
             refreshStaleRoomTitles(accountId, userId, client, homeserver, accessToken)
             var nextBatch: String? = since
@@ -83,6 +87,7 @@ class MatrixSyncEngine(
     fun stop() {
         job?.cancel()
         job = null
+        scope.cancel()
     }
 
     private suspend fun processRooms(

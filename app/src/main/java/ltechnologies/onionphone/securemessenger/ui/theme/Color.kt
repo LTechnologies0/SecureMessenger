@@ -17,6 +17,9 @@ val TertiaryAmberDark = Color(0xFFFFD54F)
 /** Signal protocol accent (official-ish blue, distinct from primary). */
 val SignalBlue = Color(0xFF3A76F0)
 
+/** Email protocol accent. */
+val EmailRose = Color(0xFFC2185B)
+
 val SurfaceLight = Color(0xFFF8F9FF)
 val SurfaceDark = Color(0xFF121318)
 val SurfaceContainerLight = Color(0xFFEEEFF8)

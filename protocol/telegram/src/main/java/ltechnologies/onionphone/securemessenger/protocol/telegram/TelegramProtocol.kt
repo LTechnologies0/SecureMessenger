@@ -274,8 +274,7 @@ class TelegramProtocol @Inject constructor(
         val msg = update.lastMessage ?: return
         val domain = TdLibMapper.toMessage(accId, msg)
         updateScope.launch {
-            val existing = repository.observeConversations().first()
-                .firstOrNull { it.id == domain.conversationId }
+            val existing = repository.getConversation(domain.conversationId)
             repository.upsertMessage(domain)
             repository.upsertConversation(
                 Conversation(
@@ -295,7 +294,7 @@ class TelegramProtocol @Inject constructor(
     private fun onChatTitle(accId: String, chatId: Long, title: String) {
         val convId = TdLibMapper.conversationId(accId, chatId)
         updateScope.launch {
-            val existing = repository.observeConversations().first().firstOrNull { it.id == convId }
+            val existing = repository.getConversation(convId)
             if (existing != null) {
                 repository.upsertConversation(existing.copy(title = title))
             }
@@ -305,7 +304,7 @@ class TelegramProtocol @Inject constructor(
     private fun onChatReadInbox(accId: String, chatId: Long, unreadCount: Int) {
         val convId = TdLibMapper.conversationId(accId, chatId)
         updateScope.launch {
-            val existing = repository.observeConversations().first().firstOrNull { it.id == convId }
+            val existing = repository.getConversation(convId)
             if (existing != null) {
                 repository.upsertConversation(existing.copy(unreadCount = unreadCount))
             }
@@ -327,7 +326,7 @@ class TelegramProtocol @Inject constructor(
         val convId = TdLibMapper.conversationId(accId, update.message.chatId)
         val id = TdLibMapper.messageId(convId, update.oldMessageId)
         updateScope.launch {
-            val existing = repository.observeMessages(convId).first().firstOrNull { it.id == id }
+            val existing = repository.getMessage(id)
             if (existing != null) {
                 repository.upsertMessage(existing.copy(deliveryState = DeliveryState.FAILED))
             }
@@ -353,7 +352,7 @@ class TelegramProtocol @Inject constructor(
         val kind = TdLibMapper.messageKind(content)
         val payload = TdLibMapper.payloadJson(content)
         updateScope.launch {
-            val existing = repository.observeMessages(convId).first().firstOrNull { it.id == id }
+            val existing = repository.getMessage(id)
             if (existing != null) {
                 repository.upsertMessage(
                     existing.copy(
@@ -371,9 +370,7 @@ class TelegramProtocol @Inject constructor(
         val session = sessions[accId] ?: return
         val target = session.fileDownloads[file.id] ?: return
         updateScope.launch {
-            val convId = target.messageId.substringBeforeLast('_')
-            val messages = repository.observeMessages(convId).first()
-            val existing = messages.firstOrNull { it.id == target.messageId } ?: return@launch
+            val existing = repository.getMessage(target.messageId) ?: return@launch
             val updatedAttachments = existing.attachments.map { att ->
                 if (att.id != target.attachmentId) {
                     att
@@ -400,8 +397,7 @@ class TelegramProtocol @Inject constructor(
 
     private fun persistMessage(accId: String, message: Message, chatId: Long) {
         updateScope.launch {
-            val existing = repository.observeConversations().first()
-                .firstOrNull { it.id == message.conversationId }
+            val existing = repository.getConversation(message.conversationId)
             repository.upsertMessage(message)
             repository.upsertConversation(
                 Conversation(
@@ -681,20 +677,19 @@ class TelegramProtocol @Inject constructor(
             val (localRaw, remoteRaw) = session.facade.fetchFullChatHistory(
                 chatId = chatId,
                 pageSize = HISTORY_PAGE_SIZE,
+                maxPages = HISTORY_MAX_PAGES,
                 syncRemote = syncRemote,
                 onPage = ::persistPage,
             )
             val inDb = withContext(Dispatchers.IO) {
-                repository.observeMessages(conversationId).first().size
+                repository.countMessages(conversationId)
             }
             Timber.i(
                 "History chat=$chatId localRaw=$localRaw remoteRaw=$remoteRaw persisted=$persisted inDb=$inDb",
             )
 
             val latestId = withContext(Dispatchers.IO) {
-                repository.observeMessages(conversationId).first()
-                    .maxByOrNull { it.timestamp }
-                    ?.id
+                repository.latestMessageId(conversationId)
                     ?.substringAfterLast('_')
                     ?.toLongOrNull()
             }
@@ -743,15 +738,60 @@ class TelegramProtocol @Inject constructor(
         val accId = accountId ?: sessions.keys.singleOrNull()
             ?: return SendResult.Failure("Not connected")
         val session = sessions[accId] ?: return SendResult.Failure("Not connected")
+        val trimmed = remoteId.trim()
+
+        if (asGroup) {
+            val createParts = parseTelegramGroupCreate(trimmed)
+            if (createParts != null) {
+                val (title, userIds) = createParts
+                val created = withContext(session.dispatcher) {
+                    session.facade.createNewBasicGroupChat(title, userIds)
+                } ?: return SendResult.Failure(
+                    "Impossible de créer le groupe Telegram « $title »",
+                )
+                val convId = TdLibMapper.conversationId(accId, created.id)
+                repository.upsertConversation(TdLibMapper.toConversation(accId, created))
+                return if (initialMessage != null) {
+                    when (val send = sendMessage(convId, initialMessage, accId)) {
+                        is SendResult.Failure -> send
+                        else -> SendResult.Success(convId)
+                    }
+                } else {
+                    SendResult.Success(convId)
+                }
+            }
+            // Open existing group/channel — do not fail immediately.
+            val chat = withContext(session.dispatcher) {
+                val asChatId = trimmed.toLongOrNull()
+                if (asChatId != null) {
+                    session.facade.getChat(asChatId)
+                } else {
+                    session.facade.searchPublicChat(trimmed)
+                }
+            } ?: return SendResult.Failure(
+                "Groupe Telegram introuvable : $trimmed " +
+                    "(chat ID / @canal, ou Titre|userId1,userId2 pour créer)",
+            )
+            val convId = TdLibMapper.conversationId(accId, chat.id)
+            repository.upsertConversation(TdLibMapper.toConversation(accId, chat))
+            return if (initialMessage != null) {
+                when (val send = sendMessage(convId, initialMessage, accId)) {
+                    is SendResult.Failure -> send
+                    else -> SendResult.Success(convId)
+                }
+            } else {
+                SendResult.Success(convId)
+            }
+        }
 
         val chat = withContext(session.dispatcher) {
-            val asChatId = remoteId.toLongOrNull()
+            val asChatId = trimmed.toLongOrNull()
             if (asChatId != null) {
                 session.facade.getChat(asChatId)
             } else {
-                session.facade.searchPublicChat(remoteId)
+                session.facade.searchPublicChat(trimmed)
             }
-        } ?: return SendResult.Failure("Utilisateur ou chat introuvable : $remoteId")
+        } ?: return SendResult.Failure("Utilisateur ou chat introuvable : $trimmed")
 
         val convId = TdLibMapper.conversationId(accId, chat.id)
         repository.upsertConversation(TdLibMapper.toConversation(accId, chat))
@@ -763,6 +803,21 @@ class TelegramProtocol @Inject constructor(
         } else {
             SendResult.Success(convId)
         }
+    }
+
+    /** Parses `Title|+userId1,+userId2` / `Title|123,456` (positive Telegram user ids). */
+    private fun parseTelegramGroupCreate(remoteId: String): Pair<String, LongArray>? {
+        val sep = remoteId.indexOf('|')
+        if (sep <= 0) return null
+        val title = remoteId.substring(0, sep).trim()
+        if (title.isEmpty()) return null
+        val ids = remoteId.substring(sep + 1)
+            .split(',')
+            .map { it.trim().removePrefix("+") }
+            .filter { it.isNotEmpty() }
+            .mapNotNull { it.toLongOrNull()?.takeIf { id -> id > 0L } }
+        if (ids.isEmpty()) return null
+        return title to ids.toLongArray()
     }
 
     override suspend fun sendMessage(conversationId: String, body: SanitizedText, accountId: String?): SendResult {
@@ -883,6 +938,8 @@ class TelegramProtocol @Inject constructor(
                         ?: facade.sendTextMessage(chatId, content.body.value)
                 }
             }
+            is OutgoingContent.CallAction, is OutgoingContent.Story ->
+                return SendResult.Failure("Non supporté par Telegram dans ce client")
         }
     }
 
@@ -1223,9 +1280,7 @@ class TelegramProtocol @Inject constructor(
         val chatId = TdLibMapper.chatIdFromConversation(conversationId) ?: return
         val tdMessageId = messageId?.substringAfterLast('_')?.toLongOrNull()
             ?: withContext(Dispatchers.IO) {
-                repository.observeMessages(conversationId).first()
-                    .maxByOrNull { it.timestamp }
-                    ?.id
+                repository.latestMessageId(conversationId)
                     ?.substringAfterLast('_')
                     ?.toLongOrNull()
             }
@@ -1293,6 +1348,7 @@ class TelegramProtocol @Inject constructor(
             }
             toClose.forEach { (id, session) ->
                 tearDownSession(session)
+                typingFlows.keys.filter { it.startsWith("${id}_") }.forEach { typingFlows.remove(it) }
                 if (authenticatingAccountId == id) {
                     authenticatingAccountId = null
                     _pendingAuthStep.value = null
@@ -1305,6 +1361,9 @@ class TelegramProtocol @Inject constructor(
                         connectionState = ConnectionState.DISCONNECTED,
                     ),
                 )
+            }
+            if (accountId == null) {
+                typingFlows.clear()
             }
             refreshConnectionState()
         }
@@ -1332,6 +1391,7 @@ class TelegramProtocol @Inject constructor(
 
     companion object {
         private const val HISTORY_PAGE_SIZE = 100
+        private const val HISTORY_MAX_PAGES = 20
         private const val CHAT_SYNC_LIMIT = 200
 
         fun conversationIdFor(accountId: String, chatId: Long) =

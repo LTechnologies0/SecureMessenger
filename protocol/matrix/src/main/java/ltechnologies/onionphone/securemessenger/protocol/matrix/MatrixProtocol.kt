@@ -443,7 +443,7 @@ class MatrixProtocol @Inject constructor(
                         "Historique Matrix nécessite une session Trixnity E2EE",
                     )
                 val persisted = engine.loadHistory(accId, roomId, limit = 50)
-                val inDb = repository.observeMessages(conversationId).first().size
+                val inDb = repository.countMessages(conversationId)
                 HistoryLoadResult.Success(
                     messageCount = inDb.coerceAtLeast(persisted),
                     loadedFromCache = inDb > 0,
@@ -472,24 +472,36 @@ class MatrixProtocol @Inject constructor(
         initialMessage: SanitizedText?,
         accountId: String?,
         asGroup: Boolean,
-    ): SendResult {
-        val accId = accountId ?: sessions.keys.singleOrNull() ?: return SendResult.Failure("Not connected")
-        val convId = conversationIdFor(accId, remoteId)
+    ): SendResult = withContext(Dispatchers.IO) {
+        val accId = accountId ?: sessions.keys.singleOrNull()
+            ?: return@withContext SendResult.Failure("Not connected")
+        val session = sessions[accId]
+            ?: return@withContext SendResult.Failure("Not connected")
+        val engine = session.trixnityEngine
+            ?: return@withContext SendResult.Failure("Création de conversation Matrix nécessite Trixnity E2EE")
+        val roomId = engine.ensureRoom(remoteId, asGroup).getOrElse {
+            return@withContext SendResult.Failure(
+                it.message ?: "Impossible de créer/rejoindre la room Matrix",
+            )
+        }
+        val convId = conversationIdFor(accId, roomId)
         val title = when {
             remoteId.startsWith("@") -> remoteId
+            remoteId.startsWith("#") -> remoteId
             remoteId.startsWith("!") -> "Conversation Matrix"
-            else -> remoteId
+            asGroup -> remoteId
+            else -> roomId
         }
         repository.upsertConversation(
             Conversation(
                 id = convId,
                 protocol = ProtocolId.MATRIX,
                 accountId = accId,
-                remoteId = remoteId,
+                remoteId = roomId,
                 title = title,
             ),
         )
-        return if (initialMessage != null) {
+        if (initialMessage != null) {
             when (val send = sendMessage(convId, initialMessage, accId)) {
                 is SendResult.Failure -> send
                 else -> SendResult.Success(convId)

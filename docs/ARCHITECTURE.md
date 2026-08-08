@@ -1,6 +1,6 @@
 # SecureMessenger — Architecture
 
-SecureMessenger is a **12-module** Gradle project. Every network path — regardless of protocol — flows through a single Tor SOCKS5 proxy layer enforced by `core/network`. Protocol adapters never talk to the internet directly.
+SecureMessenger is a **13-module** Gradle project. Every network path — regardless of protocol — flows through a single Tor SOCKS5 proxy layer enforced by `core/network`. Protocol adapters never talk to the internet directly.
 
 ## Module graph
 
@@ -17,6 +17,7 @@ flowchart TB
     MATRIX[:protocol/matrix]
     TG[:protocol/telegram]
     SIGNAL[:protocol/signal]
+    EMAIL[:protocol/email]
 
     APP --> DATA
     APP --> PAPI
@@ -26,17 +27,19 @@ flowchart TB
     MATRIX --> PAPI
     TG --> PAPI
     SIGNAL --> PAPI
+    EMAIL --> PAPI
     PAPI --> MODEL
     PAPI --> PROXY
     XMPP --> PROXY
     MATRIX --> PROXY
     TG --> PROXY
     SIGNAL --> PROXY
+    EMAIL --> PROXY
     DATA --> SEC
     DATA --> MODEL
 ```
 
-## Protocol feature grid (1.0.0-alpha.3)
+## Protocol feature grid
 
 | Protocole | Connexion | Envoi | Réception | Groupes | Médias | E2EE | Inscription |
 |-----------|-----------|-------|-----------|---------|--------|------|-------------|
@@ -44,12 +47,15 @@ flowchart TB
 | Matrix | OK + SSO | OK | OK | OK | Trixnity upload + mxc download | Megolm (H2 `fromStore`, fail-closed) | OK (Tor) |
 | Telegram | OK* | OK | OK | OK | TDLib send/receive | MTProto (cloud)† | OK (Tor fail-closed) |
 | Signal | OK | OK | OK WS | GV2 sender-key (+ encrypted fan-out) | CDN upload/download | libsignal store (sessions/SK) | OK (Tor) |
+| Email | OK | SMTP/JMAP | IMAP IDLE / POP3 / JMAP | — | MIME attachments | — (OpenPGP out of scope) | — |
 
 \* Requires prebuilt TDLib AAR with `libtdjni.so` for packaged ABIs ([docs/tdlib-build.md](tdlib-build.md)). Debug APKs include `arm64-v8a` + `x86_64` by default (Waydroid/emulators).
 
 † Telegram cloud chats use MTProto (client↔server). Secret chats are not exposed in this build.
 
-Toutes les inscriptions et le trafic protocolaire passent par Tor (SOCKS5 fail-closed). Discord a été retiré du projet.
+Email details: [docs/email.md](email.md). Password auth only; autoconfig via Thunderbird ISPDB + DNS SRV (DoH).
+
+Toutes les inscriptions et le trafic protocolaire passent par Tor (SOCKS5 fail-closed) lorsque Tor est activé. Discord a été retiré du projet.
 
 Matrix E2EE is **fail-closed**: connect / SSO succeeds only when Trixnity is live; plaintext HTTP `/sync` is stopped once Trixnity owns the session. OIDC homeservers use `m.login.sso` → Tor WebView → one-shot `loginToken` → soft-login (never reuse `m.login.token` with an access token).
 
@@ -72,11 +78,12 @@ Signal GV2 prefers sender keys; if endorsements/certificates are unavailable it 
 | `:protocol:matrix` | Raw Matrix Client-Server API client, well-known discovery, UIA registration + WebView fallback |
 | `:protocol:telegram` | TDLib JNI bindings (see [docs/tdlib-build.md](tdlib-build.md)) |
 | `:protocol:signal` | Signal adapter (`libsignal-service` + `libsignal-client`) — see [docs/signal-vendor.md](signal-vendor.md) |
+| `:protocol:email` | Angus Mail IMAP/POP3/SMTP + JMAP HTTPS — see [docs/email.md](email.md) |
 
 ## Network flow (every protocol)
 
 ```
-Protocol adapter (Matrix / XMPP / Telegram / Signal*)
+Protocol adapter (Matrix / XMPP / Telegram / Signal / Email*)
         ↓
 core/proxy — OnionVpnPacClient (GET http://127.0.0.1:18201/onionvpn.pac)
            → SOCKS5 127.0.0.1:18202 (DNSCrypt→Tor bridge)
@@ -86,7 +93,7 @@ core/network — NetworkGuard (blocks only when Tor is opted-in and SOCKS is dow
 OnionVPN PAC bridge → Tor → destination
 ```
 
-\* Default Tor provider is OnionVPN PAC (`:18201` / SOCKS `:18202`). Custom SOCKS remains selectable. Orbot / InviZible removed. When Tor is on, Signal uses `SignalSocksHolder` like other protocols.
+\* Default Tor provider is OnionVPN PAC (`:18201` / SOCKS `:18202`). Custom SOCKS remains selectable. Orbot / InviZible removed. When Tor is on, Signal uses `SignalSocksHolder` like other protocols; Email uses Angus `mail.*.socks.*` properties and SOCKS OkHttp for JMAP.
 
 Matrix and XMPP UIA/registration steps that require a browser (captcha, email verification, terms acceptance) open an in-app WebView that is force-routed through the same Tor proxy via `androidx.webkit.ProxyController` — no direct network path ever exists for any component, including the WebView.
 

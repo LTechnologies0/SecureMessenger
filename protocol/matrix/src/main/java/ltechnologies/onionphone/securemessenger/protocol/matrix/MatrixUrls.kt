@@ -92,6 +92,7 @@ internal object MatrixUrls {
                 ?.trim()
                 ?.trimEnd('/')
                 ?.takeIf { it.isNotBlank() }
+                ?.let { runCatching { normalizeHomeserver(it) }.getOrNull() }
         } catch (e: Exception) {
             Timber.w(e, "Matrix well-known discovery failed for $normalizedServer")
             null

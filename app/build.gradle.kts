@@ -71,6 +71,10 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
             excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
+            excludes += "META-INF/LICENSE.md"
+            excludes += "META-INF/NOTICE.md"
+            excludes += "META-INF/LICENSE.txt"
+            excludes += "META-INF/NOTICE.txt"
         }
     }
 }
@@ -94,6 +98,7 @@ dependencies {
     }
     implementation(files(tdlibAar))
     implementation(project(":protocol:signal"))
+    implementation(project(":protocol:email"))
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
