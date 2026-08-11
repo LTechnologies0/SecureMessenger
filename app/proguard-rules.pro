@@ -30,3 +30,38 @@
 -keep class org.drinkless.tdlib.** { *; }
 -keepclassmembers class org.drinkless.tdlib.** { *; }
 -keepclasseswithmembernames class * { native <methods>; }
+
+# Kitteh IRC (Netty + MBassador). Optional backends are not on Android classpath.
+-keep class org.kitteh.irc.** { *; }
+-keep class net.engio.mbassy.** { *; }
+-keep class io.netty.** { *; }
+-dontwarn org.kitteh.irc.**
+-dontwarn net.engio.mbassy.**
+-dontwarn io.netty.**
+-dontwarn io.netty.internal.tcnative.**
+-dontwarn org.apache.log4j.**
+-dontwarn org.apache.logging.log4j.**
+-dontwarn org.eclipse.jetty.**
+-dontwarn javax.el.**
+-dontwarn reactor.blockhound.**
+
+# H2 (Matrix Trixnity store) — optional JVM APIs unused on Android
+-dontwarn org.h2.**
+-dontwarn java.lang.management.**
+-dontwarn javax.naming.**
+-dontwarn javax.script.**
+-dontwarn javax.security.auth.**
+-dontwarn javax.tools.**
+-dontwarn javax.xml.stream.**
+-dontwarn javax.xml.transform.stax.**
+-dontwarn jdk.net.**
+-dontwarn org.locationtech.jts.**
+
+# Angus Mail / Jakarta Mail (Email protocol)
+-keep class org.eclipse.angus.** { *; }
+-keep class jakarta.mail.** { *; }
+-keep class jakarta.activation.** { *; }
+-dontwarn org.eclipse.angus.**
+-dontwarn jakarta.mail.**
+-dontwarn jakarta.activation.**
+-dontwarn com.sun.mail.**
