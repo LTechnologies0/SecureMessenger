@@ -1,16 +1,22 @@
 # Changelog
 
-## Unreleased
+## 1.0.7
 
 ### Bug fixes
 - Room crash on unlock / add-account (v1.0.6): `contacts.accountId` index from migration 3→4
   is declared on `ContactEntity` (schema v5), so Expected/Found indices match.
+- IRC login: remove duplicate Kitteh `connect()` that always failed.
+- App packaging: exclude Netty `META-INF/io.netty.versions.properties` so release/debug APKs assemble.
+- Email autoconfig: invalid address no longer leaves the detect button stuck busy.
 
 ### Protocols
 - **Email** (merged #9): IMAP / POP3 / JMAP + SMTP with autoconfig, Tor SOCKS.
 - **IRC** (Kitteh): TLS/cleartext, SOCKS5 via Tor, NickServ/SASL PLAIN, channels + DMs,
   NOTICE/TOPIC/JOIN/PART/KICK as system messages, auto-join channels, contacts from NAMES.
 - Signal secondary-device gaps (link-sync import, call/story signaling) from #9.
+
+### Docs
+- Architecture / README updated for Email + IRC; new `docs/irc.md`.
 
 ## 1.0.6
 
