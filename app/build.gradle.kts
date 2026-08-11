@@ -99,6 +99,7 @@ dependencies {
     implementation(files(tdlibAar))
     implementation(project(":protocol:signal"))
     implementation(project(":protocol:email"))
+    implementation(project(":protocol:irc"))
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)

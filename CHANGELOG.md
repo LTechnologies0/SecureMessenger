@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Bug fixes
+- Room crash on unlock / add-account (v1.0.6): `contacts.accountId` index from migration 3→4
+  is declared on `ContactEntity` (schema v5), so Expected/Found indices match.
+
+### Protocols
+- **Email** (merged #9): IMAP / POP3 / JMAP + SMTP with autoconfig, Tor SOCKS.
+- **IRC** (Kitteh): TLS/cleartext, SOCKS5 via Tor, NickServ/SASL PLAIN, channels + DMs,
+  NOTICE/TOPIC/JOIN/PART/KICK as system messages, auto-join channels, contacts from NAMES.
+- Signal secondary-device gaps (link-sync import, call/story signaling) from #9.
+
 ## 1.0.6
 
 ### Dependencies

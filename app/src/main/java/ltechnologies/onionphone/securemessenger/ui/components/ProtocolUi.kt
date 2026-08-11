@@ -36,6 +36,7 @@ import ltechnologies.onionphone.securemessenger.ui.theme.ConnectedGreen
 import ltechnologies.onionphone.securemessenger.ui.theme.ConnectedGreenDark
 import ltechnologies.onionphone.securemessenger.ui.theme.ConnectingAmber
 import ltechnologies.onionphone.securemessenger.ui.theme.EmailRose
+import ltechnologies.onionphone.securemessenger.ui.theme.IrcGreen
 import ltechnologies.onionphone.securemessenger.ui.theme.PrimaryBlue
 import ltechnologies.onionphone.securemessenger.ui.theme.SecondaryTeal
 import ltechnologies.onionphone.securemessenger.ui.theme.SignalBlue
@@ -47,6 +48,7 @@ fun protocolShortPrefix(protocol: ProtocolId): String = when (protocol) {
     ProtocolId.XMPP -> "XMPP"
     ProtocolId.SIGNAL -> "Signal"
     ProtocolId.EMAIL -> "Mail"
+    ProtocolId.IRC -> "IRC"
 }
 
 fun protocolDisplayName(protocol: ProtocolId): String = when (protocol) {
@@ -55,6 +57,7 @@ fun protocolDisplayName(protocol: ProtocolId): String = when (protocol) {
     ProtocolId.XMPP -> "XMPP"
     ProtocolId.SIGNAL -> "Signal"
     ProtocolId.EMAIL -> "Email"
+    ProtocolId.IRC -> "IRC"
 }
 
 fun accountRailLabel(account: Account, indexAmongProtocol: Int): String {
@@ -68,6 +71,7 @@ fun protocolAccentColor(protocol: ProtocolId): Color = when (protocol) {
     ProtocolId.XMPP -> TertiaryAmber
     ProtocolId.SIGNAL -> SignalBlue
     ProtocolId.EMAIL -> EmailRose
+    ProtocolId.IRC -> IrcGreen
 }
 
 fun protocolIcon(protocol: ProtocolId): ImageVector = when (protocol) {
@@ -76,6 +80,7 @@ fun protocolIcon(protocol: ProtocolId): ImageVector = when (protocol) {
     ProtocolId.XMPP -> Icons.AutoMirrored.Filled.Chat
     ProtocolId.SIGNAL -> Icons.AutoMirrored.Filled.Chat
     ProtocolId.EMAIL -> Icons.Default.Email
+    ProtocolId.IRC -> Icons.Default.Forum
 }
 
 fun connectionStateLabel(state: ConnectionState): String = when (state) {

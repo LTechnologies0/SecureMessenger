@@ -35,6 +35,7 @@ include(
     ":protocol:telegram",
     ":protocol:signal",
     ":protocol:email",
+    ":protocol:irc",
     ":vendor:signal:util-jvm",
     ":vendor:signal:models-jvm",
     ":vendor:signal:network-jvm",

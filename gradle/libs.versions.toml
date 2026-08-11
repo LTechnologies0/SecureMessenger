@@ -41,6 +41,8 @@ kotlin-serialization = "1.11.0"
 desugar = "2.1.5"
 angus-mail = "2.0.3"
 angus-activation = "2.0.2"
+kitteh-irc = "9.0.0"
+netty = "4.1.104.Final"
 
 junit = "4.13.2"
 androidx-test-ext = "1.3.0"
@@ -98,6 +100,11 @@ smack-extensions = { group = "org.igniterealtime.smack", name = "smack-extension
 smack-im = { group = "org.igniterealtime.smack", name = "smack-im", version.ref = "smack" }
 smack-omemo = { group = "org.igniterealtime.smack", name = "smack-omemo", version.ref = "smack" }
 smack-experimental = { group = "org.igniterealtime.smack", name = "smack-experimental", version.ref = "smack" }
+
+kitteh-irc = { group = "org.kitteh.irc", name = "client-lib", version.ref = "kitteh-irc" }
+netty-codec = { group = "io.netty", name = "netty-codec", version.ref = "netty" }
+netty-handler = { group = "io.netty", name = "netty-handler", version.ref = "netty" }
+netty-handler-proxy = { group = "io.netty", name = "netty-handler-proxy", version.ref = "netty" }
 
 trixnity-bom = { group = "net.folivo", name = "trixnity-bom", version.ref = "trixnity" }
 trixnity-client-jvm = { group = "net.folivo", name = "trixnity-client-jvm", version.ref = "trixnity" }

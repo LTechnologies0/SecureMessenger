@@ -90,6 +90,9 @@ fun NewChatScreen(
             "gv2:… ou Titre|+33…,+44… / Titre|aci,aci"
         protocol == ProtocolId.SIGNAL -> "Numéro E.164 (+33…) ou ACI"
         protocol == ProtocolId.EMAIL -> "Adresse email (user@domain)"
+        protocol == ProtocolId.IRC && asGroup ->
+            "Canal (#libera, #securemessenger…)"
+        protocol == ProtocolId.IRC -> "Nick IRC"
         else -> "Identifiant distant"
     }
 
@@ -115,6 +118,11 @@ fun NewChatScreen(
             "Format international obligatoire (+…)"
         }
         ProtocolId.EMAIL -> "Exemple : ami@example.com"
+        ProtocolId.IRC -> if (asGroup) {
+            "JOIN automatique au canal"
+        } else {
+            "PRIVMSG vers un nick"
+        }
     }
 
     Scaffold(
@@ -191,6 +199,7 @@ fun NewChatScreen(
                                 ProtocolId.TELEGRAM -> "Groupe"
                                 ProtocolId.SIGNAL -> "Groupe"
                                 ProtocolId.EMAIL -> "Groupe"
+                                ProtocolId.IRC -> "Canal"
                             },
                         )
                     }

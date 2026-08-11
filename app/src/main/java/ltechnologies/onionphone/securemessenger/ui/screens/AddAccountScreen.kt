@@ -65,6 +65,12 @@ fun AddAccountScreen(
             subtitle = "JID + mot de passe",
             onClick = { onPickProtocol(ProtocolId.XMPP) },
         ),
+        ProtocolChoice(
+            protocol = ProtocolId.IRC,
+            title = "IRC",
+            subtitle = "Serveur + nick (TLS / NickServ / canaux)",
+            onClick = { onPickProtocol(ProtocolId.IRC) },
+        ),
     ).filter { it.protocol in FeatureFlags.enabled }
 
     Column(

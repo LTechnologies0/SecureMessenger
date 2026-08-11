@@ -50,6 +50,8 @@ dependencies {
     dokka(project(":protocol:matrix"))
     dokka(project(":protocol:telegram"))
     dokka(project(":protocol:signal"))
+    dokka(project(":protocol:email"))
+    dokka(project(":protocol:irc"))
     dokka(project(":vendor:signal:libsignal-service"))
 }
 

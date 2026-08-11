@@ -53,6 +53,9 @@ fun AccountsScreen(
     var field1 by remember { mutableStateOf("") }
     var field2 by remember { mutableStateOf("") }
     var field3 by remember { mutableStateOf("") }
+    var field4 by remember { mutableStateOf("") }
+    var field5 by remember { mutableStateOf("") }
+    var ircTls by remember { mutableStateOf(true) }
     var statusMessage by remember { mutableStateOf<String?>(null) }
     val accounts by viewModel.accounts.collectAsState()
 
@@ -180,7 +183,11 @@ fun AccountsScreen(
 
         Text("Protocole : ${selectedProtocol.name}")
 
-        if (selectedProtocol != ProtocolId.TELEGRAM) {
+        if (selectedProtocol != ProtocolId.TELEGRAM &&
+            selectedProtocol != ProtocolId.IRC &&
+            selectedProtocol != ProtocolId.EMAIL &&
+            selectedProtocol != ProtocolId.SIGNAL
+        ) {
             TextButton(
                 onClick = {
                     mode = if (mode == FormMode.LOGIN) FormMode.REGISTER else FormMode.LOGIN
@@ -217,15 +224,51 @@ fun AccountsScreen(
                     OutlinedTextField(field2, { field2 = it }, label = { Text("User ID (@user:server, optionnel si SSO)") }, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(field3, { field3 = it }, label = { Text("Password / access token (vide = SSO)") }, modifier = Modifier.fillMaxWidth())
                 }
+                ProtocolId.IRC -> {
+                    OutlinedTextField(field1, { field1 = it }, label = { Text("Serveur (ex. irc.libera.chat)") }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(field2, { field2 = it }, label = { Text("Nick") }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(
+                        field3,
+                        { field3 = it },
+                        label = { Text("Port (6697 TLS / 6667 clair)") },
+                        modifier = Modifier.fillMaxWidth(),
+                        placeholder = { Text("6697") },
+                    )
+                    OutlinedTextField(
+                        field4,
+                        { field4 = it },
+                        label = { Text("Mot de passe NickServ / SASL (optionnel)") },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    OutlinedTextField(
+                        field5,
+                        { field5 = it },
+                        label = { Text("Canaux auto-join (#chan1,#chan2)") },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    TextButton(onClick = { ircTls = !ircTls }) {
+                        Text(if (ircTls) "TLS : activé" else "TLS : désactivé")
+                    }
+                }
                 ProtocolId.TELEGRAM -> {
                     Text("Utilisez l'écran Telegram dédié depuis « Ajouter un compte ».")
                 }
-                else -> Text("Protocol not enabled in this build.")
+                ProtocolId.SIGNAL -> {
+                    Text("Utilisez l'écran Signal dédié depuis « Ajouter un compte ».")
+                }
+                ProtocolId.EMAIL -> {
+                    Text("Utilisez l'écran Email dédié depuis « Ajouter un compte ».")
+                }
             }
 
             Button(
                 onClick = {
-                    if (selectedProtocol == ProtocolId.TELEGRAM) return@Button
+                    if (selectedProtocol == ProtocolId.TELEGRAM ||
+                        selectedProtocol == ProtocolId.SIGNAL ||
+                        selectedProtocol == ProtocolId.EMAIL
+                    ) {
+                        return@Button
+                    }
                     val secrets = when (selectedProtocol) {
                         ProtocolId.XMPP -> mapOf(
                             "jid" to field1.trim(),
@@ -244,8 +287,18 @@ fun AccountsScreen(
                                 }
                             }
                         }
-                        ProtocolId.TELEGRAM -> emptyMap()
-                        else -> emptyMap()
+                        ProtocolId.IRC -> buildMap {
+                            put("host", field1.trim())
+                            put("nick", field2.trim())
+                            put("port", field3.trim().ifBlank { "6697" })
+                            put("tls", ircTls.toString())
+                            if (field4.isNotBlank()) put("nickServPassword", field4)
+                            if (field5.isNotBlank()) put("channels", field5.trim())
+                        }
+                        ProtocolId.TELEGRAM,
+                        ProtocolId.SIGNAL,
+                        ProtocolId.EMAIL,
+                        -> emptyMap()
                     }
                     val creds = AccountCredentials(
                         protocol = selectedProtocol,
@@ -276,7 +329,9 @@ fun AccountsScreen(
                     }
                 },
                 modifier = Modifier.fillMaxWidth(),
-                enabled = selectedProtocol != ProtocolId.TELEGRAM,
+                enabled = selectedProtocol != ProtocolId.TELEGRAM &&
+                    selectedProtocol != ProtocolId.SIGNAL &&
+                    selectedProtocol != ProtocolId.EMAIL,
             ) {
                 Text("Connect")
             }

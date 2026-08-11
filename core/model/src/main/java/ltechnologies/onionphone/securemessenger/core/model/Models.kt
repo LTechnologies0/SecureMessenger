@@ -6,6 +6,7 @@ enum class ProtocolId {
     TELEGRAM,
     SIGNAL,
     EMAIL,
+    IRC,
 }
 
 object FeatureFlags {
@@ -15,6 +16,7 @@ object FeatureFlags {
         ProtocolId.TELEGRAM,
         ProtocolId.SIGNAL,
         ProtocolId.EMAIL,
+        ProtocolId.IRC,
     )
 }
 
