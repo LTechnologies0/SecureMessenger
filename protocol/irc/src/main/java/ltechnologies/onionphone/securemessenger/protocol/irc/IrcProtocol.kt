@@ -100,8 +100,14 @@ class IrcProtocol @Inject constructor(
 
                 val host = account.secrets["host"]?.trim().orEmpty()
                 val nick = account.secrets["nick"]?.trim().orEmpty()
-                if (host.isBlank()) return@withContext ConnectionResult.Failure("Missing IRC host")
-                if (nick.isBlank()) return@withContext ConnectionResult.Failure("Missing IRC nick")
+                if (host.isBlank()) {
+                    refreshConnectionState()
+                    return@withContext ConnectionResult.Failure("Missing IRC host")
+                }
+                if (nick.isBlank()) {
+                    refreshConnectionState()
+                    return@withContext ConnectionResult.Failure("Missing IRC nick")
+                }
 
                 val port = account.secrets["port"]?.toIntOrNull() ?: 6697
                 val tlsSecret = account.secrets["tls"] ?: account.secrets["useTls"]
@@ -141,7 +147,12 @@ class IrcProtocol @Inject constructor(
                             Client.Builder.Server.SecurityType.INSECURE
                         },
                     )
-                    .apply { if (serverPassword != null) password(serverPassword) }
+                    .apply {
+                        if (serverPassword != null) password(serverPassword)
+                        // Required for Libera / Let's Encrypt and most public networks — Kitteh's
+                        // built-in trust defaults reject popular CAs until a TMF is supplied.
+                        if (useTls) secureTrustManagerFactory(IrcTls.systemTrustManagerFactory())
+                    }
                     .then()
                 builder.listeners()
                     .exception { e ->
@@ -203,10 +214,11 @@ class IrcProtocol @Inject constructor(
                 }
 
                 if (connectedOk != true) {
-                    val reason = runCatching { fail.getCompleted().message }.getOrNull()
+                    val cause = runCatching { fail.getCompleted() }.getOrNull()
+                    val reason = cause?.let { formatTlsFailure(it) }
                         ?: "IRC connection timed out"
                     sessions.remove(account.accountId)?.shutdown()
-                    if (sessions.isEmpty()) _connectionState.value = ConnectionState.ERROR
+                    refreshConnectionState(preferErrorIfEmpty = true)
                     return@withContext ConnectionResult.Failure(reason)
                 }
 
@@ -229,10 +241,23 @@ class IrcProtocol @Inject constructor(
             } catch (e: Exception) {
                 Timber.w(e, "IRC connect failed")
                 sessions.remove(account.accountId)?.shutdown()
-                if (sessions.isEmpty()) _connectionState.value = ConnectionState.ERROR
-                ConnectionResult.Failure(e.message ?: "IRC connection failed")
+                refreshConnectionState(preferErrorIfEmpty = true)
+                ConnectionResult.Failure(formatTlsFailure(e))
             }
         }
+
+    private fun formatTlsFailure(e: Throwable): String {
+        val chain = generateSequence(e) { it.cause }.toList()
+        val ssl = chain.firstOrNull {
+            it is javax.net.ssl.SSLException || it.javaClass.name.contains("SSL", ignoreCase = true)
+        }
+        return when {
+            ssl != null ->
+                "TLS échoué (${ssl.message ?: ssl.javaClass.simpleName}). " +
+                    "Vérifiez hôte/port (Libera: irc.libera.chat:6697) et Tor si activé."
+            else -> e.message ?: "IRC connection failed"
+        }
+    }
 
     override fun observeConversations(): Flow<List<Conversation>> = repository.observeConversations()
 
@@ -433,6 +458,15 @@ class IrcProtocol @Inject constructor(
         }
     }
 
+    private fun refreshConnectionState(preferErrorIfEmpty: Boolean = false) {
+        _connectionState.value = when {
+            sessions.values.any { it.connected } -> ConnectionState.CONNECTED
+            sessions.isNotEmpty() -> ConnectionState.CONNECTING
+            preferErrorIfEmpty -> ConnectionState.ERROR
+            else -> ConnectionState.DISCONNECTED
+        }
+    }
+
     private suspend fun touchConversation(
         accountId: String,
         remote: String,
@@ -511,6 +545,8 @@ class IrcProtocol @Inject constructor(
             }
             scope.launch {
                 if (sessions[accountId] === s) {
+                    sessions.remove(accountId, s)
+                    s.shutdown()
                     repository.upsertAccount(
                         Account(
                             id = accountId,
@@ -519,9 +555,7 @@ class IrcProtocol @Inject constructor(
                             connectionState = ConnectionState.DISCONNECTED,
                         ),
                     )
-                    if (sessions.values.none { it.connected }) {
-                        _connectionState.value = ConnectionState.DISCONNECTED
-                    }
+                    refreshConnectionState()
                 }
             }
         }

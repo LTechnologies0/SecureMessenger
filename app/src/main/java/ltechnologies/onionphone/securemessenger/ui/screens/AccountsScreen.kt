@@ -56,6 +56,7 @@ fun AccountsScreen(
     var field4 by remember { mutableStateOf("") }
     var field5 by remember { mutableStateOf("") }
     var ircTls by remember { mutableStateOf(true) }
+    var ircUseSasl by remember { mutableStateOf(true) }
     var statusMessage by remember { mutableStateOf<String?>(null) }
     val accounts by viewModel.accounts.collectAsState()
 
@@ -246,8 +247,28 @@ fun AccountsScreen(
                         label = { Text("Canaux auto-join (#chan1,#chan2)") },
                         modifier = Modifier.fillMaxWidth(),
                     )
-                    TextButton(onClick = { ircTls = !ircTls }) {
+                    TextButton(onClick = {
+                        ircTls = !ircTls
+                        // Keep port coherent with TLS when still on a default.
+                        val currentPort = field3.trim()
+                        if (!ircTls && (currentPort.isBlank() || currentPort == "6697")) {
+                            field3 = "6667"
+                        } else if (ircTls && (currentPort.isBlank() || currentPort == "6667")) {
+                            field3 = "6697"
+                        }
+                    }) {
                         Text(if (ircTls) "TLS : activé" else "TLS : désactivé")
+                    }
+                    if (field4.isNotBlank()) {
+                        TextButton(onClick = { ircUseSasl = !ircUseSasl }) {
+                            Text(
+                                if (ircUseSasl) {
+                                    "Auth : SASL PLAIN"
+                                } else {
+                                    "Auth : NickServ"
+                                },
+                            )
+                        }
                     }
                 }
                 ProtocolId.TELEGRAM -> {
@@ -290,9 +311,16 @@ fun AccountsScreen(
                         ProtocolId.IRC -> buildMap {
                             put("host", field1.trim())
                             put("nick", field2.trim())
-                            put("port", field3.trim().ifBlank { "6697" })
+                            put("port", field3.trim().ifBlank { if (ircTls) "6697" else "6667" })
                             put("tls", ircTls.toString())
-                            if (field4.isNotBlank()) put("nickServPassword", field4)
+                            if (field4.isNotBlank()) {
+                                if (ircUseSasl) {
+                                    put("saslPassword", field4)
+                                    put("sasl", "true")
+                                } else {
+                                    put("nickServPassword", field4)
+                                }
+                            }
                             if (field5.isNotBlank()) put("channels", field5.trim())
                         }
                         ProtocolId.TELEGRAM,

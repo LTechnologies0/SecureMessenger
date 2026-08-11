@@ -102,18 +102,52 @@ class MatrixProtocol @Inject constructor(
     private val _pendingAuthStep = MutableStateFlow<AuthStep?>(null)
     fun observePendingAuthStep(): StateFlow<AuthStep?> = _pendingAuthStep.asStateFlow()
 
-    private var pendingSsoAccountId: String? = null
-    private var pendingSsoApiBase: String? = null
-    private var pendingSsoProxy: ProxyConfig? = null
-    private var pendingSsoDisplayName: String? = null
-    private var pendingSsoUserHint: String? = null
+    /**
+     * Per-account parked SSO state. [_pendingAuthStep] always reflects the latest park
+     * (UI observes a single step); [continueAuthentication] resolves which account via
+     * `fields["accountId"]`, or the sole map entry when the UI only sends `loginToken`.
+     */
+    private data class PendingSsoState(
+        val apiBase: String,
+        val proxy: ProxyConfig,
+        val displayName: String?,
+        val userHint: String?,
+    )
 
-    private fun clearPendingSso() {
-        pendingSsoAccountId = null
-        pendingSsoApiBase = null
-        pendingSsoProxy = null
-        pendingSsoDisplayName = null
-        pendingSsoUserHint = null
+    private val pendingSso = java.util.concurrent.ConcurrentHashMap<String, PendingSsoState>()
+
+    private fun clearPendingSso(accountId: String) {
+        pendingSso.remove(accountId)
+    }
+
+    /**
+     * Parks SSO for [accountId]. Refuses a second concurrent SSO for a different account
+     * so a single-slot UI (`loginToken` only) cannot complete the wrong session.
+     * Re-parking the same account replaces its entry and updates [_pendingAuthStep].
+     *
+     * @return null if parked; [ConnectionResult.Failure] if another account already pending.
+     */
+    private fun parkPendingSso(
+        accountId: String,
+        apiBase: String,
+        proxy: ProxyConfig,
+        displayName: String?,
+        userHint: String?,
+        prompt: String,
+    ): ConnectionResult? {
+        val otherPending = pendingSso.keys.firstOrNull { it != accountId }
+        if (otherPending != null) {
+            return ConnectionResult.Failure("SSO déjà en cours pour un autre compte")
+        }
+        pendingSso[accountId] = PendingSsoState(apiBase, proxy, displayName, userHint)
+        // "accountId" is reserved: UI may omit it; continueAuthentication falls back to sole map key.
+        _pendingAuthStep.value = AuthStep(
+            kind = AuthStepKind.MATRIX_SSO,
+            prompt = prompt,
+            fields = listOf("loginToken", "accountId"),
+            url = MatrixLoginFlows.ssoRedirectUrl(apiBase),
+        )
+        return null
     }
 
     fun trixnityEngine(accountId: String? = null): TrixnityMatrixEngine? =
@@ -123,7 +157,10 @@ class MatrixProtocol @Inject constructor(
     fun usesE2ee(accountId: String? = null): Boolean =
         (accountId?.let { sessions[it] } ?: sessions.values.singleOrNull())?.e2eeEnabled == true
 
-    override fun isAccountConnected(accountId: String): Boolean = sessions.containsKey(accountId)
+    override fun isAccountConnected(accountId: String): Boolean {
+        val session = sessions[accountId] ?: return false
+        return session.e2eeEnabled && session.trixnityEngine != null
+    }
 
     override val canRegister: Boolean = true
 
@@ -204,17 +241,17 @@ class MatrixProtocol @Inject constructor(
                     (password == null || password.isBlank() || !MatrixLoginFlows.supportsPassword(flows)) &&
                     MatrixLoginFlows.supportsSso(flows)
                 ) {
-                    pendingSsoAccountId = account.accountId
-                    pendingSsoApiBase = apiBaseUrl
-                    pendingSsoProxy = proxy
-                    pendingSsoDisplayName = account.displayName
-                    pendingSsoUserHint = matrixUser.takeIf { it.isNotBlank() }
-                    _pendingAuthStep.value = AuthStep(
-                        kind = AuthStepKind.MATRIX_SSO,
+                    parkPendingSso(
+                        accountId = account.accountId,
+                        apiBase = apiBaseUrl,
+                        proxy = proxy,
+                        displayName = account.displayName,
+                        userHint = matrixUser.takeIf { it.isNotBlank() },
                         prompt = "Connexion SSO Matrix requise",
-                        fields = listOf("loginToken"),
-                        url = MatrixLoginFlows.ssoRedirectUrl(apiBaseUrl),
-                    )
+                    )?.let {
+                        _connectionState.value = ConnectionState.ERROR
+                        return@withContext it
+                    }
                     _connectionState.value = ConnectionState.CONNECTING
                     return@withContext ConnectionResult.Success
                 }
@@ -251,17 +288,17 @@ class MatrixProtocol @Inject constructor(
                             onAuthExpired = onAuthExpired,
                         )
                         if (passwordResult.isFailure && MatrixLoginFlows.supportsSso(flows)) {
-                            pendingSsoAccountId = account.accountId
-                            pendingSsoApiBase = apiBaseUrl
-                            pendingSsoProxy = proxy
-                            pendingSsoDisplayName = account.displayName
-                            pendingSsoUserHint = matrixUser
-                            _pendingAuthStep.value = AuthStep(
-                                kind = AuthStepKind.MATRIX_SSO,
+                            parkPendingSso(
+                                accountId = account.accountId,
+                                apiBase = apiBaseUrl,
+                                proxy = proxy,
+                                displayName = account.displayName,
+                                userHint = matrixUser,
                                 prompt = "Mot de passe refusé — connectez-vous via SSO",
-                                fields = listOf("loginToken"),
-                                url = MatrixLoginFlows.ssoRedirectUrl(apiBaseUrl),
-                            )
+                            )?.let {
+                                _connectionState.value = ConnectionState.ERROR
+                                return@withContext it
+                            }
                             _connectionState.value = ConnectionState.CONNECTING
                             return@withContext ConnectionResult.Success
                         }
@@ -307,9 +344,7 @@ class MatrixProtocol @Inject constructor(
         proxy: ProxyConfig,
         fallback: MatrixHttpFallback,
     ): ConnectionResult {
-        val session = MatrixSession(httpFallback = fallback)
-        sessions[accountId] = session
-
+        // Do not publish the session until Trixnity E2EE is live (fail-closed).
         val engine = TrixnityMatrixEngine(repository, context.filesDir)
         var trixnityLogin = engine.loginWithAccessToken(
             accountId,
@@ -318,6 +353,7 @@ class MatrixProtocol @Inject constructor(
             accessToken,
             proxy,
         )
+        var liveEngine = engine
         if (trixnityLogin.isFailure) {
             Timber.w(trixnityLogin.exceptionOrNull(), "Trixnity first login failed; wiping store and retrying")
             engine.close()
@@ -331,31 +367,29 @@ class MatrixProtocol @Inject constructor(
                 proxy,
             )
             if (trixnityLogin.isSuccess) {
-                session.trixnityEngine = retryEngine
+                liveEngine = retryEngine
             } else {
                 retryEngine.close()
             }
-        } else {
-            session.trixnityEngine = engine
         }
 
-        if (trixnityLogin.isSuccess) {
-            session.e2eeEnabled = true
-            // Trixnity owns sync + E2EE — stop plaintext HTTP /sync to avoid dual timelines.
+        if (trixnityLogin.isFailure) {
             fallback.disconnect()
-            session.httpFallback = null
-            Timber.i("Matrix Trixnity E2EE session active for $accountId")
-        } else {
-            session.e2eeEnabled = false
-            sessions.remove(accountId)
-            fallback.disconnect()
-            engine.close()
+            liveEngine.close()
             _connectionState.value = ConnectionState.ERROR
             return ConnectionResult.Failure(
                 "E2EE Matrix (Trixnity) indisponible: " +
                     (trixnityLogin.exceptionOrNull()?.message ?: "login failed"),
             )
         }
+
+        fallback.disconnect()
+        sessions[accountId] = MatrixSession(
+            trixnityEngine = liveEngine,
+            httpFallback = null,
+            e2eeEnabled = true,
+        )
+        Timber.i("Matrix Trixnity E2EE session active for $accountId")
 
         credentialStore.put(accountId, ACCESS_TOKEN_KEY, accessToken)
         password?.let { credentialStore.put(accountId, "password", it) }
@@ -385,38 +419,47 @@ class MatrixProtocol @Inject constructor(
                     if (loginToken.isBlank()) {
                         return@withContext ConnectionResult.Failure("loginToken SSO manquant")
                     }
-                    val apiBase = pendingSsoApiBase
+                    val accountId = fields["accountId"]?.trim()?.takeIf { it.isNotEmpty() }
+                        ?: pendingSso.keys.singleOrNull()
+                        ?: return@withContext ConnectionResult.Failure(
+                            if (pendingSso.isEmpty()) {
+                                "Session SSO expirée"
+                            } else {
+                                "accountId SSO requis (plusieurs SSO en attente)"
+                            },
+                        )
+                    val pending = pendingSso[accountId]
                         ?: return@withContext ConnectionResult.Failure("Session SSO expirée")
-                    val proxy = pendingSsoProxy
-                        ?: return@withContext ConnectionResult.Failure("Proxy SSO manquant")
-                    val accountId = pendingSsoAccountId
-                        ?: return@withContext ConnectionResult.Failure("Compte SSO manquant")
                     try {
                         networkGuard.assertNetworkAllowed()
                         // One-shot loginToken: exchange once via CS API, then soft-login Trixnity
                         // (never call m.login.token twice — the token is consumed).
-                        val tokenLogin = MatrixLoginFlows.loginWithToken(apiBase, loginToken, proxy)
+                        val tokenLogin = MatrixLoginFlows.loginWithToken(
+                            pending.apiBase,
+                            loginToken,
+                            pending.proxy,
+                        )
                         val fallback = MatrixHttpFallback(repository)
                         fallback.connectWithToken(
                             accountId,
-                            apiBase,
+                            pending.apiBase,
                             tokenLogin.userId,
                             tokenLogin.accessToken,
-                            proxy,
+                            pending.proxy,
                         ).getOrThrow()
                         finalizeMatrixSession(
                             accountId = accountId,
-                            displayName = pendingSsoDisplayName ?: tokenLogin.userId,
-                            apiBaseUrl = apiBase,
+                            displayName = pending.displayName ?: tokenLogin.userId,
+                            apiBaseUrl = pending.apiBase,
                             matrixUser = tokenLogin.userId,
                             accessToken = tokenLogin.accessToken,
                             password = null,
-                            proxy = proxy,
+                            proxy = pending.proxy,
                             fallback = fallback,
-                        ).also { clearPendingSso() }
+                        ).also { clearPendingSso(accountId) }
                     } catch (e: Exception) {
                         Timber.e(e, "Matrix SSO continue failed")
-                        clearPendingSso()
+                        clearPendingSso(accountId)
                         _connectionState.value = ConnectionState.ERROR
                         ConnectionResult.Failure(e.message ?: "SSO Matrix échoué")
                     }
@@ -533,8 +576,7 @@ class MatrixProtocol @Inject constructor(
                     repository.upsertMessage(msg)
                     return@withContext SendResult.Success(msg.id)
                 }
-                session.httpFallback?.sendMessage(conversationId, body)
-                    ?: SendResult.Failure("Not connected")
+                SendResult.Failure("E2EE Matrix indisponible — reconnectez le compte")
             } catch (e: Exception) {
                 SendResult.Failure(e.message ?: "Send failed")
             }

@@ -274,14 +274,19 @@ class SmackClientFacade(
         val jid: EntityBareJid = JidCreate.entityBareFrom(remoteJid)
         val chat = ChatManager.getInstanceFor(conn).chatWith(jid)
         val helper = omemoHelper
-        if (helper != null && helper.ready && helper.contactSupportsOmemo(remoteJid)) {
-            // Fail-closed: never fall back to cleartext when the contact supports OMEMO.
-            val encrypted = helper.sendEncrypted(remoteJid, body)
-            if (requestReceipts) {
-                attachReceiptExtensions(encrypted)
+        if (helper != null) {
+            if (!helper.ready) {
+                throw IllegalStateException("OMEMO en cours d'initialisation — réessayez dans un instant")
             }
-            chat.send(encrypted)
-            return encrypted.stanzaId.orEmpty()
+            if (helper.contactSupportsOmemo(remoteJid)) {
+                // Fail-closed: never fall back to cleartext when the contact supports OMEMO.
+                val encrypted = helper.sendEncrypted(remoteJid, body)
+                if (requestReceipts) {
+                    attachReceiptExtensions(encrypted)
+                }
+                chat.send(encrypted)
+                return encrypted.stanzaId.orEmpty()
+            }
         }
         val builder = conn.stanzaFactory.buildMessageStanza().setBody(body)
         if (requestReceipts) {
@@ -300,11 +305,16 @@ class SmackClientFacade(
                 .getMultiUserChat(JidCreate.entityBareFrom(roomJid))
         }
         val helper = omemoHelper
-        if (helper != null && helper.ready && helper.multiUserChatSupportsOmemo(muc)) {
-            // Fail-closed: never send cleartext when the room advertises OMEMO.
-            val encrypted = helper.encryptMuc(muc, body)
-            muc.sendMessage(encrypted)
-            return encrypted.stanzaId.orEmpty()
+        if (helper != null) {
+            if (!helper.ready) {
+                throw IllegalStateException("OMEMO en cours d'initialisation — réessayez dans un instant")
+            }
+            if (helper.multiUserChatSupportsOmemo(muc)) {
+                // Fail-closed: never send cleartext when the room advertises OMEMO.
+                val encrypted = helper.encryptMuc(muc, body)
+                muc.sendMessage(encrypted)
+                return encrypted.stanzaId.orEmpty()
+            }
         }
         val conn = connection ?: throw SmackException.NotConnectedException()
         val message = conn.stanzaFactory.buildMessageStanza().setBody(body).build()
@@ -318,6 +328,21 @@ class SmackClientFacade(
         longitude: Double,
         accuracy: Double = 0.0,
     ) {
+        val helper = omemoHelper
+        // Prefer OMEMO-encrypted geo URI when the peer advertises OMEMO — XEP-0080 is cleartext.
+        if (helper != null) {
+            if (!helper.ready) {
+                throw IllegalStateException("OMEMO en cours d'initialisation — réessayez dans un instant")
+            }
+            if (helper.contactSupportsOmemo(remoteJid)) {
+                val body = buildString {
+                    append("geo:$latitude,$longitude")
+                    if (accuracy > 0.0) append(";u=$accuracy")
+                }
+                sendChatMessage(remoteJid, body, requestReceipts = false)
+                return
+            }
+        }
         val manager = geoLocationManager ?: throw SmackException.NotConnectedException()
         val builder = GeoLocation.builder()
             .setLat(latitude)

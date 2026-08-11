@@ -96,13 +96,19 @@ object XmppMamSync {
     }
 
     private fun resolveBody(smack: SmackClientFacade, remoteJid: String, smackMsg: SmackMessage): String? {
-        smack.omemoHelper?.tryDecrypt(remoteJid, smackMsg)?.let { return it }
+        val helper = smack.omemoHelper
+        if (helper?.hasOmemoPayload(smackMsg) == true) {
+            // Fail-closed: never surface ciphertext/cleartext body for undecryptable OMEMO.
+            return helper.tryDecrypt(remoteJid, smackMsg)
+        }
         val carbonDir = CarbonExtension.from(smackMsg)?.direction
         if (carbonDir != null) {
             val forwarded = smackMsg.getExtension(Forwarded::class.java)
             val wrapped = forwarded?.forwardedStanza as? SmackMessage
             if (wrapped != null) {
-                smack.omemoHelper?.tryDecrypt(remoteJid, wrapped)?.let { return it }
+                if (helper?.hasOmemoPayload(wrapped) == true) {
+                    return helper.tryDecrypt(remoteJid, wrapped)
+                }
                 wrapped.body?.let { return it }
             }
         }

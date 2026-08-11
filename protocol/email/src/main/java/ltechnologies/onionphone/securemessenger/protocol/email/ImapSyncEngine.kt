@@ -3,8 +3,6 @@ package ltechnologies.onionphone.securemessenger.protocol.email
 import android.content.Context
 import jakarta.mail.Folder
 import jakarta.mail.UIDFolder
-import jakarta.mail.event.MessageCountAdapter
-import jakarta.mail.event.MessageCountEvent
 import jakarta.mail.internet.MimeMessage
 import kotlin.math.min
 import kotlinx.coroutines.CoroutineScope
@@ -12,6 +10,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import ltechnologies.onionphone.securemessenger.core.model.Conversation
 import ltechnologies.onionphone.securemessenger.core.model.ProtocolId
 import ltechnologies.onionphone.securemessenger.core.security.EncryptedCredentialStore
@@ -24,6 +24,8 @@ class ImapSyncEngine(
     private val credentialStore: EncryptedCredentialStore,
 ) {
     private var idleJob: Job? = null
+    /** Serializes SELECT/IDLE vs sync/markSeen on the single Store connection. */
+    private val folderMutex = Mutex()
 
     fun start(scope: CoroutineScope, session: EmailSession) {
         idleJob?.cancel()
@@ -31,8 +33,10 @@ class ImapSyncEngine(
             var backoffMs = 2_000L
             while (isActive) {
                 try {
-                    syncFolder(session)
-                    idleOnce(session)
+                    folderMutex.withLock {
+                        syncFolderLocked(session)
+                        idleOnceLocked(session)
+                    }
                     backoffMs = 2_000L
                 } catch (e: Exception) {
                     Timber.w(e, "IMAP sync/IDLE interrupted")
@@ -49,6 +53,10 @@ class ImapSyncEngine(
     }
 
     suspend fun syncFolder(session: EmailSession) {
+        folderMutex.withLock { syncFolderLocked(session) }
+    }
+
+    private suspend fun syncFolderLocked(session: EmailSession) {
         val store = session.store ?: return
         val folder = store.getFolder(session.config.folder)
         if (!folder.exists()) {
@@ -90,7 +98,7 @@ class ImapSyncEngine(
         }
     }
 
-    private suspend fun idleOnce(session: EmailSession) {
+    private suspend fun idleOnceLocked(session: EmailSession) {
         val store = session.store ?: return
         val folder = store.getFolder(session.config.folder)
         folder.open(Folder.READ_ONLY)
@@ -100,18 +108,13 @@ class ImapSyncEngine(
                 delay(60_000)
                 return
             }
-            idleFolder.addMessageCountListener(object : MessageCountAdapter() {
-                override fun messagesAdded(e: MessageCountEvent) {
-                    // New messages are fetched after IDLE returns via syncFolder().
-                }
-            })
             // IDLE blocks until server pushes or timeout; Angus respects timeout property.
             idleFolder.idle(true)
-            // After IDLE returns, pull any new UIDs.
-            syncFolder(session)
         } finally {
             runCatching { folder.close(false) }
         }
+        // Pull new UIDs only after IDLE folder is closed (single SELECT).
+        syncFolderLocked(session)
     }
 
     private suspend fun persistMail(session: EmailSession, mail: MimeMessage) {
@@ -123,8 +126,12 @@ class ImapSyncEngine(
             parsed = parsed,
             ownEmail = session.config.email,
         )
+        val alreadyPersisted = repository.getMessage(message.id) != null
         repository.upsertMessage(message)
         val existing = repository.getConversation(conversationId)
+        val bumpUnread = !alreadyPersisted &&
+            message.direction ==
+            ltechnologies.onionphone.securemessenger.core.model.MessageDirection.INCOMING
         repository.upsertConversation(
             Conversation(
                 id = conversationId,
@@ -134,9 +141,7 @@ class ImapSyncEngine(
                 title = parsed.subject,
                 lastMessagePreview = parsed.body.take(160),
                 lastMessageAt = parsed.timestamp,
-                unreadCount = if (message.direction ==
-                    ltechnologies.onionphone.securemessenger.core.model.MessageDirection.INCOMING
-                ) {
+                unreadCount = if (bumpUnread) {
                     (existing?.unreadCount ?: 0) + 1
                 } else {
                     existing?.unreadCount ?: 0
@@ -152,6 +157,12 @@ class ImapSyncEngine(
      */
     suspend fun markSeen(session: EmailSession, messageIds: Collection<String>): Int {
         if (messageIds.isEmpty()) return 0
+        return folderMutex.withLock {
+            markSeenLocked(session, messageIds)
+        }
+    }
+
+    private suspend fun markSeenLocked(session: EmailSession, messageIds: Collection<String>): Int {
         val store = session.store ?: return 0
         val normalized = messageIds.map { EmailThreading.normalizeMessageId(it) }.toSet()
         val folder = store.getFolder(session.config.folder)

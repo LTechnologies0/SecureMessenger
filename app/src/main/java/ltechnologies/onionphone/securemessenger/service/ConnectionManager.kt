@@ -324,7 +324,8 @@ class ConnectionManager @Inject constructor(
     }
 
     suspend fun cancelTelegramLogin(accountId: String) {
-        protocolRegistry.get(ProtocolId.TELEGRAM)?.disconnect()
+        // Only tear down this login attempt — never all Telegram sessions.
+        protocolRegistry.get(ProtocolId.TELEGRAM)?.disconnect(accountId)
         credentialStore.removeAccount(accountId)
         repository.get().deleteAccount(accountId)
     }

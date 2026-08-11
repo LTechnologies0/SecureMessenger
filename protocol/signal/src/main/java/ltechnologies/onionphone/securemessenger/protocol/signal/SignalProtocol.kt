@@ -92,7 +92,8 @@ class SignalProtocol @Inject constructor(
                 profileEdit = true,
                 voiceNotes = true,
                 stickers = true,
-                gifs = true,
+                // No dedicated GIF/animation path — would fall through as plain media.
+                gifs = false,
                 locationShare = true,
                 polls = true,
                 contactShare = true,
@@ -100,10 +101,10 @@ class SignalProtocol @Inject constructor(
                 // History via imported link-and-sync archive (no server history API).
                 messageHistory = imported,
                 backupExport = true,
-                // Signaling only — A/V media needs RingRTC.
-                voiceCalls = true,
-                videoCalls = true,
-                stories = true,
+                // A/V media needs RingRTC; do not advertise call/story composers.
+                voiceCalls = false,
+                videoCalls = false,
+                stories = false,
             )
         }
 
@@ -145,6 +146,20 @@ class SignalProtocol @Inject constructor(
         }
         return withContext(signalDispatcher) {
             try {
+                if (session != null &&
+                    accountId != null &&
+                    accountId != account.accountId &&
+                    _connectionState.value == ConnectionState.CONNECTED
+                ) {
+                    return@withContext ConnectionResult.Failure(
+                        "Un compte Signal est déjà connecté — déconnectez-le avant d'en ajouter un autre",
+                    )
+                }
+                // Replace in-progress/orphan session for the same or new account.
+                if (session != null && accountId != account.accountId) {
+                    session?.shutdown()
+                    session = null
+                }
                 _connectionState.value = ConnectionState.CONNECTING
                 accountId = account.accountId
                 proxyConfig = proxy
@@ -288,7 +303,14 @@ class SignalProtocol @Inject constructor(
             )
         }
         try {
+            if (session != null && _connectionState.value == ConnectionState.CONNECTED) {
+                return@withContext ConnectionResult.Failure(
+                    "Un compte Signal est déjà connecté — déconnectez-le avant de lier un appareil",
+                )
+            }
             cancelDeviceLinkLocked()
+            session?.shutdown()
+            session = null
             _connectionState.value = ConnectionState.CONNECTING
             accountId = UUID.randomUUID().toString()
             proxyConfig = proxy

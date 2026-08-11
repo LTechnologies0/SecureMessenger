@@ -80,8 +80,9 @@ fun TelegramLoginScreen(
         }
     }
 
-    LaunchedEffect(accountId, step) {
-        if (accountId == null || step != TelegramLoginStep.PHONE) return@LaunchedEffect
+    // Keep collecting after PHONE — TDLib may advance PHONE→CODE→PASSWORD/REGISTRATION.
+    LaunchedEffect(accountId) {
+        if (accountId == null) return@LaunchedEffect
         val protocol = viewModel.telegramProtocol() ?: return@LaunchedEffect
         protocol.observePendingAuthStep().collectLatest { authStep ->
             if (authStep == null) return@collectLatest
@@ -253,6 +254,16 @@ fun TelegramLoginScreen(
                                                 loading = false
                                                 step = TelegramLoginStep.PASSWORD
                                                 statusMessage = null
+                                            }
+                                            AuthStepKind.TELEGRAM_REGISTRATION -> {
+                                                loading = false
+                                                step = TelegramLoginStep.REGISTRATION
+                                                statusMessage = authStep.prompt
+                                            }
+                                            AuthStepKind.TELEGRAM_OTHER_DEVICE -> {
+                                                loading = false
+                                                step = TelegramLoginStep.OTHER_DEVICE
+                                                statusMessage = authStep.prompt
                                             }
                                             AuthStepKind.TELEGRAM_SMS_CODE -> {
                                                 loading = false

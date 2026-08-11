@@ -5,6 +5,7 @@ import jakarta.mail.Store
 import jakarta.mail.Transport
 import java.util.Properties
 import ltechnologies.onionphone.securemessenger.core.model.ProxyConfig
+import ltechnologies.onionphone.securemessenger.core.network.ProxiedHttpClientFactory
 
 class EmailSession(
     val accountId: String,
@@ -31,6 +32,7 @@ class EmailSession(
             accountId: String,
             config: EmailAccountConfig,
             proxy: ProxyConfig,
+            httpFactory: ProxiedHttpClientFactory? = null,
         ): EmailSession {
             val props = Properties()
             props["mail.store.protocol"] = when (config.storeKind) {
@@ -41,30 +43,49 @@ class EmailSession(
             props["mail.transport.protocol"] =
                 if (config.smtpSecurity == MailSecurity.SSL) "smtps" else "smtp"
 
+            val storeServerName: String
+            val storeConnectHost: String
+            val storePort: Int
+            val storeProtocol: String
+            val storeSecurity: MailSecurity
+
             when (config.storeKind) {
                 EmailStoreKind.IMAP -> {
-                    val host = config.imapHost ?: error("Missing IMAP host")
-                    val protocol = if (config.imapSecurity == MailSecurity.SSL) "imaps" else "imap"
-                    EmailSocksProperties.applyStoreSecurity(
-                        props, protocol, config.imapSecurity, host, config.imapPort,
+                    storeServerName = config.imapHost ?: error("Missing IMAP host")
+                    storePort = config.imapPort
+                    storeSecurity = config.imapSecurity
+                    storeProtocol = if (storeSecurity == MailSecurity.SSL) "imaps" else "imap"
+                    storeConnectHost = EmailSocksProperties.resolveConnectHost(
+                        storeServerName, proxy, httpFactory,
                     )
-                    EmailSocksProperties.applySocks(props, listOf(protocol, "imap", "imaps"), proxy)
+                    EmailSocksProperties.applyStoreSecurity(
+                        props, storeProtocol, storeSecurity, storeServerName, storePort, storeConnectHost,
+                    )
+                    EmailSocksProperties.applySocks(props, listOf(storeProtocol, "imap", "imaps"), proxy)
                 }
                 EmailStoreKind.POP3 -> {
-                    val host = config.pop3Host ?: error("Missing POP3 host")
-                    val protocol = if (config.pop3Security == MailSecurity.SSL) "pop3s" else "pop3"
-                    EmailSocksProperties.applyStoreSecurity(
-                        props, protocol, config.pop3Security, host, config.pop3Port,
+                    storeServerName = config.pop3Host ?: error("Missing POP3 host")
+                    storePort = config.pop3Port
+                    storeSecurity = config.pop3Security
+                    storeProtocol = if (storeSecurity == MailSecurity.SSL) "pop3s" else "pop3"
+                    storeConnectHost = EmailSocksProperties.resolveConnectHost(
+                        storeServerName, proxy, httpFactory,
                     )
-                    EmailSocksProperties.applySocks(props, listOf(protocol, "pop3", "pop3s"), proxy)
+                    EmailSocksProperties.applyStoreSecurity(
+                        props, storeProtocol, storeSecurity, storeServerName, storePort, storeConnectHost,
+                    )
+                    EmailSocksProperties.applySocks(props, listOf(storeProtocol, "pop3", "pop3s"), proxy)
                 }
-                EmailStoreKind.JMAP -> Unit
+                EmailStoreKind.JMAP -> error("unreachable")
             }
 
-            val smtpHost = config.smtpHost ?: error("Missing SMTP host")
+            val smtpServerName = config.smtpHost ?: error("Missing SMTP host")
             val smtpProtocol = if (config.smtpSecurity == MailSecurity.SSL) "smtps" else "smtp"
+            val smtpConnectHost = EmailSocksProperties.resolveConnectHost(
+                smtpServerName, proxy, httpFactory,
+            )
             EmailSocksProperties.applyStoreSecurity(
-                props, smtpProtocol, config.smtpSecurity, smtpHost, config.smtpPort,
+                props, smtpProtocol, config.smtpSecurity, smtpServerName, config.smtpPort, smtpConnectHost,
             )
             EmailSocksProperties.applySocks(props, listOf(smtpProtocol, "smtp", "smtps"), proxy)
             props["mail.$smtpProtocol.auth"] = "true"
@@ -74,22 +95,11 @@ class EmailSession(
             val session = Session.getInstance(props)
             session.debug = false
 
-            val storeProtocol = props.getProperty("mail.store.protocol")
-            val store = session.getStore(storeProtocol)
-            val storeHost = when (config.storeKind) {
-                EmailStoreKind.IMAP -> config.imapHost!!
-                EmailStoreKind.POP3 -> config.pop3Host!!
-                EmailStoreKind.JMAP -> error("unreachable")
-            }
-            val storePort = when (config.storeKind) {
-                EmailStoreKind.IMAP -> config.imapPort
-                EmailStoreKind.POP3 -> config.pop3Port
-                EmailStoreKind.JMAP -> error("unreachable")
-            }
-            store.connect(storeHost, storePort, config.email, config.password)
+            val store = session.getStore(props.getProperty("mail.store.protocol"))
+            store.connect(storeConnectHost, storePort, config.email, config.password)
 
             val transport = session.getTransport(smtpProtocol)
-            transport.connect(smtpHost, config.smtpPort, config.email, config.password)
+            transport.connect(smtpConnectHost, config.smtpPort, config.email, config.password)
 
             return EmailSession(
                 accountId = accountId,

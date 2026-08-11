@@ -75,6 +75,23 @@ class EmailSocksPropertiesTest {
         assertEquals("imap.example.com", props["mail.imaps.host"])
         assertEquals("993", props["mail.imaps.port"])
         assertEquals("true", props["mail.imaps.ssl.enable"])
+        assertEquals("true", props["mail.imaps.ssl.checkserveridentity"])
+    }
+
+    @Test
+    fun appliesSslFactoryWhenConnectHostIsIp() {
+        val props = Properties()
+        EmailSocksProperties.applyStoreSecurity(
+            props,
+            "imaps",
+            MailSecurity.SSL,
+            serverName = "imap.example.com",
+            port = 993,
+            connectHost = "1.2.3.4",
+        )
+        assertEquals("1.2.3.4", props["mail.imaps.host"])
+        assertNotNull(props["mail.imaps.ssl.socketFactory"])
+        assertNotNull(props["mail.imaps.ssl.hostnameverifier"])
     }
 }
 

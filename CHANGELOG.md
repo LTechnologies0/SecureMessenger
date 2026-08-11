@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.0.8
+
+### Security / control-flow
+- **IRC TLS**: use Android/JVM system `TrustManagerFactory` (Libera / Let’s Encrypt work).
+- **Matrix E2EE fail-closed**: no plaintext HTTP `/sync` before Trixnity; session published only when E2EE is live; plaintext send path removed.
+- **Matrix SSO**: pending SSO keyed per account (refuse concurrent SSO for another account).
+- **XMPP OMEMO**: block cleartext while OMEMO initializes; geolocation via OMEMO when peer supports it; MAM fail-closed on OMEMO payloads.
+- **Email Tor DNS**: DoH-over-SOCKS resolve + SNI to original hostname (no local DNS under `remoteDns`).
+- **Email IMAP**: mutex around IDLE/sync/markSeen; unread count only bumps for new messages.
+- **Telegram**: cancel login tears down only that account; registration step after SMS; preserve display name on disconnect.
+- **Signal**: refuse second live session / device-link clobber; capability flags match reality (no fake A/V/stories/GIF).
+- **IRC UI**: SASL vs NickServ toggle; TLS/port stay coherent (6697/6667).
+
+### Docs
+- Libera example + system trust note in `docs/irc.md`.
+
 ## 1.0.7
 
 ### Bug fixes

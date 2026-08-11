@@ -62,8 +62,10 @@ class Pop3SyncEngine(
                     ownEmail = session.config.email,
                 )
                 // Dedup via message id primary key upsert.
+                val alreadyPersisted = repository.getMessage(message.id) != null
                 repository.upsertMessage(message)
                 val existing = repository.getConversation(conversationId)
+                val bumpUnread = !alreadyPersisted && message.direction == MessageDirection.INCOMING
                 repository.upsertConversation(
                     Conversation(
                         id = conversationId,
@@ -73,7 +75,7 @@ class Pop3SyncEngine(
                         title = parsed.subject,
                         lastMessagePreview = parsed.body.take(160),
                         lastMessageAt = parsed.timestamp,
-                        unreadCount = if (message.direction == MessageDirection.INCOMING) {
+                        unreadCount = if (bumpUnread) {
                             (existing?.unreadCount ?: 0) + 1
                         } else {
                             existing?.unreadCount ?: 0

@@ -85,7 +85,8 @@ class TelegramProtocol @Inject constructor(
         locationShare = true,
         polls = true,
         contactShare = true,
-        ephemeralMessages = true,
+        // Chat auto-delete TTL is not per-message secret chat — hide ephemeral composer.
+        ephemeralMessages = false,
         messageHistory = true,
         backupExport = true,
     )
@@ -1353,11 +1354,14 @@ class TelegramProtocol @Inject constructor(
                     authenticatingAccountId = null
                     _pendingAuthStep.value = null
                 }
+                val previousName = repository.observeAccounts().first()
+                    .firstOrNull { it.id == id }?.displayName
+                    ?: id
                 repository.upsertAccount(
                     ltechnologies.onionphone.securemessenger.core.model.Account(
                         id = id,
                         protocol = ProtocolId.TELEGRAM,
-                        displayName = id,
+                        displayName = previousName,
                         connectionState = ConnectionState.DISCONNECTED,
                     ),
                 )

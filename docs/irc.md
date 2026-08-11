@@ -6,7 +6,7 @@ SecureMessenger treats IRC as a first-class `MessengerProtocol` (`ProtocolId.IRC
 
 | Area | Support |
 |------|---------|
-| Transport | TLS (`SECURE`, default port 6697) or cleartext (`INSECURE`, e.g. 6667) |
+| Transport | TLS (`SECURE`, default port 6697) via Android/JVM system `TrustManagerFactory`, or cleartext (`INSECURE`, e.g. 6667). Kitteh’s built-in trust defaults are **not** used — they reject Libera and other Let’s Encrypt networks. |
 | Tor | SOCKS5 via `Client.Builder.proxy()` + `ProxyType.SOCKS_5` when `ProxyConfig.torRequired` |
 | Auth | Optional server password; NickServ; SASL PLAIN (`saslPassword` / `sasl=true`) |
 | Channels | `JOIN` / `PART` / auto-join list; PRIVMSG; NOTICE / TOPIC / JOIN / PART / KICK as `MessageKind.SYSTEM` |
@@ -31,6 +31,18 @@ SecureMessenger treats IRC as a first-class `MessengerProtocol` (`ProtocolId.IRC
 | `channels` | Comma/space/semicolon-separated auto-join list (`#chan` or bare name) |
 
 UI entry: **Ajouter un compte → IRC** (`AccountsScreen` fields) or protocol chip in new chat.
+
+## Example: Libera.Chat
+
+| Field | Value |
+|-------|-------|
+| Host | `irc.libera.chat` |
+| Port | `6697` |
+| TLS | on |
+| Nick | your nick |
+| NickServ / SASL | optional account password |
+
+Without `secureTrustManagerFactory(system roots)`, Kitteh TLS fails on this host (and most public networks).
 
 ## Conversations
 

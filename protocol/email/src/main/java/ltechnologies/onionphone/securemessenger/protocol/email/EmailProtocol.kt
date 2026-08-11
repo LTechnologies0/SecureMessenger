@@ -60,12 +60,14 @@ class EmailProtocol @Inject constructor(
     override val capabilities = ProtocolCapabilities(
         directMessages = true,
         groupChats = false,
+        // Attachments work for IMAP/SMTP MIME; JMAP send rejects them.
         mediaSend = true,
         mediaReceive = true,
         typingIndicators = false,
         readReceipts = false,
         endToEndEncryption = false,
         requiresPhoneAuth = false,
+        // Derived from recent mailbox peers — not a server address book.
         contacts = true,
         profileEdit = false,
         voiceNotes = false,
@@ -75,6 +77,7 @@ class EmailProtocol @Inject constructor(
         polls = false,
         contactShare = false,
         ephemeralMessages = false,
+        // Recent window only (IMAP ~100 / POP3~50 / JMAP~50), not full archive backfill.
         messageHistory = true,
         backupExport = true,
     )
@@ -141,7 +144,12 @@ class EmailProtocol @Inject constructor(
 
                 val session = when (config.storeKind) {
                     EmailStoreKind.IMAP, EmailStoreKind.POP3 ->
-                        EmailSession.openStoreAndTransport(account.accountId, config, proxy)
+                        EmailSession.openStoreAndTransport(
+                            account.accountId,
+                            config,
+                            proxy,
+                            httpFactory,
+                        )
                     EmailStoreKind.JMAP -> {
                         val client = JmapClient(
                             http = httpFactory.okhttpClient(),
@@ -579,9 +587,11 @@ class EmailProtocol @Inject constructor(
             val parsedMessageId = EmailThreading.normalizeMessageId(messageId)
             val outgoing = EmailAddress.extract(from)
                 .equals(session.config.email, ignoreCase = true)
+            val msgId = "${session.accountId}:msg:$parsedMessageId"
+            val alreadyPersisted = repository.getMessage(msgId) != null
             repository.upsertMessage(
                 Message(
-                    id = "${session.accountId}:msg:$parsedMessageId",
+                    id = msgId,
                     conversationId = conversationId,
                     protocol = ProtocolId.EMAIL,
                     body = body,
@@ -598,6 +608,7 @@ class EmailProtocol @Inject constructor(
                 ),
             )
             val existing = repository.getConversation(conversationId)
+            val bumpUnread = !alreadyPersisted && !outgoing
             repository.upsertConversation(
                 Conversation(
                     id = conversationId,
@@ -607,7 +618,11 @@ class EmailProtocol @Inject constructor(
                     title = subject,
                     lastMessagePreview = body.take(160),
                     lastMessageAt = timestamp,
-                    unreadCount = if (!outgoing) (existing?.unreadCount ?: 0) + 1 else existing?.unreadCount ?: 0,
+                    unreadCount = if (bumpUnread) {
+                        (existing?.unreadCount ?: 0) + 1
+                    } else {
+                        existing?.unreadCount ?: 0
+                    },
                 ),
             )
         }
