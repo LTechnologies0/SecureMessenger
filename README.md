@@ -1,7 +1,7 @@
 # SecureMessenger
 
 <p align="center">
-  <strong>Messagerie Android multi-protocole — Matrix, XMPP, Telegram et Signal dans une seule app, Tor optionnel via OnionVPN.</strong>
+  <strong>Messagerie Android multi-protocole — Matrix, XMPP, Telegram, Signal, Email et IRC dans une seule app, Tor optionnel via OnionVPN.</strong>
 </p>
 
 <p align="center">
@@ -15,14 +15,16 @@
   <img src="https://img.shields.io/badge/XMPP-Smack-amber" alt="XMPP">
   <img src="https://img.shields.io/badge/Telegram-TDLib-blue" alt="Telegram">
   <img src="https://img.shields.io/badge/Signal-libsignal-indigo" alt="Signal">
+  <img src="https://img.shields.io/badge/Email-IMAP%2FJMAP-rose" alt="Email">
+  <img src="https://img.shields.io/badge/IRC-Kitteh-green" alt="IRC">
 </p>
 
-**SecureMessenger** is an open-source Android messenger that unifies **Matrix**, **XMPP**, **Telegram**, and **Signal** in one Material 3 inbox — contacts, history, rich media (voice, location, polls, GIFs where the protocol supports them), typing, read receipts, profile edit, and local JSON backup. Part of the [OnionPhone](https://onionphone.org) app family.
+**SecureMessenger** is an open-source Android messenger that unifies **Matrix**, **XMPP**, **Telegram**, **Signal**, **Email**, and **IRC** in one Material 3 inbox — contacts, history, rich media (voice, location, polls, GIFs where the protocol supports them), typing, read receipts, profile edit, and local JSON backup. Part of the [OnionPhone](https://onionphone.org) app family.
 
 > Tor routing is **optional** (off by default). When enabled, traffic uses the [OnionVPN](https://github.com/LTechnologies0/OnionVPN) PAC bridge
 > (`http://127.0.0.1:18201/onionvpn.pac` → SOCKS5 `127.0.0.1:18202`). Orbot / InviZible are not used.
 
-**Keywords / topics:** `android` · `kotlin` · `jetpack-compose` · `material-design` · `messenger` · `matrix` · `xmpp` · `telegram` · `signal` · `tdlib` · `tor` · `privacy` · `onionphone`
+**Keywords / topics:** `android` · `kotlin` · `jetpack-compose` · `material-design` · `messenger` · `matrix` · `xmpp` · `telegram` · `signal` · `email` · `irc` · `tdlib` · `tor` · `privacy` · `onionphone`
 
 ---
 
@@ -43,7 +45,7 @@
 
 | Feature | Description |
 |---------|-------------|
-| **Multi-protocol inbox** | Matrix, XMPP, Telegram, and Signal accounts side by side |
+| **Multi-protocol inbox** | Matrix, XMPP, Telegram, Signal, Email, and IRC accounts side by side |
 | **Unified messaging** | Text, images, files, GIFs, voice notes, location, polls, contact cards, stickers/ephemeral where the protocol API allows |
 | **Contacts & profile** | Protocol contacts (roster / GetContacts / CDSI / room members), display-name (and bio/photo where supported) |
 | **History** | Telegram TDLib history, XMPP MAM, Matrix timeline backfill; Signal live + device sync (no cloud 1:1 backfill) |
@@ -64,9 +66,10 @@ flowchart LR
     CM --> XMPP[protocol:xmpp]
     CM --> TG[protocol:telegram]
     CM --> Signal[protocol:signal]
-    Matrix & XMPP & TG -->|Tor opt-in| Proxy[core:proxy — SOCKS5]
-    Matrix & XMPP & TG -->|default| Clearnet((Clearnet))
-    Signal --> Clearnet
+    CM --> Email[protocol:email]
+    CM --> IRC[protocol:irc]
+    Matrix & XMPP & TG & Signal & Email & IRC -->|Tor opt-in| Proxy[core:proxy — SOCKS5]
+    Matrix & XMPP & TG & Signal & Email & IRC -->|default| Clearnet((Clearnet))
     Proxy -->|Tor enabled + healthy| Tor((Tor network))
 ```
 
@@ -74,7 +77,7 @@ flowchart LR
 
 ## Architecture
 
-12-module Gradle project — see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full module graph and registration flow details.
+First-party Gradle modules (app, core, data, protocol adapters) — see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full module graph and registration flow details. Protocol notes: [email](docs/email.md), [irc](docs/irc.md), [signal vendor](docs/signal-vendor.md), [tdlib](docs/tdlib-build.md).
 
 ```
 :app
@@ -85,9 +88,11 @@ flowchart LR
  ├── :data           (persistence)
  └── :protocol:api   (MessengerProtocol interface)
       ├── :protocol:xmpp      (Smack)
-      ├── :protocol:matrix    (raw CS API + Trixnity)
+      ├── :protocol:matrix    (Trixnity + CS API)
       ├── :protocol:telegram  (TDLib JNI)
-      └── :protocol:signal
+      ├── :protocol:signal
+      ├── :protocol:email     (IMAP/POP3/JMAP + SMTP)
+      └── :protocol:irc       (Kitteh)
 ```
 
 | Layer | Technologies |
@@ -95,9 +100,9 @@ flowchart LR
 | UI | Jetpack Compose, Material 3, Navigation Compose |
 | DI | Dagger Hilt |
 | Async | Kotlin Coroutines + Flow |
-| Networking | Ktor (Matrix), OkHttp/WebView (proxied), Smack (XMPP), TDLib (Telegram) |
+| Networking | Ktor/OkHttp (Matrix), Smack (XMPP), TDLib (Telegram), libsignal (Signal), Angus Mail / JMAP (Email), Kitteh (IRC) |
 | Storage security | AndroidX Security Crypto (Keystore-backed encrypted storage) |
-| Proxy | SOCKS5 → Tor, enforced at the network layer, not just per-request |
+| Proxy | Optional SOCKS5 → Tor when enabled |
 
 ---
 

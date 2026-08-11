@@ -1,6 +1,6 @@
 # SecureMessenger — Architecture
 
-SecureMessenger is a **13-module** Gradle project. Every network path — regardless of protocol — flows through a single Tor SOCKS5 proxy layer enforced by `core/network`. Protocol adapters never talk to the internet directly.
+SecureMessenger is a multi-module Gradle project (first-party app + core + data + protocol adapters; Signal vendor modules are separate). Network traffic is **clearnet by default**. When the user enables Tor, adapters route through a Tor SOCKS5 endpoint (OnionVPN PAC bridge or custom SOCKS), gated by `core/network` (`NetworkGuard`).
 
 ## Module graph
 
@@ -18,6 +18,7 @@ flowchart TB
     TG[:protocol/telegram]
     SIGNAL[:protocol/signal]
     EMAIL[:protocol/email]
+    IRC[:protocol/irc]
 
     APP --> DATA
     APP --> PAPI
@@ -28,6 +29,7 @@ flowchart TB
     TG --> PAPI
     SIGNAL --> PAPI
     EMAIL --> PAPI
+    IRC --> PAPI
     PAPI --> MODEL
     PAPI --> PROXY
     XMPP --> PROXY
@@ -35,6 +37,7 @@ flowchart TB
     TG --> PROXY
     SIGNAL --> PROXY
     EMAIL --> PROXY
+    IRC --> PROXY
     DATA --> SEC
     DATA --> MODEL
 ```
@@ -45,17 +48,20 @@ flowchart TB
 |-----------|-----------|-------|-----------|---------|--------|------|-------------|
 | XMPP | OK | OK | OK | MUC + bookmarks | HTTP upload + OOB/aesgcm | OMEMO 1:1+MUC (fail-closed) | OK (Tor) |
 | Matrix | OK + SSO | OK | OK | OK | Trixnity upload + mxc download | Megolm (H2 `fromStore`, fail-closed) | OK (Tor) |
-| Telegram | OK* | OK | OK | OK | TDLib send/receive | MTProto (cloud)† | OK (Tor fail-closed) |
+| Telegram | OK* | OK | OK | OK | TDLib send/receive | MTProto (cloud)† | Phone auth (TDLib)* |
 | Signal | OK | OK | OK WS | GV2 sender-key (+ encrypted fan-out) | CDN upload/download | libsignal store (sessions/SK) | OK (Tor) |
 | Email | OK | SMTP/JMAP | IMAP IDLE / POP3 / JMAP | — | MIME attachments | — (OpenPGP out of scope) | — |
+| IRC | OK | PRIVMSG | PRIVMSG + system | Channels | — | — | — |
 
-\* Requires prebuilt TDLib AAR with `libtdjni.so` for packaged ABIs ([docs/tdlib-build.md](tdlib-build.md)). Debug APKs include `arm64-v8a` + `x86_64` by default (Waydroid/emulators).
+\* Requires prebuilt TDLib AAR with `libtdjni.so` for packaged ABIs ([docs/tdlib-build.md](tdlib-build.md)). Debug APKs include `arm64-v8a` + `x86_64` by default (Waydroid/emulators). Telegram “inscription” is TDLib phone/SMS auth, not `MessengerProtocol.register`.
 
 † Telegram cloud chats use MTProto (client↔server). Secret chats are not exposed in this build.
 
 Email details: [docs/email.md](email.md). Password auth only; autoconfig via Thunderbird ISPDB + DNS SRV (DoH).
 
-Toutes les inscriptions et le trafic protocolaire passent par Tor (SOCKS5 fail-closed) lorsque Tor est activé. Discord a été retiré du projet.
+IRC details: [docs/irc.md](irc.md). Kitteh client; TLS or cleartext; NickServ / SASL PLAIN; Tor SOCKS5 when enabled.
+
+Toutes les inscriptions et le trafic protocolaire passent par Tor (SOCKS5 fail-closed) **lorsque Tor est activé**. Discord a été retiré du projet.
 
 Matrix E2EE is **fail-closed**: connect / SSO succeeds only when Trixnity is live; plaintext HTTP `/sync` is stopped once Trixnity owns the session. OIDC homeservers use `m.login.sso` → Tor WebView → one-shot `loginToken` → soft-login (never reuse `m.login.token` with an access token).
 
@@ -75,15 +81,16 @@ Signal GV2 prefers sender keys; if endorsements/certificates are unavailable it 
 | `:data` | Persistence for accounts, conversations, and message caches |
 | `:protocol:api` | `MessengerProtocol` interface every adapter implements — connect, disconnect, send, register |
 | `:protocol:xmpp` | Smack-based XMPP client (`SmackClientFacade`), XEP-0077 registration (`XmppRegistration`) |
-| `:protocol:matrix` | Raw Matrix Client-Server API client, well-known discovery, UIA registration + WebView fallback |
+| `:protocol:matrix` | Trixnity client (E2EE) + raw CS API for register/UIA/SSO token; well-known discovery |
 | `:protocol:telegram` | TDLib JNI bindings (see [docs/tdlib-build.md](tdlib-build.md)) |
 | `:protocol:signal` | Signal adapter (`libsignal-service` + `libsignal-client`) — see [docs/signal-vendor.md](signal-vendor.md) |
 | `:protocol:email` | Angus Mail IMAP/POP3/SMTP + JMAP HTTPS — see [docs/email.md](email.md) |
+| `:protocol:irc` | Kitteh IRC (TLS/NickServ/SASL, channels + DMs) — see [docs/irc.md](irc.md) |
 
 ## Network flow (every protocol)
 
 ```
-Protocol adapter (Matrix / XMPP / Telegram / Signal / Email*)
+Protocol adapter (Matrix / XMPP / Telegram / Signal / Email / IRC)
         ↓
 core/proxy — OnionVpnPacClient (GET http://127.0.0.1:18201/onionvpn.pac)
            → SOCKS5 127.0.0.1:18202 (DNSCrypt→Tor bridge)
@@ -93,15 +100,16 @@ core/network — NetworkGuard (blocks only when Tor is opted-in and SOCKS is dow
 OnionVPN PAC bridge → Tor → destination
 ```
 
-\* Default Tor provider is OnionVPN PAC (`:18201` / SOCKS `:18202`). Custom SOCKS remains selectable. Orbot / InviZible removed. When Tor is on, Signal uses `SignalSocksHolder` like other protocols; Email uses Angus `mail.*.socks.*` properties and SOCKS OkHttp for JMAP.
+\* Default Tor provider is OnionVPN PAC (`:18201` / SOCKS `:18202`). Custom SOCKS remains selectable. Orbot / InviZible removed. When Tor is on, Signal uses `SignalSocksHolder` like other protocols; Email uses Angus `mail.*.socks.*` properties and SOCKS OkHttp for JMAP; IRC uses Kitteh `ProxyType.SOCKS_5`.
 
-Matrix and XMPP UIA/registration steps that require a browser (captcha, email verification, terms acceptance) open an in-app WebView that is force-routed through the same Tor proxy via `androidx.webkit.ProxyController` — no direct network path ever exists for any component, including the WebView.
+Matrix and XMPP UIA/registration steps that require a browser (captcha, email verification, terms acceptance) open an in-app WebView that is force-routed through the same Tor proxy via `androidx.webkit.ProxyController` when Tor is enabled.
 
 ## Registration flows
 
 - **Matrix**: `MatrixRegistration` calls `/_matrix/client/v3/register` directly (bypassing Trixnity for this one step, for full control over User-Interactive Auth). Supports `m.login.dummy` and `m.login.registration_token` inline; any other stage (captcha, email, terms) falls back to `RegistrationWebViewDialog`.
 - **XMPP**: `XmppRegistration` uses Smack's `AccountManager` (XEP-0077) to probe `getAccountAttributes()` / `getAccountInstructions()` after the user enters a domain, then dynamically renders any additional required fields.
 - **XMPP Tor stream isolation**: `SmackClientFacade` and `XmppRegistration` always pass a non-null SOCKS5 username/password to Smack's proxy client. Smack advertises both no-auth and username/password SOCKS5 methods; Tor's `SocksPort` commonly selects username/password purely as a stream-isolation token. Supplying one (the bare JID) both fixes the handshake and gives each account its own Tor circuit.
+- **Telegram / Signal / Email / IRC**: no `MessengerProtocol.register` path (Telegram/Signal use dedicated login UIs; Email/IRC are login-only).
 
 ## Signing and CI
 
