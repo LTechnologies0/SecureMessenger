@@ -147,7 +147,7 @@ jobs:
           name: SecureMessenger ${{ steps.meta.outputs.version }}
           generate_release_notes: true
           prerelease: ${{ contains(steps.meta.outputs.version, 'alpha') || contains(steps.meta.outputs.version, 'beta') || contains(steps.meta.outputs.version, 'rc') }}
-          latest: ${{ !(contains(steps.meta.outputs.version, 'alpha') || contains(steps.meta.outputs.version, 'beta') || contains(steps.meta.outputs.version, 'rc')) }}
+          make_latest: ${{ !(contains(steps.meta.outputs.version, 'alpha') || contains(steps.meta.outputs.version, 'beta') || contains(steps.meta.outputs.version, 'rc')) }}
           body_path: dist/release/ABI_LIST.md
           files: |
             dist/release/securemessenger-*.apk
