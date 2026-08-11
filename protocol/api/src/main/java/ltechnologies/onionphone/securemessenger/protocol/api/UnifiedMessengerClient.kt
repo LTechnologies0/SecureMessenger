@@ -57,7 +57,8 @@ class UnifiedMessengerClient @Inject constructor(
             return registry.get(protocol)?.observeConversations()
                 ?: kotlinx.coroutines.flow.flowOf(emptyList())
         }
-        return registry.get(ProtocolId.XMPP)?.observeConversations()
+        // Adapters typically mirror the shared Room inbox; pick any registered protocol.
+        return registry.all().firstOrNull()?.observeConversations()
             ?: kotlinx.coroutines.flow.flowOf(emptyList())
     }
 

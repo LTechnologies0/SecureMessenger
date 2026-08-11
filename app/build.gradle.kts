@@ -75,6 +75,9 @@ android {
             excludes += "META-INF/NOTICE.md"
             excludes += "META-INF/LICENSE.txt"
             excludes += "META-INF/NOTICE.txt"
+            // Kitteh IRC pulls multiple Netty artifacts that each ship this file.
+            excludes += "META-INF/io.netty.versions.properties"
+            excludes += "META-INF/INDEX.LIST"
         }
     }
 }

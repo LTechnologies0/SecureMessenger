@@ -188,8 +188,6 @@ class IrcProtocol @Inject constructor(
 
                 client.connect()
 
-                client.connect()
-
                 val connectedOk = withTimeoutOrNull(45.seconds) {
                     while (!ready.isCompleted && !fail.isCompleted) {
                         kotlinx.coroutines.delay(50)

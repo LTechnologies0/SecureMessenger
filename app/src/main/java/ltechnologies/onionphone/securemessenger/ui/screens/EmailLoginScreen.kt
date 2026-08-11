@@ -133,25 +133,30 @@ fun EmailLoginScreen(
                 busy = true
                 status = "Détection…"
                 scope.launch {
-                    val result = viewModel.detectEmailSettings(email.trim())
-                    busy = false
-                    if (result == null) {
-                        status = "Autoconfig introuvable — saisissez les hôtes manuellement"
-                        return@launch
+                    try {
+                        val result = viewModel.detectEmailSettings(email.trim())
+                        if (result == null) {
+                            status = "Autoconfig introuvable — saisissez les hôtes manuellement"
+                            return@launch
+                        }
+                        result.imapHost?.let { imapHost = it }
+                        result.imapPort?.let { imapPort = it.toString() }
+                        result.imapSecurity?.let { imapSecurity = it }
+                        result.pop3Host?.let { pop3Host = it }
+                        result.pop3Port?.let { pop3Port = it.toString() }
+                        result.pop3Security?.let { pop3Security = it }
+                        result.smtpHost?.let { smtpHost = it }
+                        result.smtpPort?.let { smtpPort = it.toString() }
+                        result.smtpSecurity?.let { smtpSecurity = it }
+                        result.jmapSessionUrl?.let { jmapSessionUrl = it }
+                        if (result.imapHost != null) storeKind = EmailStoreKind.IMAP
+                        else if (result.pop3Host != null) storeKind = EmailStoreKind.POP3
+                        status = "Paramètres détectés (${result.source})"
+                    } catch (e: Exception) {
+                        status = e.message ?: "Détection échouée"
+                    } finally {
+                        busy = false
                     }
-                    result.imapHost?.let { imapHost = it }
-                    result.imapPort?.let { imapPort = it.toString() }
-                    result.imapSecurity?.let { imapSecurity = it }
-                    result.pop3Host?.let { pop3Host = it }
-                    result.pop3Port?.let { pop3Port = it.toString() }
-                    result.pop3Security?.let { pop3Security = it }
-                    result.smtpHost?.let { smtpHost = it }
-                    result.smtpPort?.let { smtpPort = it.toString() }
-                    result.smtpSecurity?.let { smtpSecurity = it }
-                    result.jmapSessionUrl?.let { jmapSessionUrl = it }
-                    if (result.imapHost != null) storeKind = EmailStoreKind.IMAP
-                    else if (result.pop3Host != null) storeKind = EmailStoreKind.POP3
-                    status = "Paramètres détectés (${result.source})"
                 }
             },
             enabled = !busy,

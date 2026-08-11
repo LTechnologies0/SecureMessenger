@@ -94,7 +94,14 @@ class EmailProtocol @Inject constructor(
         sessions[accountId]?.isConnected() == true
 
     suspend fun detectSettings(email: String): MailAutoconfigResult? =
-        mailAutoconfig.detect(email)
+        try {
+            mailAutoconfig.detect(email)
+        } catch (e: IllegalArgumentException) {
+            throw e
+        } catch (e: Exception) {
+            Timber.d(e, "Email autoconfig failed for %s", email)
+            null
+        }
 
     override suspend fun connect(account: AccountCredentials, proxy: ProxyConfig): ConnectionResult =
         withContext(Dispatchers.IO) {
