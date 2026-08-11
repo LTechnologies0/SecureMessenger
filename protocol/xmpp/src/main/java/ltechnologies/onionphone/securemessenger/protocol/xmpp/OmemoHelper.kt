@@ -1,5 +1,7 @@
 package ltechnologies.onionphone.securemessenger.protocol.xmpp
 
+import kotlin.coroutines.resume
+import kotlinx.coroutines.suspendCancellableCoroutine
 import org.jivesoftware.smack.XMPPConnection
 import org.jivesoftware.smack.packet.Message as SmackMessage
 import org.jivesoftware.smackx.omemo.OmemoManager
@@ -11,26 +13,44 @@ import org.jivesoftware.smackx.omemo.trust.OmemoTrustCallback
 import org.jivesoftware.smackx.omemo.trust.TrustState
 import org.jxmpp.jid.impl.JidCreate
 import timber.log.Timber
-import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlin.coroutines.resume
 
 /**
- * TOFU trust for OMEMO — auto-trust on first sight.
+ * TOFU trust for OMEMO — first-seen fingerprint trusted; later fingerprint changes stay undecided.
  */
 class OmemoHelper(
     private val omemoManager: OmemoManager,
     private val connection: XMPPConnection,
 ) {
 
+    private val trustedFingerprints = java.util.concurrent.ConcurrentHashMap<String, String>()
+
     private val trustCallback = object : OmemoTrustCallback {
-        override fun getTrust(device: OmemoDevice, fingerprint: OmemoFingerprint): TrustState =
-            TrustState.trusted
+        override fun getTrust(device: OmemoDevice, fingerprint: OmemoFingerprint): TrustState {
+            val key = deviceKey(device)
+            val fp = fingerprint.toString()
+            val known = trustedFingerprints[key]
+            return when {
+                known == null -> {
+                    trustedFingerprints[key] = fp
+                    TrustState.trusted
+                }
+                known == fp -> TrustState.trusted
+                else -> TrustState.undecided
+            }
+        }
 
         override fun setTrust(
             device: OmemoDevice,
             fingerprint: OmemoFingerprint,
             state: TrustState,
-        ) = Unit
+        ) {
+            val key = deviceKey(device)
+            when (state) {
+                TrustState.trusted -> trustedFingerprints[key] = fingerprint.toString()
+                TrustState.untrusted -> trustedFingerprints.remove(key)
+                else -> Unit
+            }
+        }
     }
 
     @Volatile
@@ -51,7 +71,7 @@ class OmemoHelper(
         })
     }
 
-    /** RFC 7627 — block until OMEMO device list is published before encrypting. */
+    /** Block until OMEMO device list is published before encrypting. */
     suspend fun initialize(): Boolean = suspendCancellableCoroutine { cont ->
         if (ready) {
             cont.resume(true)
@@ -76,10 +96,7 @@ class OmemoHelper(
         val sent = try {
             omemoManager.encrypt(jid, body)
         } catch (e: UndecidedOmemoIdentityException) {
-            e.undecidedDevices.forEach { device ->
-                val fp = omemoManager.getFingerprint(device)
-                omemoManager.trustOmemoIdentity(device, fp)
-            }
+            resolveUndecidedOrThrow(e)
             omemoManager.encrypt(jid, body)
         }
         val builder = connection.stanzaFactory.buildMessageStanza()
@@ -90,10 +107,7 @@ class OmemoHelper(
         val sent = try {
             omemoManager.encrypt(muc, body)
         } catch (e: UndecidedOmemoIdentityException) {
-            e.undecidedDevices.forEach { device ->
-                val fp = omemoManager.getFingerprint(device)
-                omemoManager.trustOmemoIdentity(device, fp)
-            }
+            resolveUndecidedOrThrow(e)
             omemoManager.encrypt(muc, body)
         }
         val builder = connection.stanzaFactory.buildMessageStanza()
@@ -118,9 +132,26 @@ class OmemoHelper(
         }
     }
 
+    /** True when stanza carries an OMEMO element (caller must fail-closed if decrypt returns null). */
+    fun hasOmemoPayload(stanza: SmackMessage): Boolean =
+        stanza.getExtension(OmemoElement::class.java) != null
+
     fun contactSupportsOmemo(remoteJid: String): Boolean = try {
         omemoManager.contactSupportsOmemo(JidCreate.bareFrom(remoteJid))
     } catch (_: Exception) {
         false
     }
+
+    private fun resolveUndecidedOrThrow(e: UndecidedOmemoIdentityException) {
+        e.undecidedDevices.forEach { device ->
+            val fp = omemoManager.getFingerprint(device)
+            if (trustCallback.getTrust(device, fp) != TrustState.trusted) {
+                throw SecurityException("OMEMO identity undecided/changed for ${device.jid}/${device.deviceId}")
+            }
+            omemoManager.trustOmemoIdentity(device, fp)
+        }
+    }
+
+    private fun deviceKey(device: OmemoDevice): String =
+        "${device.jid}|${device.deviceId}"
 }

@@ -115,6 +115,11 @@ fun RegistrationWebViewDialog(
                             loadUrl(url)
                         }
                     },
+                    onRelease = { webView ->
+                        webView.stopLoading()
+                        webView.webViewClient = object : WebViewClient() {}
+                        webView.destroy()
+                    },
                 )
             }
             if (onLoginToken == null) {

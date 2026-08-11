@@ -5,6 +5,7 @@ enum class ProtocolId {
     MATRIX,
     TELEGRAM,
     SIGNAL,
+    EMAIL,
 }
 
 object FeatureFlags {
@@ -13,6 +14,7 @@ object FeatureFlags {
         ProtocolId.MATRIX,
         ProtocolId.TELEGRAM,
         ProtocolId.SIGNAL,
+        ProtocolId.EMAIL,
     )
 }
 
@@ -142,6 +144,14 @@ data class ProtocolCapabilities(
     val messageHistory: Boolean = false,
     /** App-level JSON export of local conversations/messages. */
     val backupExport: Boolean = true,
+    /**
+     * Protocol surfaces voice/video call signaling (offer/hangup/busy).
+     * Media path may still require a native WebRTC stack (e.g. RingRTC).
+     */
+    val voiceCalls: Boolean = false,
+    val videoCalls: Boolean = false,
+    /** Protocol can receive and/or send ephemeral stories. */
+    val stories: Boolean = false,
 )
 
 enum class MessageKind {
@@ -156,6 +166,8 @@ enum class MessageKind {
     POLL,
     CONTACT,
     SYSTEM,
+    CALL,
+    STORY,
     UNKNOWN,
 }
 
@@ -222,12 +234,37 @@ sealed class OutgoingContent {
     data class Sticker(
         val localPath: String,
         val emoji: String = "⭐",
+        /** Signal pack id (hex) when sending a real Signal sticker. */
+        val packId: String? = null,
+        /** Signal pack key (hex) when sending a real Signal sticker. */
+        val packKey: String? = null,
+        val stickerId: Int? = null,
     ) : OutgoingContent()
 
     data class Ephemeral(
         val body: SanitizedText,
         val expireSeconds: Int,
     ) : OutgoingContent()
+
+    /** Call signaling only (hangup / busy). Full A/V requires RingRTC. */
+    data class CallAction(
+        val action: CallSignalAction,
+        val callId: Long? = null,
+    ) : OutgoingContent()
+
+    /**
+     * Publish a Signal story (text and/or media) to My Story / a 1:1 story thread.
+     */
+    data class Story(
+        val text: String? = null,
+        val attachment: Attachment? = null,
+        val allowsReplies: Boolean = true,
+    ) : OutgoingContent()
+}
+
+enum class CallSignalAction {
+    HANGUP,
+    BUSY,
 }
 
 sealed class BackupExportResult {

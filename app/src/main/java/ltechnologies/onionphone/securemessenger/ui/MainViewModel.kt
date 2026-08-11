@@ -4,13 +4,14 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import java.io.File
+import kotlinx.coroutines.withContext
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -38,15 +39,15 @@ import ltechnologies.onionphone.securemessenger.core.proxy.ProxyManager
 import ltechnologies.onionphone.securemessenger.core.proxy.ProxyStatus
 import ltechnologies.onionphone.securemessenger.core.proxy.SocksEndpointResolver
 import ltechnologies.onionphone.securemessenger.core.security.MessageSanitizer
+import ltechnologies.onionphone.securemessenger.data.LocalBackupExporter
 import ltechnologies.onionphone.securemessenger.data.MessengerRepository
 import ltechnologies.onionphone.securemessenger.protocol.telegram.TelegramProtocol
 import ltechnologies.onionphone.securemessenger.service.ConnectionManager
-import org.json.JSONArray
-import org.json.JSONObject
 
 @HiltViewModel
 class MainViewModel @Inject constructor(
     private val repository: MessengerRepository,
+    private val backupExporter: LocalBackupExporter,
     private val connectionManager: ConnectionManager,
     private val proxyManager: ProxyManager,
     private val onionVpnHelper: OnionVpnHelper,
@@ -152,62 +153,10 @@ class MainViewModel @Inject constructor(
         viewModelScope.launch {
             val resolvedProtocol = protocol
                 ?: accounts.value.firstOrNull { it.id == accountId }?.protocol
-            if (resolvedProtocol != null) {
-                val impl = connectionManager.protocolFor(resolvedProtocol)
-                val protocolResult = impl?.exportBackup(accountId, destinationPath)
-                if (protocolResult is BackupExportResult.Success) {
-                    onResult(protocolResult)
-                    return@launch
-                }
-            }
-            onResult(
-                runCatching {
-                    val (convs, messages) = repository.exportSnapshot(accountId)
-                    val root = JSONObject()
-                        .put("accountId", accountId)
-                        .put("exportedAt", System.currentTimeMillis())
-                        .put(
-                            "conversations",
-                            JSONArray().also { arr ->
-                                convs.forEach { c ->
-                                    arr.put(
-                                        JSONObject()
-                                            .put("id", c.id)
-                                            .put("protocol", c.protocol.name)
-                                            .put("remoteId", c.remoteId)
-                                            .put("title", c.title)
-                                            .put("lastMessageAt", c.lastMessageAt),
-                                    )
-                                }
-                            },
-                        )
-                        .put(
-                            "messages",
-                            JSONArray().also { arr ->
-                                messages.forEach { m ->
-                                    arr.put(
-                                        JSONObject()
-                                            .put("id", m.id)
-                                            .put("conversationId", m.conversationId)
-                                            .put("body", m.body)
-                                            .put("timestamp", m.timestamp)
-                                            .put("direction", m.direction.name)
-                                            .put("kind", m.kind.name)
-                                            .put("payloadJson", m.payloadJson),
-                                    )
-                                }
-                            },
-                        )
-                    File(destinationPath).writeText(root.toString(2))
-                    BackupExportResult.Success(
-                        uriOrPath = destinationPath,
-                        messageCount = messages.size,
-                        conversationCount = convs.size,
-                    )
-                }.getOrElse {
-                    BackupExportResult.Failure(it.message ?: "Export échoué")
-                },
-            )
+                ?: ProtocolId.XMPP
+            // Always stream via LocalBackupExporter — protocol exporters formerly
+            // materialized the full account JSON in heap.
+            onResult(backupExporter.export(accountId, resolvedProtocol, destinationPath))
         }
     }
 
@@ -228,6 +177,7 @@ class MainViewModel @Inject constructor(
             ?: HistoryLoadResult.Failure("Protocole indisponible")
 
     fun closeConversation(conversationId: String, protocol: ProtocolId) {
+        messageFlows.remove(conversationId)
         viewModelScope.launch {
             connectionManager.protocolFor(protocol)?.closeConversation(conversationId)
         }
@@ -392,6 +342,11 @@ class MainViewModel @Inject constructor(
             onResult(connectionManager.connect(credentials))
         }
     }
+
+    suspend fun detectEmailSettings(email: String) =
+        (connectionManager.protocolFor(ProtocolId.EMAIL)
+            as? ltechnologies.onionphone.securemessenger.protocol.email.EmailProtocol)
+            ?.detectSettings(email)
 
     fun registerAccount(request: RegistrationRequest, onResult: (RegistrationResult) -> Unit) {
         viewModelScope.launch {

@@ -41,12 +41,16 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import java.io.File
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import ltechnologies.onionphone.securemessenger.core.model.Account
 import ltechnologies.onionphone.securemessenger.core.model.AccountProfile
 import ltechnologies.onionphone.securemessenger.core.model.BackupExportResult
@@ -318,26 +322,43 @@ private fun ProfileEditDialog(
     var status by remember { mutableStateOf<String?>(null) }
     var loaded by remember { mutableStateOf(false) }
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val photoPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent(),
     ) { uri ->
         if (uri == null || account.protocol != ProtocolId.TELEGRAM) return@rememberLauncherForActivityResult
-        val dest = File(context.cacheDir, "profile_${account.id}_${System.currentTimeMillis()}.jpg")
-        val copied = runCatching {
-            context.contentResolver.openInputStream(uri)?.use { input ->
-                dest.outputStream().use { output -> input.copyTo(output) }
+        scope.launch {
+            val copied = withContext(Dispatchers.IO) {
+                val dest = File(context.cacheDir, "profile_${account.id}_${System.currentTimeMillis()}.jpg")
+                runCatching {
+                    context.contentResolver.openInputStream(uri)?.use { input ->
+                        dest.outputStream().use { output ->
+                            var copiedBytes = 0L
+                            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                            while (true) {
+                                val n = input.read(buffer)
+                                if (n < 0) break
+                                copiedBytes += n
+                                if (copiedBytes > 20L * 1024L * 1024L) {
+                                    error("Profile photo too large")
+                                }
+                                output.write(buffer, 0, n)
+                            }
+                        }
+                    } ?: return@runCatching null
+                    dest.absolutePath
+                }.getOrNull()
             }
-            dest.absolutePath
-        }.getOrNull()
-        if (copied == null) {
-            status = "Impossible de lire la photo"
-            return@rememberLauncherForActivityResult
-        }
-        viewModel.setTelegramProfilePhoto(account.id, copied) { result ->
-            result.fold(
-                onSuccess = { status = "Photo de profil mise à jour" },
-                onFailure = { status = it.message ?: "Échec photo de profil" },
-            )
+            if (copied == null) {
+                status = "Impossible de lire la photo"
+                return@launch
+            }
+            viewModel.setTelegramProfilePhoto(account.id, copied) { result ->
+                result.fold(
+                    onSuccess = { status = "Photo de profil mise à jour" },
+                    onFailure = { status = it.message ?: "Échec photo de profil" },
+                )
+            }
         }
     }
 

@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "database": {
     "version": 4,
-    "identityHash": "1c52ca7fac387fca231e891cf5a33b51",
+    "identityHash": "cc05af1cda3e2e34598430a9eb8f50ca",
     "entities": [
       {
         "tableName": "accounts",
@@ -288,12 +288,23 @@
           "columnNames": [
             "id"
           ]
-        }
+        },
+        "indices": [
+          {
+            "name": "index_contacts_accountId",
+            "unique": false,
+            "columnNames": [
+              "accountId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_contacts_accountId` ON `${TABLE_NAME}` (`accountId`)"
+          }
+        ]
       }
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '1c52ca7fac387fca231e891cf5a33b51')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'cc05af1cda3e2e34598430a9eb8f50ca')"
     ]
   }
 }

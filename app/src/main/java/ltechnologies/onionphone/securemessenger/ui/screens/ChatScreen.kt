@@ -50,6 +50,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -62,8 +63,11 @@ import java.io.File
 import java.text.DateFormat
 import java.util.Date
 import java.util.UUID
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import ltechnologies.onionphone.securemessenger.core.model.Attachment
 import ltechnologies.onionphone.securemessenger.core.model.AttachmentState
 import ltechnologies.onionphone.securemessenger.core.model.DeliveryState
@@ -166,18 +170,32 @@ fun ChatScreen(
     }
 
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
 
-    fun copyUriToCache(uri: android.net.Uri, prefix: String): Pair<File, String>? {
-        val mime = context.contentResolver.getType(uri) ?: "application/octet-stream"
-        val fileName = uri.lastPathSegment ?: "attachment"
-        val dest = File(context.cacheDir, "${prefix}_${UUID.randomUUID()}_$fileName")
-        return runCatching {
-            context.contentResolver.openInputStream(uri)?.use { input ->
-                dest.outputStream().use { output -> input.copyTo(output) }
-            }
-            dest to mime
-        }.getOrNull()
-    }
+    suspend fun copyUriToCache(uri: android.net.Uri, prefix: String): Pair<File, String>? =
+        withContext(Dispatchers.IO) {
+            val mime = context.contentResolver.getType(uri) ?: "application/octet-stream"
+            val fileName = uri.lastPathSegment ?: "attachment"
+            val dest = File(context.cacheDir, "${prefix}_${UUID.randomUUID()}_$fileName")
+            runCatching {
+                context.contentResolver.openInputStream(uri)?.use { input ->
+                    dest.outputStream().use { output ->
+                        var copied = 0L
+                        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                        while (true) {
+                            val n = input.read(buffer)
+                            if (n < 0) break
+                            copied += n
+                            if (copied > MAX_ATTACHMENT_BYTES) {
+                                error("Attachment exceeds $MAX_ATTACHMENT_BYTES bytes")
+                            }
+                            output.write(buffer, 0, n)
+                        }
+                    }
+                } ?: return@runCatching null
+                dest to mime
+            }.getOrNull()
+        }
 
     fun sendAttachmentResult(ok: Boolean, failureLabel: String) {
         if (ok) {
@@ -191,39 +209,42 @@ fun ChatScreen(
     val pickAttachment = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
         val kind = pendingPick
-        val copied = copyUriToCache(uri, "out") ?: run {
-            sendError = "Lecture du fichier impossible"
-            return@rememberLauncherForActivityResult
-        }
-        val (dest, mime) = copied
-        val attachment = Attachment(
-            id = UUID.randomUUID().toString(),
-            mimeType = mime,
-            fileName = dest.name,
-            localPath = dest.absolutePath,
-            sizeBytes = dest.length(),
-            state = AttachmentState.READY,
-        )
-        when (kind) {
-            ComposerPickKind.VOICE -> {
-                viewModel.sendContent(
-                    conversationId,
-                    protocol,
-                    OutgoingContent.VoiceNote(attachment = attachment),
-                ) { ok -> sendAttachmentResult(ok, "Envoi vocal échoué") }
+        scope.launch {
+            val copied = copyUriToCache(uri, "out")
+            if (copied == null) {
+                sendError = "Lecture du fichier impossible"
+                return@launch
             }
-            ComposerPickKind.IMAGE, ComposerPickKind.GIF, ComposerPickKind.FILE -> {
-                val messageKind = when (kind) {
-                    ComposerPickKind.IMAGE -> MessageKind.IMAGE
-                    ComposerPickKind.GIF -> MessageKind.GIF
-                    else -> MessageKind.FILE
+            val (dest, mime) = copied
+            val attachment = Attachment(
+                id = UUID.randomUUID().toString(),
+                mimeType = mime,
+                fileName = dest.name,
+                localPath = dest.absolutePath,
+                sizeBytes = dest.length(),
+                state = AttachmentState.READY,
+            )
+            when (kind) {
+                ComposerPickKind.VOICE -> {
+                    viewModel.sendContent(
+                        conversationId,
+                        protocol,
+                        OutgoingContent.VoiceNote(attachment = attachment),
+                    ) { ok -> sendAttachmentResult(ok, "Envoi vocal échoué") }
                 }
-                val caption = draft.takeIf { it.isNotBlank() }?.let { MessageSanitizer.sanitize(it) }
-                viewModel.sendContent(
-                    conversationId,
-                    protocol,
-                    OutgoingContent.Media(attachment = attachment, caption = caption, kind = messageKind),
-                ) { ok -> sendAttachmentResult(ok, "Envoi média échoué") }
+                ComposerPickKind.IMAGE, ComposerPickKind.GIF, ComposerPickKind.FILE -> {
+                    val messageKind = when (kind) {
+                        ComposerPickKind.IMAGE -> MessageKind.IMAGE
+                        ComposerPickKind.GIF -> MessageKind.GIF
+                        else -> MessageKind.FILE
+                    }
+                    val caption = draft.takeIf { it.isNotBlank() }?.let { MessageSanitizer.sanitize(it) }
+                    viewModel.sendContent(
+                        conversationId,
+                        protocol,
+                        OutgoingContent.Media(attachment = attachment, caption = caption, kind = messageKind),
+                    ) { ok -> sendAttachmentResult(ok, "Envoi média échoué") }
+                }
             }
         }
     }
@@ -575,6 +596,8 @@ private fun KindChip(kind: MessageKind, expireSeconds: Int?) {
         MessageKind.POLL -> "Sondage"
         MessageKind.CONTACT -> "Contact"
         MessageKind.SYSTEM -> "Système"
+        MessageKind.CALL -> "Appel"
+        MessageKind.STORY -> "Story"
         MessageKind.UNKNOWN -> null
     }
     if (label == null && expireSeconds == null) return
@@ -746,3 +769,5 @@ private fun DeliveryIcon(state: DeliveryState, distinguishRead: Boolean) {
         tint = tint,
     )
 }
+
+private const val MAX_ATTACHMENT_BYTES = 100L * 1024L * 1024L

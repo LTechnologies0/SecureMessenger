@@ -3,6 +3,7 @@ package ltechnologies.onionphone.securemessenger.data.db
 import androidx.room.Dao
 import androidx.room.Database
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.PrimaryKey
@@ -35,7 +36,10 @@ data class ConversationEntity(
     val unreadCount: Int,
 )
 
-@Entity(tableName = "messages")
+@Entity(
+    tableName = "messages",
+    indices = [Index(value = ["conversationId"], name = "index_messages_conversationId")],
+)
 data class MessageEntity(
     @PrimaryKey val id: String,
     val conversationId: String,
@@ -51,7 +55,10 @@ data class MessageEntity(
     val expireSeconds: Int? = null,
 )
 
-@Entity(tableName = "contacts")
+@Entity(
+    tableName = "contacts",
+    indices = [Index(value = ["accountId"], name = "index_contacts_accountId")],
+)
 data class ContactEntity(
     @PrimaryKey val id: String,
     val protocol: String,
@@ -94,17 +101,70 @@ interface ConversationDao {
     @Query("SELECT * FROM conversations WHERE accountId = :accountId")
     suspend fun listForAccount(accountId: String): List<ConversationEntity>
 
+    @Query("SELECT * FROM conversations WHERE id = :id LIMIT 1")
+    suspend fun getById(id: String): ConversationEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(conversation: ConversationEntity)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertAll(conversations: List<ConversationEntity>)
+
+    @Query("DELETE FROM conversations WHERE id = :id")
+    suspend fun delete(id: String)
 }
 
 @Dao
 interface MessageDao {
-    @Query("SELECT * FROM messages WHERE conversationId = :conversationId ORDER BY timestamp ASC")
-    fun observeForConversation(conversationId: String): Flow<List<MessageEntity>>
+    /** UI window: newest [limit] rows, emitted oldest→newest for chat lists. */
+    @Query(
+        """
+        SELECT * FROM (
+            SELECT * FROM messages
+            WHERE conversationId = :conversationId
+            ORDER BY timestamp DESC
+            LIMIT :limit
+        )
+        ORDER BY timestamp ASC
+        """,
+    )
+    fun observeRecentForConversation(
+        conversationId: String,
+        limit: Int = UI_MESSAGE_WINDOW,
+    ): Flow<List<MessageEntity>>
+
+    @Query("SELECT * FROM messages WHERE id = :id LIMIT 1")
+    suspend fun getById(id: String): MessageEntity?
+
+    @Query("SELECT COUNT(*) FROM messages WHERE conversationId = :conversationId")
+    suspend fun countForConversation(conversationId: String): Int
+
+    @Query("SELECT MAX(timestamp) FROM messages WHERE conversationId = :conversationId")
+    suspend fun maxTimestampForConversation(conversationId: String): Long?
+
+    @Query(
+        """
+        SELECT id FROM messages
+        WHERE conversationId = :conversationId
+        ORDER BY timestamp DESC
+        LIMIT 1
+        """,
+    )
+    suspend fun latestIdForConversation(conversationId: String): String?
+
+    @Query(
+        """
+        SELECT * FROM messages
+        WHERE conversationId = :conversationId
+        ORDER BY timestamp ASC
+        LIMIT :limit OFFSET :offset
+        """,
+    )
+    suspend fun listPage(
+        conversationId: String,
+        limit: Int,
+        offset: Int,
+    ): List<MessageEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(message: MessageEntity)
@@ -112,11 +172,35 @@ interface MessageDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertAll(messages: List<MessageEntity>)
 
+    @Query(
+        """
+        SELECT * FROM messages
+        WHERE conversationId = :conversationId AND timestamp = :timestamp
+        """,
+    )
+    suspend fun listByTimestamp(conversationId: String, timestamp: Long): List<MessageEntity>
+
+    @Query(
+        """
+        SELECT * FROM messages
+        WHERE conversationId = :conversationId AND timestamp IN (:timestamps)
+        """,
+    )
+    suspend fun listByTimestamps(
+        conversationId: String,
+        timestamps: List<Long>,
+    ): List<MessageEntity>
+
     @Query("DELETE FROM messages WHERE id IN (:ids)")
     suspend fun deleteByIds(ids: List<String>)
 
     @Query("DELETE FROM messages WHERE conversationId = :conversationId")
     suspend fun deleteForConversation(conversationId: String)
+
+    companion object {
+        const val UI_MESSAGE_WINDOW = 500
+        const val EXPORT_PAGE_SIZE = 200
+    }
 }
 
 @Dao
@@ -148,7 +232,7 @@ interface ContactDao {
         ProxySettingsEntity::class,
         ContactEntity::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = true,
 )
 abstract class MessengerDatabase : RoomDatabase() {
@@ -159,16 +243,19 @@ abstract class MessengerDatabase : RoomDatabase() {
     abstract fun contactDao(): ContactDao
 }
 
+private inline fun <reified T : Enum<T>> safeEnum(raw: String, default: T): T =
+    runCatching { enumValueOf<T>(raw) }.getOrDefault(default)
+
 fun AccountEntity.toDomain() = ltechnologies.onionphone.securemessenger.core.model.Account(
     id = id,
-    protocol = ProtocolId.valueOf(protocol),
+    protocol = safeEnum(protocol, ProtocolId.XMPP),
     displayName = displayName,
-    connectionState = ConnectionState.valueOf(connectionState),
+    connectionState = safeEnum(connectionState, ConnectionState.DISCONNECTED),
 )
 
 fun ConversationEntity.toDomain() = ltechnologies.onionphone.securemessenger.core.model.Conversation(
     id = id,
-    protocol = ProtocolId.valueOf(protocol),
+    protocol = safeEnum(protocol, ProtocolId.XMPP),
     accountId = accountId,
     remoteId = remoteId,
     title = title,
@@ -180,23 +267,21 @@ fun ConversationEntity.toDomain() = ltechnologies.onionphone.securemessenger.cor
 fun MessageEntity.toDomain() = ltechnologies.onionphone.securemessenger.core.model.Message(
     id = id,
     conversationId = conversationId,
-    protocol = ProtocolId.valueOf(protocol),
+    protocol = safeEnum(protocol, ProtocolId.XMPP),
     body = body,
     timestamp = timestamp,
-    direction = MessageDirection.valueOf(direction),
-    deliveryState = DeliveryState.valueOf(deliveryState),
+    direction = safeEnum(direction, MessageDirection.INCOMING),
+    deliveryState = safeEnum(deliveryState, DeliveryState.PENDING),
     senderDisplayName = senderDisplayName,
     attachments = AttachmentConverters.toAttachments(attachmentsJson),
-    kind = runCatching {
-        ltechnologies.onionphone.securemessenger.core.model.MessageKind.valueOf(kind)
-    }.getOrDefault(ltechnologies.onionphone.securemessenger.core.model.MessageKind.TEXT),
+    kind = safeEnum(kind, ltechnologies.onionphone.securemessenger.core.model.MessageKind.TEXT),
     payloadJson = payloadJson,
     expireSeconds = expireSeconds,
 )
 
 fun ContactEntity.toDomain() = ltechnologies.onionphone.securemessenger.core.model.Contact(
     id = id,
-    protocol = ProtocolId.valueOf(protocol),
+    protocol = safeEnum(protocol, ProtocolId.XMPP),
     accountId = accountId,
     remoteId = remoteId,
     displayName = displayName,

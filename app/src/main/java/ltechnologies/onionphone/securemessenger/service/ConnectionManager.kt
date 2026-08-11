@@ -227,11 +227,28 @@ class ConnectionManager @Inject constructor(
     suspend fun restorePersistedAccounts() {
         if (!appLockManager.isUnlocked) return
         awaitBootstrap()
+        // Re-check after bootstrap — user may have backgrounded and locked mid-await.
+        if (!appLockManager.isUnlocked) return
         restoreMutex.withLock {
+            if (!appLockManager.isUnlocked) return
+            try {
+                restorePersistedAccountsLocked()
+            } catch (e: IllegalStateException) {
+                if (!appLockManager.isUnlocked) {
+                    Timber.i("Restore aborted — app locked during DB access")
+                    return
+                }
+                throw e
+            }
+        }
+    }
+
+    private suspend fun restorePersistedAccountsLocked() {
             val config = proxyManager.currentConfig()
             if (config.torRequired) {
                 proxyManager.refreshStatusAndWait()
             }
+            if (!appLockManager.isUnlocked) return
             _killswitchActive.value = false
 
             val roomAccounts = repository.get().observeAccounts().first()
@@ -254,6 +271,7 @@ class ConnectionManager @Inject constructor(
             val cleanedRoomAccounts = repository.get().observeAccounts().first()
             val ids = (cleanedRoomAccounts.map { it.id } + credentialStore.listAccountIds()).toSet()
             for (accountId in ids) {
+                if (!appLockManager.isUnlocked) return
                 val protocolName = credentialStore.getProtocol(accountId)
                     ?: cleanedRoomAccounts.firstOrNull { it.id == accountId }?.protocol?.name
                     ?: continue
@@ -303,7 +321,6 @@ class ConnectionManager @Inject constructor(
                 Timber.i("Restoring account $accountId ($protocolId)")
                 connect(creds)
             }
-        }
     }
 
     suspend fun cancelTelegramLogin(accountId: String) {

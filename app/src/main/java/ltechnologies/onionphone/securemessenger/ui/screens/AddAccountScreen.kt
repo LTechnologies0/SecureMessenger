@@ -31,6 +31,7 @@ fun AddAccountScreen(
     onClose: () -> Unit,
     onPickTelegram: () -> Unit,
     onPickSignal: () -> Unit,
+    onPickEmail: () -> Unit,
     onPickProtocol: (ProtocolId) -> Unit,
 ) {
     val choices = listOf(
@@ -45,6 +46,12 @@ fun AddAccountScreen(
             title = "Telegram",
             subtitle = "Numéro de téléphone + code SMS",
             onClick = onPickTelegram,
+        ),
+        ProtocolChoice(
+            protocol = ProtocolId.EMAIL,
+            title = "Email",
+            subtitle = "IMAP / POP3 / JMAP + SMTP",
+            onClick = onPickEmail,
         ),
         ProtocolChoice(
             protocol = ProtocolId.MATRIX,

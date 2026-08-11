@@ -11,9 +11,11 @@ import androidx.lifecycle.lifecycleScope
 import dagger.Lazy
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import ltechnologies.onionphone.securemessenger.R
 import ltechnologies.onionphone.securemessenger.core.proxy.ProxyManager
 import ltechnologies.onionphone.securemessenger.core.security.AppLockManager
@@ -40,7 +42,7 @@ class MessengerForegroundService : LifecycleService() {
         }
         startForegroundWithNotification()
         val connections = connectionManager.get()
-        lifecycleScope.launch {
+        lifecycleScope.launch(Dispatchers.IO) {
             proxyManager.get().status
                 .map { status -> status.proxyHealthy to status.config }
                 .distinctUntilChanged()

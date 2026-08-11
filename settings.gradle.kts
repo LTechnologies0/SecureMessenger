@@ -34,6 +34,7 @@ include(
     ":protocol:matrix",
     ":protocol:telegram",
     ":protocol:signal",
+    ":protocol:email",
     ":vendor:signal:util-jvm",
     ":vendor:signal:models-jvm",
     ":vendor:signal:network-jvm",

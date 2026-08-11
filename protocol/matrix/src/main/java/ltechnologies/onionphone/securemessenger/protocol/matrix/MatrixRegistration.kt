@@ -34,7 +34,7 @@ internal class MatrixRegistration {
     )
 
     /** Keyed by our own sessionId (not the Matrix `session`), since the caller only knows ours. */
-    private val pending = mutableMapOf<String, PendingRegistration>()
+    private val pending = java.util.concurrent.ConcurrentHashMap<String, PendingRegistration>()
 
     suspend fun checkUsernameAvailable(server: String, username: String, proxy: ProxyConfig): Result<Boolean> =
         runCatching {

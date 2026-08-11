@@ -12,11 +12,14 @@ import com.google.zxing.qrcode.QRCodeWriter
 fun qrImageBitmap(payload: String, sizePx: Int = 512): ImageBitmap {
     val hints = mapOf(EncodeHintType.MARGIN to 1)
     val matrix = QRCodeWriter().encode(payload, BarcodeFormat.QR_CODE, sizePx, sizePx, hints)
-    val bmp = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
-    for (x in 0 until sizePx) {
-        for (y in 0 until sizePx) {
-            bmp.setPixel(x, y, if (matrix[x, y]) Color.BLACK else Color.WHITE)
+    val pixels = IntArray(sizePx * sizePx)
+    for (y in 0 until sizePx) {
+        val offset = y * sizePx
+        for (x in 0 until sizePx) {
+            pixels[offset + x] = if (matrix[x, y]) Color.BLACK else Color.WHITE
         }
     }
+    val bmp = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
+    bmp.setPixels(pixels, 0, sizePx, 0, 0, sizePx, sizePx)
     return bmp.asImageBitmap()
 }

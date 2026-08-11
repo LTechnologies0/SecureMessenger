@@ -4,7 +4,6 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emitAll
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import ltechnologies.onionphone.securemessenger.core.model.Account
@@ -13,6 +12,7 @@ import ltechnologies.onionphone.securemessenger.core.model.Conversation
 import ltechnologies.onionphone.securemessenger.core.model.Message
 import ltechnologies.onionphone.securemessenger.core.model.ProxyConfig
 import ltechnologies.onionphone.securemessenger.core.model.TorProvider
+import ltechnologies.onionphone.securemessenger.data.db.MessageDao
 import ltechnologies.onionphone.securemessenger.data.db.ProxySettingsEntity
 import ltechnologies.onionphone.securemessenger.data.db.toDomain
 import ltechnologies.onionphone.securemessenger.data.db.toEntity
@@ -33,12 +33,35 @@ class MessengerRepository @Inject constructor(
     suspend fun listConversationsForAccount(accountId: String): List<Conversation> =
         database.get().conversationDao().listForAccount(accountId).map { it.toDomain() }
 
+    suspend fun getConversation(id: String): Conversation? =
+        database.get().conversationDao().getById(id)?.toDomain()
+
     fun observeMessages(conversationId: String): Flow<List<Message>> = flow {
         emitAll(
-            database.get().messageDao().observeForConversation(conversationId)
+            database.get().messageDao()
+                .observeRecentForConversation(conversationId, MessageDao.UI_MESSAGE_WINDOW)
                 .map { list -> list.map { it.toDomain() } },
         )
     }
+
+    suspend fun getMessage(id: String): Message? =
+        database.get().messageDao().getById(id)?.toDomain()
+
+    suspend fun countMessages(conversationId: String): Int =
+        database.get().messageDao().countForConversation(conversationId)
+
+    suspend fun maxMessageTimestamp(conversationId: String): Long? =
+        database.get().messageDao().maxTimestampForConversation(conversationId)
+
+    suspend fun latestMessageId(conversationId: String): String? =
+        database.get().messageDao().latestIdForConversation(conversationId)
+
+    suspend fun listMessagesPage(
+        conversationId: String,
+        limit: Int,
+        offset: Int,
+    ): List<Message> =
+        database.get().messageDao().listPage(conversationId, limit, offset).map { it.toDomain() }
 
     fun observeContacts(accountId: String): Flow<List<Contact>> = flow {
         emitAll(
@@ -93,9 +116,36 @@ class MessengerRepository @Inject constructor(
         }
     }
 
+    suspend fun upsertContacts(contacts: List<Contact>) {
+        if (contacts.isEmpty()) return
+        database.get().contactDao().upsertAll(contacts.map { it.toEntity() })
+    }
+
     suspend fun deleteMessages(ids: List<String>) {
         if (ids.isEmpty()) return
         database.get().messageDao().deleteByIds(ids)
+    }
+
+    suspend fun listMessagesByTimestamp(conversationId: String, timestamp: Long): List<Message> =
+        database.get().messageDao().listByTimestamp(conversationId, timestamp).map { it.toDomain() }
+
+    suspend fun listMessagesByTimestamps(
+        conversationId: String,
+        timestamps: Collection<Long>,
+    ): List<Message> {
+        if (timestamps.isEmpty()) return emptyList()
+        return database.get().messageDao()
+            .listByTimestamps(conversationId, timestamps.toList())
+            .map { it.toDomain() }
+    }
+
+    suspend fun deleteConversationMessages(conversationId: String) {
+        database.get().messageDao().deleteForConversation(conversationId)
+    }
+
+    suspend fun deleteConversation(conversationId: String) {
+        database.get().messageDao().deleteForConversation(conversationId)
+        database.get().conversationDao().delete(conversationId)
     }
 
     suspend fun saveProxySettings(config: ProxyConfig) {
@@ -116,11 +166,22 @@ class MessengerRepository @Inject constructor(
         database.get().contactDao().deleteForAccount(id)
     }
 
-    /** Flat export snapshot for backup JSON. */
+    /**
+     * Flat export snapshot for backup JSON.
+     * Loads messages in pages to avoid a single giant Flow materialization.
+     */
     suspend fun exportSnapshot(accountId: String): Pair<List<Conversation>, List<Message>> {
         val convs = listConversationsForAccount(accountId)
-        val messages = convs.flatMap { conv ->
-            observeMessages(conv.id).first()
+        val messages = ArrayList<Message>()
+        for (conv in convs) {
+            var offset = 0
+            while (true) {
+                val page = listMessagesPage(conv.id, MessageDao.EXPORT_PAGE_SIZE, offset)
+                if (page.isEmpty()) break
+                messages.addAll(page)
+                offset += page.size
+                if (page.size < MessageDao.EXPORT_PAGE_SIZE) break
+            }
         }
         return convs to messages
     }
