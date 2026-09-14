@@ -1,10 +1,10 @@
 version: 2
 updates:
-  # One grouped PR per month — avoids CI spam from Dependabot.
+  # Weekly Gradle so network/crypto CVEs (e.g. Netty) surface quickly.
   - package-ecosystem: gradle
     directory: /
     schedule:
-      interval: monthly
+      interval: weekly
     commit-message:
       prefix: "build"
       include: scope
@@ -12,9 +12,10 @@ updates:
       gradle-all:
         patterns:
           - "*"
-    open-pull-requests-limit: 1
+    open-pull-requests-limit: 3
     labels:
       - dependencies
+      - security
 
   - package-ecosystem: github-actions
     directory: /

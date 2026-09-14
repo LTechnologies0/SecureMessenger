@@ -26,11 +26,13 @@ import ltechnologies.onionphone.securemessenger.core.model.ConnectionResult
 import ltechnologies.onionphone.securemessenger.core.model.ConnectionState
 import ltechnologies.onionphone.securemessenger.core.model.Contact
 import ltechnologies.onionphone.securemessenger.core.model.Conversation
+import ltechnologies.onionphone.securemessenger.core.model.ConversationIds
 import ltechnologies.onionphone.securemessenger.core.model.DeliveryState
 import ltechnologies.onionphone.securemessenger.core.model.HistoryLoadResult
 import ltechnologies.onionphone.securemessenger.core.model.Message
 import ltechnologies.onionphone.securemessenger.core.model.MessageDirection
 import ltechnologies.onionphone.securemessenger.core.model.MessageKind
+import ltechnologies.onionphone.securemessenger.core.model.OutgoingContent
 import ltechnologies.onionphone.securemessenger.core.model.ProtocolCapabilities
 import ltechnologies.onionphone.securemessenger.core.model.ProtocolId
 import ltechnologies.onionphone.securemessenger.core.model.ProxyConfig
@@ -57,10 +59,10 @@ class EmailProtocol @Inject constructor(
 
     override val id: ProtocolId = ProtocolId.EMAIL
 
-    override val capabilities = ProtocolCapabilities(
+    private val baseCapabilities = ProtocolCapabilities(
         directMessages = true,
         groupChats = false,
-        // Attachments work for IMAP/SMTP MIME; JMAP send rejects them.
+        // Attachments work for IMAP/SMTP MIME; JMAP send rejects them (gated live below).
         mediaSend = true,
         mediaReceive = true,
         typingIndicators = false,
@@ -81,6 +83,23 @@ class EmailProtocol @Inject constructor(
         messageHistory = true,
         backupExport = true,
     )
+
+    /**
+     * Protocol-wide: advertise media if at least one non-JMAP session can send attachments
+     * (or no sessions yet). Per-account truth lives in [capabilitiesFor].
+     */
+    override val capabilities: ProtocolCapabilities
+        get() {
+            val anyMedia = sessions.isEmpty() ||
+                sessions.values.any { it.config.storeKind != EmailStoreKind.JMAP }
+            return baseCapabilities.copy(mediaSend = anyMedia)
+        }
+
+    override fun capabilitiesFor(accountId: String?): ProtocolCapabilities {
+        if (accountId == null) return capabilities
+        val session = sessions[accountId] ?: return baseCapabilities.copy(mediaSend = false)
+        return baseCapabilities.copy(mediaSend = session.config.storeKind != EmailStoreKind.JMAP)
+    }
 
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     override val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
@@ -193,11 +212,11 @@ class EmailProtocol @Inject constructor(
                     }
                 }
 
-                _connectionState.value = ConnectionState.CONNECTED
+                refreshConnectionState()
                 ConnectionResult.Success
             } catch (e: Exception) {
                 Timber.w(e, "Email connect failed")
-                _connectionState.value = ConnectionState.ERROR
+                refreshConnectionState(preferErrorIfEmpty = true)
                 ConnectionResult.Failure(e.message ?: "Email connect failed")
             }
         }
@@ -219,8 +238,14 @@ class EmailProtocol @Inject constructor(
         if (asGroup) {
             return@withContext SendResult.Failure("Email has no groups")
         }
-        val session = resolveSession(accountId)
-            ?: return@withContext SendResult.Failure("Not connected")
+        val session = when {
+            accountId != null -> sessions[accountId]
+            sessions.size == 1 -> sessions.values.single()
+            sessions.isEmpty() -> null
+            else -> return@withContext SendResult.Failure(
+                "Plusieurs comptes Email — précise accountId",
+            )
+        } ?: return@withContext SendResult.Failure("Not connected")
         val peer = runCatching { EmailAddress.requireValid(EmailAddress.extract(remoteId)) }
             .getOrElse { return@withContext SendResult.Failure(it.message ?: "Invalid email") }
         val conversationId = EmailThreading.mailboxConversationId(session.accountId, peer)
@@ -249,7 +274,8 @@ class EmailProtocol @Inject constructor(
         body: SanitizedText,
         accountId: String?,
     ): SendResult = withContext(Dispatchers.IO) {
-        sendInternal(conversationId, body.value, emptyList(), accountId)
+        val (subject, plain) = EmailSubject.parse(body.value)
+        sendInternal(conversationId, plain, emptyList(), accountId, subjectOverride = subject)
     }
 
     override suspend fun sendMedia(
@@ -258,12 +284,41 @@ class EmailProtocol @Inject constructor(
         caption: SanitizedText?,
         accountId: String?,
     ): SendResult = withContext(Dispatchers.IO) {
+        val raw = caption?.value.orEmpty().ifBlank { attachment.fileName ?: "attachment" }
+        val (subject, plain) = EmailSubject.parse(raw)
         sendInternal(
             conversationId,
-            caption?.value.orEmpty().ifBlank { attachment.fileName ?: "attachment" },
+            plain.ifBlank { attachment.fileName ?: "attachment" },
             listOf(attachment),
             accountId,
+            subjectOverride = subject,
         )
+    }
+
+    override suspend fun sendContent(
+        conversationId: String,
+        content: OutgoingContent,
+        accountId: String?,
+    ): SendResult = withContext(Dispatchers.IO) {
+        when (content) {
+            is OutgoingContent.Text -> {
+                val (parsedSubject, plain) = EmailSubject.parse(content.body.value)
+                sendInternal(
+                    conversationId,
+                    plain,
+                    emptyList(),
+                    accountId,
+                    subjectOverride = content.subject?.trim()?.takeIf { it.isNotEmpty() } ?: parsedSubject,
+                )
+            }
+            is OutgoingContent.Media -> sendMedia(
+                conversationId,
+                content.attachment,
+                content.caption,
+                accountId,
+            )
+            else -> SendResult.Failure("Content type not supported for EMAIL")
+        }
     }
 
     private suspend fun sendInternal(
@@ -271,15 +326,32 @@ class EmailProtocol @Inject constructor(
         body: String,
         attachments: List<Attachment>,
         accountId: String?,
+        subjectOverride: String? = null,
     ): SendResult {
-        val session = resolveSession(accountId)
-            ?: return SendResult.Failure("Not connected")
         val conversation = repository.getConversation(conversationId)
-            ?: return SendResult.Failure("Conversation not found")
+            ?: return SendResult.Failure("Conversation introuvable")
+        val resolvedAccountId = accountId
+            ?: conversation.accountId.takeIf { it.isNotBlank() }
+            ?: ConversationIds.emailAccountId(conversationId)
+        val session = resolveSession(resolvedAccountId)
+            ?: return SendResult.Failure(
+                when {
+                    resolvedAccountId == null && sessions.size > 1 ->
+                        "Plusieurs comptes Email — précise accountId"
+                    else -> "Non connecté"
+                },
+            )
+        if (conversation.accountId.isNotBlank() && session.accountId != conversation.accountId) {
+            return SendResult.Failure("Compte Email incorrect pour cette conversation")
+        }
 
-        val (to, subject, inReplyTo, references) = resolveReplyContext(conversation, body)
+        val (to, subject, inReplyTo, references) = resolveReplyContext(
+            conversation,
+            body,
+            subjectOverride = subjectOverride,
+        )
         if (to.isEmpty()) {
-            return SendResult.Failure("Cannot resolve recipient for conversation")
+            return SendResult.Failure("Destinataire introuvable pour cette conversation")
         }
         val result = when (session.config.storeKind) {
             EmailStoreKind.JMAP -> {
@@ -289,7 +361,7 @@ class EmailProtocol @Inject constructor(
                     )
                 }
                 session.jmapClient?.submit(to, subject, body, inReplyTo)
-                    ?: SendResult.Failure("JMAP client missing")
+                    ?: SendResult.Failure("Client JMAP manquant")
             }
             EmailStoreKind.IMAP, EmailStoreKind.POP3 -> {
                 smtpSender.send(
@@ -329,17 +401,29 @@ class EmailProtocol @Inject constructor(
                         .put("messageId", messageId)
                         .put("subject", subject)
                         .put("rootMessageId", root)
+                        .put("to", to.firstOrNull().orEmpty())
                         .toString(),
                 ),
             )
+            val peerEmail = to.firstOrNull()?.takeIf { EmailAddress.isValid(it) }
+                ?: conversation.remoteId.takeIf { it.contains('@') }
             repository.upsertConversation(
                 conversation.copy(
                     id = threadConversationId,
-                    remoteId = root,
+                    // Keep peer email when remapping mailbox→thread so replies still resolve.
+                    remoteId = peerEmail ?: root,
                     title = subject,
                     lastMessagePreview = body.take(160),
                     lastMessageAt = now,
                 ),
+            )
+            if (threadConversationId != conversationId) {
+                // Drop orphan mailbox shell so inbox / open chat don't stay empty.
+                repository.deleteConversation(conversationId)
+            }
+            return SendResult.Success(
+                messageId = messageId,
+                conversationId = threadConversationId.takeIf { it != conversationId },
             )
         }
         return result
@@ -348,34 +432,43 @@ class EmailProtocol @Inject constructor(
     private suspend fun resolveReplyContext(
         conversation: Conversation,
         body: String,
+        subjectOverride: String? = null,
     ): ReplyContext {
-        val latest = repository.listMessagesPage(conversation.id, limit = 1, offset = 0)
-            .firstOrNull()
+        val latestId = repository.latestMessageId(conversation.id)
+        val latest = latestId?.let { repository.getMessage(it) }
+            ?: repository.listMessagesPage(conversation.id, limit = 1, offset = 0).lastOrNull()
         val payload = latest?.payloadJson?.let { runCatching { JSONObject(it) }.getOrNull() }
         val subjectFromPayload = payload?.optString("subject")?.takeIf { it.isNotBlank() }
         val messageId = payload?.optString("messageId")?.takeIf { it.isNotBlank() }
         val root = payload?.optString("rootMessageId")?.takeIf { it.isNotBlank() }
             ?: conversation.remoteId.takeIf { !it.contains('@') }
 
-        val to = if (conversation.remoteId.contains('@')) {
-            listOf(EmailAddress.requireValid(conversation.remoteId))
-        } else {
-            val peer = latest?.senderDisplayName
+        val toFromPayload = payload?.optString("to")?.takeIf { EmailAddress.isValid(it) }
+        val toFromRemote = conversation.remoteId.takeIf { EmailAddress.isValid(it) }
+        val toFromIncoming = if (latest?.direction == MessageDirection.INCOMING) {
+            latest.senderDisplayName
                 ?.let { EmailAddress.extract(it) }
                 ?.takeIf { EmailAddress.isValid(it) }
-                ?: return ReplyContext(
-                    to = emptyList(),
-                    subject = "Message",
-                    inReplyTo = null,
-                    references = null,
-                )
-            listOf(peer)
+        } else {
+            null
+        }
+        val peer = toFromPayload ?: toFromRemote ?: toFromIncoming
+        val to = if (peer != null) {
+            listOf(EmailAddress.requireValid(peer))
+        } else {
+            emptyList()
         }
         if (to.isEmpty()) {
-            return ReplyContext(emptyList(), "Message", null, null)
+            return ReplyContext(
+                emptyList(),
+                subjectOverride?.takeIf { it.isNotBlank() } ?: "Message",
+                null,
+                null,
+            )
         }
 
         val subject = when {
+            !subjectOverride.isNullOrBlank() -> subjectOverride.trim()
             subjectFromPayload != null && !subjectFromPayload.startsWith("Re:", ignoreCase = true) ->
                 "Re: $subjectFromPayload"
             subjectFromPayload != null -> subjectFromPayload
@@ -405,7 +498,8 @@ class EmailProtocol @Inject constructor(
     )
 
     override suspend fun loadMessageHistory(conversationId: String): HistoryLoadResult {
-        val accountId = conversationId.substringBefore(':')
+        val accountId = ConversationIds.emailAccountId(conversationId)
+            ?: conversationId.substringBefore(':')
         val session = sessions[accountId] ?: return HistoryLoadResult.Success(
             messageCount = repository.countMessages(conversationId),
             loadedFromCache = true,
@@ -555,13 +649,23 @@ class EmailProtocol @Inject constructor(
                 ),
             )
         }
-        if (sessions.isEmpty()) {
-            _connectionState.value = ConnectionState.DISCONNECTED
+        refreshConnectionState()
+    }
+
+    private fun refreshConnectionState(preferErrorIfEmpty: Boolean = false) {
+        _connectionState.value = when {
+            sessions.values.any { it.isConnected() } -> ConnectionState.CONNECTED
+            sessions.isNotEmpty() -> ConnectionState.CONNECTING
+            preferErrorIfEmpty -> ConnectionState.ERROR
+            else -> ConnectionState.DISCONNECTED
         }
     }
 
-    private fun resolveSession(accountId: String?): EmailSession? =
-        accountId?.let { sessions[it] } ?: sessions.values.singleOrNull()
+    private fun resolveSession(accountId: String?): EmailSession? = when {
+        accountId != null -> sessions[accountId]
+        sessions.size == 1 -> sessions.values.single()
+        else -> null
+    }
 
     private suspend fun syncJmap(session: EmailSession) {
         val client = session.jmapClient ?: return
@@ -632,5 +736,18 @@ class EmailProtocol @Inject constructor(
         if (raw.isNullOrBlank()) return System.currentTimeMillis()
         return runCatching { Instant.parse(raw).toEpochMilli() }
             .getOrDefault(System.currentTimeMillis())
+    }
+}
+
+/** Parses optional leading `Subject: …` line (NewChat / mailto-style). */
+internal object EmailSubject {
+    fun parse(raw: String): Pair<String?, String> {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return null to raw
+        val firstLine = trimmed.lineSequence().first()
+        if (!firstLine.startsWith("Subject:", ignoreCase = true)) return null to raw
+        val subject = firstLine.substringAfter(':').trim().takeIf { it.isNotEmpty() }
+        val body = trimmed.lineSequence().drop(1).joinToString("\n").trim()
+        return subject to body
     }
 }

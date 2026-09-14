@@ -112,6 +112,9 @@ interface ConversationDao {
 
     @Query("DELETE FROM conversations WHERE id = :id")
     suspend fun delete(id: String)
+
+    @Query("DELETE FROM conversations WHERE accountId = :accountId")
+    suspend fun deleteForAccount(accountId: String)
 }
 
 @Dao
@@ -197,6 +200,15 @@ interface MessageDao {
     @Query("DELETE FROM messages WHERE conversationId = :conversationId")
     suspend fun deleteForConversation(conversationId: String)
 
+    @Query(
+        """
+        DELETE FROM messages WHERE conversationId IN (
+            SELECT id FROM conversations WHERE accountId = :accountId
+        )
+        """,
+    )
+    suspend fun deleteForAccount(accountId: String)
+
     companion object {
         const val UI_MESSAGE_WINDOW = 500
         const val EXPORT_PAGE_SIZE = 200
@@ -246,49 +258,65 @@ abstract class MessengerDatabase : RoomDatabase() {
 private inline fun <reified T : Enum<T>> safeEnum(raw: String, default: T): T =
     runCatching { enumValueOf<T>(raw) }.getOrDefault(default)
 
-fun AccountEntity.toDomain() = ltechnologies.onionphone.securemessenger.core.model.Account(
-    id = id,
-    protocol = safeEnum(protocol, ProtocolId.XMPP),
-    displayName = displayName,
-    connectionState = safeEnum(connectionState, ConnectionState.DISCONNECTED),
-)
+/** Never coerce unknown protocol strings to XMPP — drop the row instead. */
+private fun parseProtocolIdOrNull(raw: String): ProtocolId? =
+    runCatching { enumValueOf<ProtocolId>(raw) }.getOrNull()
 
-fun ConversationEntity.toDomain() = ltechnologies.onionphone.securemessenger.core.model.Conversation(
-    id = id,
-    protocol = safeEnum(protocol, ProtocolId.XMPP),
-    accountId = accountId,
-    remoteId = remoteId,
-    title = title,
-    lastMessagePreview = lastMessagePreview,
-    lastMessageAt = lastMessageAt,
-    unreadCount = unreadCount,
-)
+fun AccountEntity.toDomain(): ltechnologies.onionphone.securemessenger.core.model.Account? {
+    val protocolId = parseProtocolIdOrNull(protocol) ?: return null
+    return ltechnologies.onionphone.securemessenger.core.model.Account(
+        id = id,
+        protocol = protocolId,
+        displayName = displayName,
+        connectionState = safeEnum(connectionState, ConnectionState.DISCONNECTED),
+    )
+}
 
-fun MessageEntity.toDomain() = ltechnologies.onionphone.securemessenger.core.model.Message(
-    id = id,
-    conversationId = conversationId,
-    protocol = safeEnum(protocol, ProtocolId.XMPP),
-    body = body,
-    timestamp = timestamp,
-    direction = safeEnum(direction, MessageDirection.INCOMING),
-    deliveryState = safeEnum(deliveryState, DeliveryState.PENDING),
-    senderDisplayName = senderDisplayName,
-    attachments = AttachmentConverters.toAttachments(attachmentsJson),
-    kind = safeEnum(kind, ltechnologies.onionphone.securemessenger.core.model.MessageKind.TEXT),
-    payloadJson = payloadJson,
-    expireSeconds = expireSeconds,
-)
+fun ConversationEntity.toDomain(): ltechnologies.onionphone.securemessenger.core.model.Conversation? {
+    val protocolId = parseProtocolIdOrNull(protocol) ?: return null
+    return ltechnologies.onionphone.securemessenger.core.model.Conversation(
+        id = id,
+        protocol = protocolId,
+        accountId = accountId,
+        remoteId = remoteId,
+        title = title,
+        lastMessagePreview = lastMessagePreview,
+        lastMessageAt = lastMessageAt,
+        unreadCount = unreadCount,
+    )
+}
 
-fun ContactEntity.toDomain() = ltechnologies.onionphone.securemessenger.core.model.Contact(
-    id = id,
-    protocol = safeEnum(protocol, ProtocolId.XMPP),
-    accountId = accountId,
-    remoteId = remoteId,
-    displayName = displayName,
-    handle = handle,
-    phone = phone,
-    avatarLocalPath = avatarLocalPath,
-)
+fun MessageEntity.toDomain(): ltechnologies.onionphone.securemessenger.core.model.Message? {
+    val protocolId = parseProtocolIdOrNull(protocol) ?: return null
+    return ltechnologies.onionphone.securemessenger.core.model.Message(
+        id = id,
+        conversationId = conversationId,
+        protocol = protocolId,
+        body = body,
+        timestamp = timestamp,
+        direction = safeEnum(direction, MessageDirection.INCOMING),
+        deliveryState = safeEnum(deliveryState, DeliveryState.PENDING),
+        senderDisplayName = senderDisplayName,
+        attachments = AttachmentConverters.toAttachments(attachmentsJson),
+        kind = safeEnum(kind, ltechnologies.onionphone.securemessenger.core.model.MessageKind.TEXT),
+        payloadJson = payloadJson,
+        expireSeconds = expireSeconds,
+    )
+}
+
+fun ContactEntity.toDomain(): ltechnologies.onionphone.securemessenger.core.model.Contact? {
+    val protocolId = parseProtocolIdOrNull(protocol) ?: return null
+    return ltechnologies.onionphone.securemessenger.core.model.Contact(
+        id = id,
+        protocol = protocolId,
+        accountId = accountId,
+        remoteId = remoteId,
+        displayName = displayName,
+        handle = handle,
+        phone = phone,
+        avatarLocalPath = avatarLocalPath,
+    )
+}
 
 fun ltechnologies.onionphone.securemessenger.core.model.Account.toEntity() = AccountEntity(
     id = id,

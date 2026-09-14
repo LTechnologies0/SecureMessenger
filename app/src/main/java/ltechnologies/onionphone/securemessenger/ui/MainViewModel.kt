@@ -8,7 +8,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -57,16 +56,6 @@ class MainViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     val accounts = repository.observeAccounts()
-        .map { list ->
-            list.filter { account ->
-                when (account.protocol) {
-                    ProtocolId.TELEGRAM,
-                    ProtocolId.SIGNAL,
-                    -> account.connectionState == ConnectionState.CONNECTED
-                    else -> true
-                }
-            }
-        }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     val proxyStatus: StateFlow<ProxyStatus> = proxyManager.status
@@ -132,15 +121,18 @@ class MainViewModel @Inject constructor(
         conversationId: String,
         protocol: ProtocolId,
         content: OutgoingContent,
-        onResult: (Boolean) -> Unit,
+        onResult: (ok: Boolean, reason: String?, remappedConversationId: String?) -> Unit,
     ) {
         viewModelScope.launch {
             val protocolImpl = connectionManager.protocolFor(protocol) ?: run {
-                onResult(false)
+                onResult(false, "Protocole indisponible", null)
                 return@launch
             }
-            val result = protocolImpl.sendContent(conversationId, content)
-            onResult(result is SendResult.Success)
+            val accountId = repository.getConversation(conversationId)?.accountId
+            when (val result = protocolImpl.sendContent(conversationId, content, accountId)) {
+                is SendResult.Success -> onResult(true, null, result.conversationId)
+                is SendResult.Failure -> onResult(false, result.reason, null)
+            }
         }
     }
 
@@ -153,7 +145,12 @@ class MainViewModel @Inject constructor(
         viewModelScope.launch {
             val resolvedProtocol = protocol
                 ?: accounts.value.firstOrNull { it.id == accountId }?.protocol
-                ?: ProtocolId.XMPP
+            if (resolvedProtocol == null) {
+                onResult(
+                    BackupExportResult.Failure("Compte introuvable — protocole d'export inconnu"),
+                )
+                return@launch
+            }
             // Always stream via LocalBackupExporter — protocol exporters formerly
             // materialized the full account JSON in heap.
             onResult(backupExporter.export(accountId, resolvedProtocol, destinationPath))
@@ -373,7 +370,8 @@ class MainViewModel @Inject constructor(
                 onResult(false)
                 return@launch
             }
-            val result = protocolImpl.sendMessage(conversationId, sanitized)
+            val accountId = repository.getConversation(conversationId)?.accountId
+            val result = protocolImpl.sendMessage(conversationId, sanitized, accountId)
             onResult(result is ltechnologies.onionphone.securemessenger.core.model.SendResult.Success)
         }
     }
@@ -391,7 +389,8 @@ class MainViewModel @Inject constructor(
                 return@launch
             }
             val sanitizedCaption = caption?.let { MessageSanitizer.sanitize(it) }
-            val result = protocolImpl.sendMedia(conversationId, attachment, sanitizedCaption)
+            val accountId = repository.getConversation(conversationId)?.accountId
+            val result = protocolImpl.sendMedia(conversationId, attachment, sanitizedCaption, accountId)
             onResult(result is ltechnologies.onionphone.securemessenger.core.model.SendResult.Success)
         }
     }
@@ -425,9 +424,20 @@ class MainViewModel @Inject constructor(
         }
     }
 
-    fun pendingAuth(protocol: ProtocolId, onResult: (ltechnologies.onionphone.securemessenger.core.model.AuthStep?) -> Unit) {
+    fun pendingAuth(
+        protocol: ProtocolId,
+        accountId: String? = null,
+        onResult: (ltechnologies.onionphone.securemessenger.core.model.AuthStep?) -> Unit,
+    ) {
         viewModelScope.launch {
-            onResult(connectionManager.protocolFor(protocol)?.pendingAuthStep())
+            val step = connectionManager.protocolFor(protocol)?.pendingAuthStep()
+            val scoped = when {
+                step == null -> null
+                accountId == null -> step
+                step.accountId == null || step.accountId == accountId -> step
+                else -> null
+            }
+            onResult(scoped)
         }
     }
 
@@ -441,22 +451,17 @@ class MainViewModel @Inject constructor(
             while (System.currentTimeMillis() < deadline) {
                 step = connectionManager.protocolFor(ProtocolId.TELEGRAM)?.pendingAuthStep()
                 if (step != null) break
-                if (connectionManager.protocolFor(ProtocolId.TELEGRAM)
-                        ?.connectionState?.value == ConnectionState.CONNECTED
-                ) {
-                    break
-                }
                 delay(300)
             }
             onResult(step)
         }
     }
 
-    fun resendTelegramCode(onResult: (ConnectionResult) -> Unit) {
+    fun resendTelegramCode(accountId: String? = null, onResult: (ConnectionResult) -> Unit) {
         viewModelScope.launch {
             val protocol = connectionManager.protocolFor(ProtocolId.TELEGRAM)
             val result = if (protocol is ltechnologies.onionphone.securemessenger.protocol.telegram.TelegramProtocol) {
-                protocol.resendAuthenticationCode()
+                protocol.resendAuthenticationCode(accountId)
             } else {
                 ConnectionResult.Failure("Telegram non disponible")
             }
@@ -470,16 +475,27 @@ class MainViewModel @Inject constructor(
         }
     }
 
+    fun cancelMatrixSso(accountId: String? = null) {
+        viewModelScope.launch {
+            (connectionManager.protocolFor(ProtocolId.MATRIX)
+                as? ltechnologies.onionphone.securemessenger.protocol.matrix.MatrixProtocol)
+                ?.cancelPendingSso(accountId)
+        }
+    }
+
     fun startSignalDeviceLink(
         deviceName: String = "SecureMessenger",
-        onResult: (ConnectionResult) -> Unit,
+        onResult: (ConnectionResult, accountId: String?) -> Unit,
     ) {
         viewModelScope.launch {
             val proxy = proxyManager.currentConfig().let { config ->
                 if (config.torRequired && !proxyManager.ensureProxyReady()) {
-                    onResult(ConnectionResult.Failure(
-                        "Tor activé mais OnionVPN indisponible — démarrez le tunnel ou désactivez Tor.",
-                    ))
+                    onResult(
+                        ConnectionResult.Failure(
+                            "Tor activé mais OnionVPN indisponible — démarrez le tunnel ou désactivez Tor.",
+                        ),
+                        null,
+                    )
                     return@launch
                 }
                 if (config.torRequired) {
@@ -493,10 +509,11 @@ class MainViewModel @Inject constructor(
             val protocol = connectionManager.protocolFor(ProtocolId.SIGNAL) as?
                 ltechnologies.onionphone.securemessenger.protocol.signal.SignalProtocol
             if (protocol == null) {
-                onResult(ConnectionResult.Failure("Signal non disponible"))
+                onResult(ConnectionResult.Failure("Signal non disponible"), null)
                 return@launch
             }
-            onResult(protocol.startDeviceLink(deviceName, proxy))
+            val (result, linkAccountId) = protocol.startDeviceLink(deviceName, proxy)
+            onResult(result, linkAccountId)
         }
     }
 
@@ -528,9 +545,12 @@ class MainViewModel @Inject constructor(
         }
     }
 
-    fun capabilitiesFor(protocol: ProtocolId): ProtocolCapabilities =
-        connectionManager.protocolFor(protocol)?.capabilities
-            ?: ProtocolCapabilities()
+    fun capabilitiesFor(protocol: ProtocolId, accountId: String? = null): ProtocolCapabilities =
+        connectionManager.protocolFor(protocol)?.capabilitiesFor(accountId)
+            ?: ProtocolCapabilities(
+                directMessages = false,
+                backupExport = false,
+            )
 
     fun canRegister(protocol: ProtocolId): Boolean =
         connectionManager.protocolFor(protocol)?.canRegister == true
@@ -541,26 +561,37 @@ class MainViewModel @Inject constructor(
         message: String?,
         accountId: String? = null,
         asGroup: Boolean = false,
-        onResult: (String?) -> Unit,
+        onResult: (conversationId: String?, reason: String?) -> Unit,
     ) {
         viewModelScope.launch {
-            val resolvedAccountId = accountId
-                ?: accounts.value.firstOrNull { it.protocol == protocol }?.id
+            val matches = accounts.value.filter { it.protocol == protocol }
+            val resolvedAccountId = when {
+                accountId != null -> accountId
+                matches.size == 1 -> matches.first().id
+                matches.isEmpty() -> null
+                else -> {
+                    onResult(
+                        null,
+                        "Plusieurs comptes ${protocol.name} — sélectionne un compte dans la barre",
+                    )
+                    return@launch
+                }
+            }
             if (resolvedAccountId == null) {
-                onResult(null)
+                onResult(null, "Aucun compte pour ce protocole")
                 return@launch
             }
             val impl = connectionManager.protocolFor(protocol) ?: run {
-                onResult(null)
+                onResult(null, "Protocole indisponible")
                 return@launch
             }
             val sanitized = message?.let { MessageSanitizer.sanitize(it) }
             when (val result = impl.startConversation(remoteId, sanitized, resolvedAccountId, asGroup)) {
                 is ltechnologies.onionphone.securemessenger.core.model.SendResult.Success ->
                     // Protocols return conversation id here (not message id).
-                    onResult(result.messageId)
+                    onResult(result.messageId, null)
                 is ltechnologies.onionphone.securemessenger.core.model.SendResult.Failure ->
-                    onResult(null)
+                    onResult(null, result.reason)
             }
         }
     }

@@ -80,7 +80,7 @@ class TelegramProtocol @Inject constructor(
         contacts = true,
         profileEdit = true,
         voiceNotes = true,
-        stickers = true,
+        stickers = false, // Composer has no sticker picker yet — don't advertise.
         gifs = true,
         locationShare = true,
         polls = true,
@@ -114,12 +114,24 @@ class TelegramProtocol @Inject constructor(
     private var authenticatingAccountId: String? = null
 
     fun tdLibFacade(accountId: String? = null): TdLibFacade? =
-        accountId?.let { sessions[it]?.facade } ?: sessions.values.singleOrNull()?.facade
+        when {
+            accountId != null -> sessions[accountId]?.facade
+            sessions.size == 1 -> sessions.values.single().facade
+            else -> null
+        }
 
-    override fun isAccountConnected(accountId: String): Boolean = sessions.containsKey(accountId)
+    override fun isAccountConnected(accountId: String): Boolean =
+        sessions[accountId]?.authorizationReady == true
+
+    /** True while a TDLib client exists for [accountId] (including mid-auth). */
+    fun hasLiveSession(accountId: String): Boolean = sessions.containsKey(accountId)
 
     private fun session(accountId: String? = null): TelegramSession? =
-        accountId?.let { sessions[it] } ?: sessions.values.singleOrNull()
+        when {
+            accountId != null -> sessions[accountId]
+            sessions.size == 1 -> sessions.values.single()
+            else -> null
+        }
 
     private fun sessionForConversation(conversationId: String): TelegramSession? {
         val accId = TdLibMapper.accountIdFromConversation(conversationId) ?: return null
@@ -129,7 +141,8 @@ class TelegramProtocol @Inject constructor(
     private fun refreshConnectionState() {
         _connectionState.value = when {
             sessions.isEmpty() -> ConnectionState.DISCONNECTED
-            sessions.values.any { it.awaitingAuth != AuthStepKind.NONE } -> ConnectionState.CONNECTING
+            sessions.values.any { it.awaitingAuth != AuthStepKind.NONE || !it.authorizationReady } ->
+                ConnectionState.CONNECTING
             else -> ConnectionState.CONNECTED
         }
     }
@@ -186,7 +199,7 @@ class TelegramProtocol @Inject constructor(
                     }
                     if (!proxyOk) {
                         newSession.close()
-                        _connectionState.value = ConnectionState.ERROR
+                        refreshConnectionState()
                         return@withContext null to ConnectionResult.Failure(
                             "Tor activé : démarrez OnionVPN, ou désactivez Tor pour Telegram",
                         )
@@ -202,7 +215,7 @@ class TelegramProtocol @Inject constructor(
                 newSession to ConnectionResult.Success
             } catch (e: Exception) {
                 Timber.w(e, "Telegram connect failed")
-                _connectionState.value = ConnectionState.ERROR
+                refreshConnectionState()
                 null to ConnectionResult.Failure(e.message ?: "Telegram connection failed")
             }
         }
@@ -223,7 +236,29 @@ class TelegramProtocol @Inject constructor(
             is TdApi.UpdateMessageContent -> onMessageContent(accId, update.chatId, update.messageId, update.newContent)
             is TdApi.UpdateFile -> onFileUpdate(accId, update.file)
             is TdApi.UpdateChatAction -> onChatAction(accId, update)
+            is TdApi.UpdateChatPosition -> onChatPosition(accId, update)
             else -> Unit
+        }
+    }
+
+    /**
+     * Official TDLib clients drive main/archive membership from [TdApi.UpdateChatPosition].
+     * order == 0 on ChatListMain means the chat left the main list (archive / delete / filter).
+     */
+    private fun onChatPosition(accId: String, update: TdApi.UpdateChatPosition) {
+        val pos = update.position ?: return
+        if (pos.list !is TdApi.ChatListMain) return
+        val convId = TdLibMapper.conversationId(accId, update.chatId)
+        updateScope.launch {
+            if (pos.order == 0L) {
+                runCatching { repository.deleteConversation(convId) }
+                Timber.i("Telegram chat %s left main list — removed conversation", update.chatId)
+            } else {
+                val session = sessions[accId] ?: return@launch
+                val chat = withContext(session.dispatcher) { session.facade.getChat(update.chatId) }
+                    ?: return@launch
+                repository.upsertConversation(TdLibMapper.toConversation(accId, chat))
+            }
         }
     }
 
@@ -449,8 +484,8 @@ class TelegramProtocol @Inject constructor(
                         if (!proxyOk) {
                             _lastAuthError.value =
                                 "Tor activé : démarrez OnionVPN, ou désactivez Tor pour Telegram"
-                            _connectionState.value = ConnectionState.ERROR
                             disconnect(accId)
+                            refreshConnectionState()
                             return@launch
                         }
                     } else {
@@ -471,6 +506,7 @@ class TelegramProtocol @Inject constructor(
                 session.pendingPhone?.let { session.facade.setPhoneNumber(it) }
             }
             is TdApi.AuthorizationStateWaitOtherDeviceConfirmation -> {
+                session.authorizationReady = false
                 session.otherDeviceLink = state.link
                 session.awaitingAuth = AuthStepKind.TELEGRAM_OTHER_DEVICE
                 session.authPrompt = "Confirmez la connexion sur un autre appareil Telegram : ${state.link}"
@@ -478,12 +514,14 @@ class TelegramProtocol @Inject constructor(
                 emitPendingAuthStep(session)
             }
             is TdApi.AuthorizationStateWaitCode -> {
+                session.authorizationReady = false
                 session.awaitingAuth = AuthStepKind.TELEGRAM_SMS_CODE
                 session.authPrompt = codeDeliveryHint(state.codeInfo)
                 refreshConnectionState()
                 emitPendingAuthStep(session)
             }
             is TdApi.AuthorizationStateWaitRegistration -> {
+                session.authorizationReady = false
                 session.awaitingAuth = AuthStepKind.TELEGRAM_REGISTRATION
                 session.authPrompt = state.termsOfService?.text?.text
                     ?: "Créez votre profil Telegram (prénom et nom)"
@@ -491,23 +529,53 @@ class TelegramProtocol @Inject constructor(
                 emitPendingAuthStep(session)
             }
             is TdApi.AuthorizationStateWaitPassword -> {
+                session.authorizationReady = false
                 session.awaitingAuth = AuthStepKind.TELEGRAM_PASSWORD
                 session.authPrompt = state.passwordHint?.takeIf { it.isNotBlank() }
                     ?: "Entrez votre mot de passe à deux facteurs"
                 refreshConnectionState()
                 emitPendingAuthStep(session)
             }
+            is TdApi.AuthorizationStateWaitEmailAddress -> {
+                session.authorizationReady = false
+                session.awaitingAuth = AuthStepKind.TELEGRAM_EMAIL_ADDRESS
+                session.authPrompt = buildString {
+                    append("Telegram demande une adresse e-mail pour finaliser la connexion")
+                    if (state.allowAppleId || state.allowGoogleId) {
+                        append(" (Apple/Google ID non supportés ici — utilisez l'e-mail)")
+                    }
+                }
+                refreshConnectionState()
+                emitPendingAuthStep(session)
+            }
+            is TdApi.AuthorizationStateWaitEmailCode -> {
+                session.authorizationReady = false
+                session.awaitingAuth = AuthStepKind.TELEGRAM_EMAIL_CODE
+                val pattern = state.codeInfo?.emailAddressPattern?.takeIf { it.isNotBlank() }
+                session.authPrompt = if (pattern != null) {
+                    "Entrez le code envoyé à $pattern"
+                } else {
+                    "Entrez le code reçu par e-mail"
+                }
+                refreshConnectionState()
+                emitPendingAuthStep(session)
+            }
             is TdApi.AuthorizationStateReady -> {
                 session.awaitingAuth = AuthStepKind.NONE
-                _pendingAuthStep.value = null
+                session.authorizationReady = true
+                if (authenticatingAccountId == accId) {
+                    authenticatingAccountId = null
+                }
+                republishPendingAuthStep()
                 updateScope.launch { completeTelegramAuth(accId) }
             }
             is TdApi.AuthorizationStateClosed -> {
                 session.awaitingAuth = AuthStepKind.NONE
                 if (authenticatingAccountId == accId) {
-                    _pendingAuthStep.value = null
+                    authenticatingAccountId = null
                 }
                 tearDownSession(sessions.remove(accId))
+                republishPendingAuthStep()
                 refreshConnectionState()
             }
             else -> Unit
@@ -515,7 +583,23 @@ class TelegramProtocol @Inject constructor(
     }
 
     private fun emitPendingAuthStep(session: TelegramSession) {
+        authenticatingAccountId = session.accountId
         updateScope.launch { _pendingAuthStep.value = buildAuthStep(session) }
+    }
+
+    /** Keep another in-flight Telegram login visible when one account finishes or closes. */
+    private fun republishPendingAuthStep() {
+        val preferred = authenticatingAccountId?.let { sessions[it] }
+            ?.takeIf { it.awaitingAuth != AuthStepKind.NONE }
+        val next = preferred
+            ?: sessions.values.firstOrNull { it.awaitingAuth != AuthStepKind.NONE }
+        if (next == null) {
+            _pendingAuthStep.value = null
+            authenticatingAccountId = null
+            return
+        }
+        authenticatingAccountId = next.accountId
+        _pendingAuthStep.value = buildAuthStep(next)
     }
 
     private fun buildAuthStep(session: TelegramSession): AuthStep? = when (session.awaitingAuth) {
@@ -523,21 +607,37 @@ class TelegramProtocol @Inject constructor(
             kind = AuthStepKind.TELEGRAM_SMS_CODE,
             prompt = session.authPrompt.ifBlank { "Entrez le code reçu par SMS ou dans l'app Telegram" },
             fields = listOf("code"),
+            accountId = session.accountId,
         )
         AuthStepKind.TELEGRAM_PASSWORD -> AuthStep(
             kind = AuthStepKind.TELEGRAM_PASSWORD,
             prompt = session.authPrompt.ifBlank { "Entrez votre mot de passe à deux facteurs" },
             fields = listOf("password"),
+            accountId = session.accountId,
         )
         AuthStepKind.TELEGRAM_REGISTRATION -> AuthStep(
             kind = AuthStepKind.TELEGRAM_REGISTRATION,
             prompt = session.authPrompt,
             fields = listOf("firstName", "lastName"),
+            accountId = session.accountId,
         )
         AuthStepKind.TELEGRAM_OTHER_DEVICE -> AuthStep(
             kind = AuthStepKind.TELEGRAM_OTHER_DEVICE,
             prompt = session.authPrompt,
             fields = emptyList(),
+            accountId = session.accountId,
+        )
+        AuthStepKind.TELEGRAM_EMAIL_ADDRESS -> AuthStep(
+            kind = AuthStepKind.TELEGRAM_EMAIL_ADDRESS,
+            prompt = session.authPrompt.ifBlank { "Adresse e-mail requise par Telegram" },
+            fields = listOf("email"),
+            accountId = session.accountId,
+        )
+        AuthStepKind.TELEGRAM_EMAIL_CODE -> AuthStep(
+            kind = AuthStepKind.TELEGRAM_EMAIL_CODE,
+            prompt = session.authPrompt.ifBlank { "Entrez le code reçu par e-mail" },
+            fields = listOf("emailCode"),
+            accountId = session.accountId,
         )
         else -> null
     }
@@ -556,12 +656,22 @@ class TelegramProtocol @Inject constructor(
         else -> "Entrez le code reçu par SMS ou dans l'app Telegram"
     }
 
-    override suspend fun pendingAuthStep(): AuthStep? =
-        session(authenticatingAccountId)?.let { buildAuthStep(it) }
+    override suspend fun pendingAuthStep(): AuthStep? {
+        val preferred = authenticatingAccountId?.let { sessions[it] }
+        if (preferred != null && preferred.awaitingAuth != AuthStepKind.NONE) {
+            return buildAuthStep(preferred)
+        }
+        val awaiting = sessions.values.filter { it.awaitingAuth != AuthStepKind.NONE }
+        val next = awaiting.firstOrNull() ?: return null
+        authenticatingAccountId = next.accountId
+        return buildAuthStep(next)
+    }
 
     override suspend fun continueAuthentication(fields: Map<String, String>): ConnectionResult {
-        val accId = authenticatingAccountId
+        val accId = fields["accountId"]?.takeIf { it.isNotBlank() }
+            ?: authenticatingAccountId
         val session = session(accId) ?: return ConnectionResult.Failure("Not connected")
+        if (accId != null) authenticatingAccountId = accId
         return withContext(session.dispatcher) {
             try {
                 networkGuard.assertNetworkAllowed()
@@ -584,6 +694,24 @@ class TelegramProtocol @Inject constructor(
                         session.facade.registerUser(first, last)?.let { return@withContext ConnectionResult.Failure(it) }
                         ConnectionResult.Success
                     }
+                    AuthStepKind.TELEGRAM_EMAIL_ADDRESS -> {
+                        val email = fields["email"]?.trim().orEmpty()
+                        if (email.isBlank() || !email.contains('@')) {
+                            return@withContext ConnectionResult.Failure("Adresse e-mail invalide")
+                        }
+                        session.facade.setAuthenticationEmailAddress(email)
+                            ?.let { return@withContext ConnectionResult.Failure(it) }
+                        ConnectionResult.Success
+                    }
+                    AuthStepKind.TELEGRAM_EMAIL_CODE -> {
+                        val code = fields["emailCode"]?.trim().orEmpty().ifBlank {
+                            fields["code"]?.trim().orEmpty()
+                        }
+                        if (code.isBlank()) return@withContext ConnectionResult.Failure("Code e-mail requis")
+                        session.facade.checkAuthenticationEmailCode(code)
+                            ?.let { return@withContext ConnectionResult.Failure(it) }
+                        ConnectionResult.Success
+                    }
                     else -> ConnectionResult.Success
                 }
             } catch (e: NetworkBlockedException) {
@@ -592,8 +720,10 @@ class TelegramProtocol @Inject constructor(
         }
     }
 
-    suspend fun resendAuthenticationCode(): ConnectionResult {
-        val session = session(authenticatingAccountId) ?: return ConnectionResult.Failure("Not connected")
+    suspend fun resendAuthenticationCode(accountId: String? = null): ConnectionResult {
+        val accId = accountId?.takeIf { it.isNotBlank() } ?: authenticatingAccountId
+        val session = session(accId) ?: return ConnectionResult.Failure("Not connected")
+        if (accId != null) authenticatingAccountId = accId
         return withContext(session.dispatcher) {
             try {
                 networkGuard.assertNetworkAllowed()
@@ -608,7 +738,10 @@ class TelegramProtocol @Inject constructor(
     private suspend fun completeTelegramAuth(accId: String): ConnectionResult {
         val session = sessions[accId] ?: return ConnectionResult.Failure("No account")
         session.awaitingAuth = AuthStepKind.NONE
-        authenticatingAccountId = null
+        if (authenticatingAccountId == accId) {
+            authenticatingAccountId = null
+        }
+        republishPendingAuthStep()
         syncChatList(accId, session)
         runCatching { refreshContacts(accId) }
             .onFailure { Timber.w(it, "Telegram contacts refresh after auth failed") }
@@ -736,8 +869,12 @@ class TelegramProtocol @Inject constructor(
         accountId: String?,
         asGroup: Boolean,
     ): SendResult {
-        val accId = accountId ?: sessions.keys.singleOrNull()
-            ?: return SendResult.Failure("Not connected")
+        val accId = when {
+            accountId != null -> accountId
+            sessions.size == 1 -> sessions.keys.single()
+            sessions.isEmpty() -> return SendResult.Failure("Not connected")
+            else -> return SendResult.Failure("Plusieurs comptes Telegram — précise accountId")
+        }
         val session = sessions[accId] ?: return SendResult.Failure("Not connected")
         val trimmed = remoteId.trim()
 
@@ -787,12 +924,21 @@ class TelegramProtocol @Inject constructor(
 
         val chat = withContext(session.dispatcher) {
             val asChatId = trimmed.toLongOrNull()
-            if (asChatId != null) {
-                session.facade.getChat(asChatId)
-            } else {
-                session.facade.searchPublicChat(trimmed)
+            when {
+                asChatId != null -> {
+                    session.facade.getChat(asChatId)
+                        ?: session.facade.createPrivateChat(asChatId)
+                }
+                trimmed.startsWith("+") || trimmed.all { it.isDigit() || it == '+' } -> {
+                    val user = session.facade.searchUserByPhoneNumber(trimmed)
+                    user?.let { session.facade.createPrivateChat(it.id) }
+                }
+                else -> session.facade.searchPublicChat(trimmed)
             }
-        } ?: return SendResult.Failure("Utilisateur ou chat introuvable : $trimmed")
+        } ?: return SendResult.Failure(
+            "Utilisateur ou chat introuvable : $trimmed " +
+                "(chat ID, @username, userId, ou téléphone +33…)",
+        )
 
         val convId = TdLibMapper.conversationId(accId, chat.id)
         repository.upsertConversation(TdLibMapper.toConversation(accId, chat))
@@ -1054,8 +1200,14 @@ class TelegramProtocol @Inject constructor(
         phoneNumber: String,
         accountId: String? = null,
     ): Result<Contact> {
-        val accId = accountId ?: sessions.keys.singleOrNull()
-            ?: return Result.failure(IllegalStateException("Telegram non connecté"))
+        val accId = accountId
+            ?: sessions.keys.singleOrNull()
+            ?: return Result.failure(
+                IllegalStateException(
+                    if (sessions.isEmpty()) "Telegram non connecté"
+                    else "Plusieurs comptes Telegram — précise accountId",
+                ),
+            )
         val session = sessions[accId]
             ?: return Result.failure(IllegalStateException("Telegram non connecté"))
         return withContext(session.dispatcher) {
@@ -1155,6 +1307,13 @@ class TelegramProtocol @Inject constructor(
         fromConversationId: String,
         messageIds: List<String>,
     ): Result<Unit> {
+        val fromAcc = TdLibMapper.accountIdFromConversation(fromConversationId)
+        val toAcc = TdLibMapper.accountIdFromConversation(toConversationId)
+        if (fromAcc == null || toAcc == null || fromAcc != toAcc) {
+            return Result.failure(
+                IllegalStateException("Transfert impossible entre comptes Telegram différents"),
+            )
+        }
         val toSession = sessionForConversation(toConversationId)
             ?: return Result.failure(IllegalStateException("Telegram non connecté"))
         val toChatId = TdLibMapper.chatIdFromConversation(toConversationId)
@@ -1181,7 +1340,11 @@ class TelegramProtocol @Inject constructor(
         query: String = "",
         limit: Int = 40,
     ): List<TelegramSticker> {
-        val accId = accountId ?: sessions.keys.singleOrNull() ?: return emptyList()
+        val accId = when {
+            accountId != null -> accountId
+            sessions.size == 1 -> sessions.keys.single()
+            else -> return emptyList()
+        }
         val session = sessions[accId] ?: return emptyList()
         return withContext(session.dispatcher) {
             runCatching {
@@ -1352,19 +1515,11 @@ class TelegramProtocol @Inject constructor(
                 typingFlows.keys.filter { it.startsWith("${id}_") }.forEach { typingFlows.remove(it) }
                 if (authenticatingAccountId == id) {
                     authenticatingAccountId = null
-                    _pendingAuthStep.value = null
+                    republishPendingAuthStep()
                 }
-                val previousName = repository.observeAccounts().first()
-                    .firstOrNull { it.id == id }?.displayName
-                    ?: id
-                repository.upsertAccount(
-                    ltechnologies.onionphone.securemessenger.core.model.Account(
-                        id = id,
-                        protocol = ProtocolId.TELEGRAM,
-                        displayName = previousName,
-                        connectionState = ConnectionState.DISCONNECTED,
-                    ),
-                )
+                // Do NOT flip Room to DISCONNECTED here — ConnectionManager restore treats
+                // non-CONNECTED Telegram as "incomplete login" and wipes the account. Soft
+                // disconnect (app lock / Tor) must leave the row so unlock can reconnect TDLib.
             }
             if (accountId == null) {
                 typingFlows.clear()
@@ -1395,7 +1550,8 @@ class TelegramProtocol @Inject constructor(
 
     companion object {
         private const val HISTORY_PAGE_SIZE = 100
-        private const val HISTORY_MAX_PAGES = 20
+        /** Soft cap only — EOF is empty page, not short page (see TDLib getChatHistory). */
+        private const val HISTORY_MAX_PAGES = 200
         private const val CHAT_SYNC_LIMIT = 200
 
         fun conversationIdFor(accountId: String, chatId: Long) =

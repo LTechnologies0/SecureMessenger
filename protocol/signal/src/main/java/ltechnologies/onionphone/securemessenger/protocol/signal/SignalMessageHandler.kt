@@ -887,7 +887,17 @@ internal class SignalMessageHandler(
             return
         }
         if (contactsSync.complete == true || parsed.isNotEmpty()) {
-            repository.replaceContacts(accountId, parsed)
+            // During link-and-sync restore, merge — do not wipe archive-imported contacts
+            // (Signal-Android applies multi-device contact sync onto the restored DB).
+            val linkSettled =
+                credentialStore.get(accountId, SignalCredentialKeys.EPHEMERAL_BACKUP_KEY) == null ||
+                    credentialStore.get(accountId, SignalCredentialKeys.LINK_SYNC_IMPORTED) == "1" ||
+                    credentialStore.get(accountId, SignalCredentialKeys.LINK_SYNC_SKIPPED) == "1"
+            if (linkSettled && contactsSync.complete == true) {
+                repository.replaceContacts(accountId, parsed)
+            } else {
+                repository.upsertContacts(parsed)
+            }
             seedConversationsFromContacts(parsed)
             credentialStore.put(accountId, SignalCredentialKeys.INITIAL_SYNC_DONE, "true")
             onContactsSynced(parsed.size)

@@ -102,11 +102,11 @@ class IrcProtocol @Inject constructor(
                 val nick = account.secrets["nick"]?.trim().orEmpty()
                 if (host.isBlank()) {
                     refreshConnectionState()
-                    return@withContext ConnectionResult.Failure("Missing IRC host")
+                    return@withContext ConnectionResult.Failure("Hôte IRC manquant")
                 }
                 if (nick.isBlank()) {
                     refreshConnectionState()
-                    return@withContext ConnectionResult.Failure("Missing IRC nick")
+                    return@withContext ConnectionResult.Failure("Pseudo IRC manquant")
                 }
 
                 val port = account.secrets["port"]?.toIntOrNull() ?: 6697
@@ -199,7 +199,7 @@ class IrcProtocol @Inject constructor(
 
                 client.connect()
 
-                val connectedOk = withTimeoutOrNull(45.seconds) {
+                val connectedOk = withTimeoutOrNull(90.seconds) {
                     while (!ready.isCompleted && !fail.isCompleted) {
                         kotlinx.coroutines.delay(50)
                     }
@@ -270,7 +270,7 @@ class IrcProtocol @Inject constructor(
     override suspend fun refreshContacts(accountId: String): Result<Int> =
         withContext(Dispatchers.IO) {
             val session = sessions[accountId]
-                ?: return@withContext Result.failure(IllegalStateException("Not connected"))
+                ?: return@withContext Result.failure(IllegalStateException("Non connecté"))
             val contacts = mutableListOf<Contact>()
             session.client.channels.forEach { channel ->
                 channel.users.forEach { user ->
@@ -308,14 +308,20 @@ class IrcProtocol @Inject constructor(
         asGroup: Boolean,
     ): SendResult =
         withContext(Dispatchers.IO) {
-            val accId = accountId ?: sessions.keys.singleOrNull()
-                ?: return@withContext SendResult.Failure("Not connected")
+            val accId = when {
+                accountId != null -> accountId
+                sessions.size == 1 -> sessions.keys.single()
+                sessions.isEmpty() -> return@withContext SendResult.Failure("Non connecté")
+                else -> return@withContext SendResult.Failure(
+                    "Plusieurs comptes IRC — précise accountId",
+                )
+            }
             val session = sessions[accId]
                 ?: return@withContext SendResult.Failure("Account not connected")
             networkGuard.assertNetworkAllowed()
 
             val target = remoteId.trim()
-            if (target.isBlank()) return@withContext SendResult.Failure("Missing nick or channel")
+            if (target.isBlank()) return@withContext SendResult.Failure("Pseudo ou canal manquant")
 
             val channelish = asGroup || IrcTargets.isChannel(target)
             val remote = when {
@@ -454,6 +460,15 @@ class IrcProtocol @Inject constructor(
                 _connectionState.value = ConnectionState.DISCONNECTED
             } else if (sessions.values.any { it.connected }) {
                 _connectionState.value = ConnectionState.CONNECTED
+            }
+        }
+    }
+
+    override suspend fun markRead(conversationId: String, messageId: String?) {
+        withContext(Dispatchers.IO) {
+            val conversation = repository.getConversation(conversationId) ?: return@withContext
+            if (conversation.unreadCount > 0) {
+                repository.upsertConversation(conversation.copy(unreadCount = 0))
             }
         }
     }

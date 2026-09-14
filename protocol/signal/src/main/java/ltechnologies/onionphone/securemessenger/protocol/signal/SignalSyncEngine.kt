@@ -37,6 +37,12 @@ internal class SignalSyncEngine(
     private val onFetchLatest: (org.whispersystems.signalservice.internal.push.SyncMessage.FetchLatest.Type?) -> Unit = {},
 ) {
     private var job: Job? = null
+    /**
+     * When true, suppress [forceNewWebSocket] so link-and-sync long-poll on the same
+     * authenticated socket is not torn down (Signal-Android waits on this connection).
+     */
+    @Volatile
+    var holdReconnectForLinkSync: Boolean = false
     private val messageReceiver = org.whispersystems.signalservice.api.SignalServiceMessageReceiver(
         session.pushServiceSocket,
     )
@@ -118,6 +124,11 @@ internal class SignalSyncEngine(
     }
 
     private fun reconnectWebSocket() {
+        if (holdReconnectForLinkSync) {
+            Timber.i("Signal websocket reconnect deferred — link-and-sync holds the socket")
+            runCatching { session.authWebSocket.connect() }
+            return
+        }
         session.applyNetworkProxyFromSocksHolder()
         runCatching {
             session.authWebSocket.forceNewWebSocket()

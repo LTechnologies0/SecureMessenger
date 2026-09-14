@@ -22,10 +22,13 @@ class MatrixHttpFallback(
 ) {
     private var accessToken: String? = null
     private var matrixUserId: String? = null
+    private var deviceId: String? = null
     private var httpClient: HttpClient? = null
 
     val persistedAccessToken: String? get() = accessToken
     val persistedUserId: String? get() = matrixUserId
+    /** Homeserver-issued device_id bound to [persistedAccessToken] (CS login response). */
+    val persistedDeviceId: String? get() = deviceId
 
     suspend fun connect(
         accId: String,
@@ -36,6 +39,8 @@ class MatrixHttpFallback(
         since: String? = null,
         onSinceUpdated: (String) -> Unit = {},
         onAuthExpired: () -> Unit = {},
+        /** When set, ask the HS to reuse this device (Element password re-login). */
+        reuseDeviceId: String? = null,
     ): Result<Unit> = runCatching {
         // Signature kept for call sites; sync callbacks unused (Trixnity owns sync).
         @Suppress("UNUSED_VARIABLE")
@@ -44,7 +49,7 @@ class MatrixHttpFallback(
         httpClient = client
         val localPart = MatrixUrls.loginLocalPart(matrixUser)
         val loginUrl = "${server.trimEnd('/')}/_matrix/client/v3/login"
-        timber.log.Timber.d("Matrix password login -> $loginUrl")
+        timber.log.Timber.d("Matrix password login -> $loginUrl device=%s", reuseDeviceId)
         val httpResponse = client.post(loginUrl) {
             contentType(ContentType.Application.Json)
             setBody(
@@ -53,6 +58,7 @@ class MatrixHttpFallback(
                     identifier = Identifier(user = localPart),
                     password = password,
                     initialDeviceDisplayName = "SecureMessenger",
+                    deviceId = reuseDeviceId?.takeIf { it.isNotBlank() },
                 ),
             )
         }
@@ -67,6 +73,7 @@ class MatrixHttpFallback(
         val response = httpResponse.body<LoginResponse>()
         accessToken = response.accessToken
         matrixUserId = response.userId
+        deviceId = response.deviceId
     }
 
     suspend fun connectWithToken(
@@ -78,11 +85,13 @@ class MatrixHttpFallback(
         since: String? = null,
         onSinceUpdated: (String) -> Unit = {},
         onAuthExpired: () -> Unit = {},
+        matrixDeviceId: String? = null,
     ): Result<Unit> = runCatching {
         @Suppress("UNUSED_VARIABLE")
         val unused = listOf(accId, server, since, onSinceUpdated, onAuthExpired)
         accessToken = token
         matrixUserId = userId
+        deviceId = matrixDeviceId
         httpClient = createProxiedClient(proxy)
     }
 
@@ -94,6 +103,7 @@ class MatrixHttpFallback(
         httpClient = null
         accessToken = null
         matrixUserId = null
+        deviceId = null
     }
 
     private fun createProxiedClient(proxy: ProxyConfig): HttpClient = MatrixHttpClientFactory.create(proxy)
@@ -104,6 +114,8 @@ class MatrixHttpFallback(
         val identifier: Identifier,
         val password: String,
         @SerialName("initial_device_display_name") val initialDeviceDisplayName: String? = null,
+        /** Reclaim the same E2EE device on password re-login (Element-style). */
+        @SerialName("device_id") val deviceId: String? = null,
     )
 
     @Serializable
@@ -113,6 +125,7 @@ class MatrixHttpFallback(
     private data class LoginResponse(
         @SerialName("access_token") val accessToken: String,
         @SerialName("user_id") val userId: String,
+        @SerialName("device_id") val deviceId: String? = null,
     )
 
     @Serializable

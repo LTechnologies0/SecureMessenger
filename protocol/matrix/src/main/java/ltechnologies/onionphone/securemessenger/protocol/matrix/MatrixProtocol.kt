@@ -20,6 +20,7 @@ import ltechnologies.onionphone.securemessenger.core.model.AuthStepKind
 import ltechnologies.onionphone.securemessenger.core.model.ConnectionResult
 import ltechnologies.onionphone.securemessenger.core.model.ConnectionState
 import ltechnologies.onionphone.securemessenger.core.model.Conversation
+import ltechnologies.onionphone.securemessenger.core.model.ConversationIds
 import ltechnologies.onionphone.securemessenger.core.model.DeliveryState
 import ltechnologies.onionphone.securemessenger.core.model.HistoryLoadResult
 import ltechnologies.onionphone.securemessenger.core.model.Message
@@ -70,16 +71,34 @@ class MatrixProtocol @Inject constructor(
         backupExport = true,
     )
 
-    /** Reflects live session: E2EE and encrypted media require an active Trixnity engine. */
+    /**
+     * Protocol-wide: E2EE/media only when every live session has Trixnity E2EE.
+     * Per-account truth lives in [capabilitiesFor].
+     */
     override val capabilities: ProtocolCapabilities
         get() {
-            val e2ee = sessions.values.any { it.e2eeEnabled }
+            val e2ee = sessions.isNotEmpty() && sessions.values.all { it.e2eeEnabled }
             return baseCapabilities.copy(
                 endToEndEncryption = e2ee,
                 mediaSend = e2ee,
                 mediaReceive = e2ee,
             )
         }
+
+    override fun capabilitiesFor(accountId: String?): ProtocolCapabilities {
+        if (accountId == null) return capabilities
+        val session = sessions[accountId] ?: return baseCapabilities.copy(
+            endToEndEncryption = false,
+            mediaSend = false,
+            mediaReceive = false,
+        )
+        val e2ee = session.e2eeEnabled
+        return baseCapabilities.copy(
+            endToEndEncryption = e2ee,
+            mediaSend = e2ee,
+            mediaReceive = e2ee,
+        )
+    }
 
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     override val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
@@ -120,6 +139,39 @@ class MatrixProtocol @Inject constructor(
         pendingSso.remove(accountId)
     }
 
+    /** After one account finishes login, keep another account's parked SSO visible if any. */
+    private fun republishOrClearPendingSso() {
+        val entry = pendingSso.entries.firstOrNull()
+        if (entry == null) {
+            if (_pendingAuthStep.value?.kind == AuthStepKind.MATRIX_SSO) {
+                _pendingAuthStep.value = null
+            }
+            return
+        }
+        val (id, state) = entry
+        _pendingAuthStep.value = AuthStep(
+            kind = AuthStepKind.MATRIX_SSO,
+            prompt = "Connexion SSO Matrix requise",
+            fields = listOf("loginToken", "accountId"),
+            url = MatrixLoginFlows.ssoRedirectUrl(state.apiBase),
+            accountId = id,
+        )
+    }
+
+    fun cancelPendingSso(accountId: String? = null) {
+        if (accountId != null) {
+            pendingSso.remove(accountId)
+            if (_pendingAuthStep.value?.accountId == accountId) {
+                republishOrClearPendingSso()
+            }
+            return
+        }
+        pendingSso.clear()
+        if (_pendingAuthStep.value?.kind == AuthStepKind.MATRIX_SSO) {
+            _pendingAuthStep.value = null
+        }
+    }
+
     /**
      * Parks SSO for [accountId]. Refuses a second concurrent SSO for a different account
      * so a single-slot UI (`loginToken` only) cannot complete the wrong session.
@@ -146,20 +198,41 @@ class MatrixProtocol @Inject constructor(
             prompt = prompt,
             fields = listOf("loginToken", "accountId"),
             url = MatrixLoginFlows.ssoRedirectUrl(apiBase),
+            accountId = accountId,
         )
         return null
     }
 
     fun trixnityEngine(accountId: String? = null): TrixnityMatrixEngine? =
-        (accountId?.let { sessions[it] } ?: sessions.values.singleOrNull())?.trixnityEngine
+        when {
+            accountId != null -> sessions[accountId]?.trixnityEngine
+            sessions.size == 1 -> sessions.values.single().trixnityEngine
+            else -> null
+        }
 
     /** Whether Trixnity E2EE is active for [accountId]. */
     fun usesE2ee(accountId: String? = null): Boolean =
-        (accountId?.let { sessions[it] } ?: sessions.values.singleOrNull())?.e2eeEnabled == true
+        when {
+            accountId != null -> sessions[accountId]?.e2eeEnabled == true
+            sessions.size == 1 -> sessions.values.single().e2eeEnabled
+            else -> false
+        }
 
     override fun isAccountConnected(accountId: String): Boolean {
         val session = sessions[accountId] ?: return false
-        return session.e2eeEnabled && session.trixnityEngine != null
+        return session.trixnityEngine != null || session.httpFallback != null
+    }
+
+    private fun sessionLive(session: MatrixSession): Boolean =
+        session.trixnityEngine != null || session.httpFallback != null
+
+    private fun refreshConnectionState(preferErrorIfEmpty: Boolean = false) {
+        _connectionState.value = when {
+            sessions.values.any(::sessionLive) -> ConnectionState.CONNECTED
+            sessions.isNotEmpty() -> ConnectionState.CONNECTING
+            preferErrorIfEmpty -> ConnectionState.ERROR
+            else -> ConnectionState.DISCONNECTED
+        }
     }
 
     override val canRegister: Boolean = true
@@ -231,10 +304,15 @@ class MatrixProtocol @Inject constructor(
                 }
                 val onAuthExpired: () -> Unit = {
                     credentialStore.put(account.accountId, ACCESS_TOKEN_KEY, "")
-                    _connectionState.value = ConnectionState.ERROR
+                    refreshConnectionState(preferErrorIfEmpty = true)
                 }
 
-                val flows = MatrixLoginFlows.fetchFlows(apiBaseUrl, proxy)
+                val flows = MatrixLoginFlows.fetchFlows(apiBaseUrl, proxy).getOrElse { err ->
+                    Timber.w(err, "Matrix login flows probe failed")
+                    return@withContext ConnectionResult.Failure(
+                        err.message ?: "Impossible de lire les méthodes de connexion Matrix",
+                    )
+                }
 
                 // Password path unavailable (OIDC-only homeservers): park SSO auth step.
                 if ((accessToken == null || accessToken.isBlank()) &&
@@ -249,7 +327,7 @@ class MatrixProtocol @Inject constructor(
                         userHint = matrixUser.takeIf { it.isNotBlank() },
                         prompt = "Connexion SSO Matrix requise",
                     )?.let {
-                        _connectionState.value = ConnectionState.ERROR
+                        refreshConnectionState(preferErrorIfEmpty = true)
                         return@withContext it
                     }
                     _connectionState.value = ConnectionState.CONNECTING
@@ -274,9 +352,13 @@ class MatrixProtocol @Inject constructor(
                             since = syncSince,
                             onSinceUpdated = onSinceUpdated,
                             onAuthExpired = onAuthExpired,
+                            matrixDeviceId = account.secrets[DEVICE_ID_KEY]
+                                ?: credentialStore.get(account.accountId, DEVICE_ID_KEY),
                         )
                     }
                     password != null -> {
+                        val storedDevice = account.secrets[DEVICE_ID_KEY]
+                            ?: credentialStore.get(account.accountId, DEVICE_ID_KEY)
                         val passwordResult = fallback.connect(
                             account.accountId,
                             apiBaseUrl,
@@ -286,28 +368,22 @@ class MatrixProtocol @Inject constructor(
                             since = syncSince,
                             onSinceUpdated = onSinceUpdated,
                             onAuthExpired = onAuthExpired,
+                            reuseDeviceId = storedDevice,
                         )
-                        if (passwordResult.isFailure && MatrixLoginFlows.supportsSso(flows)) {
-                            parkPendingSso(
-                                accountId = account.accountId,
-                                apiBase = apiBaseUrl,
-                                proxy = proxy,
-                                displayName = account.displayName,
-                                userHint = matrixUser,
-                                prompt = "Mot de passe refusé — connectez-vous via SSO",
-                            )?.let {
-                                _connectionState.value = ConnectionState.ERROR
-                                return@withContext it
-                            }
-                            _connectionState.value = ConnectionState.CONNECTING
-                            return@withContext ConnectionResult.Success
+                        if (passwordResult.isFailure) {
+                            refreshConnectionState(preferErrorIfEmpty = true)
+                            val cause = passwordResult.exceptionOrNull()
+                            Timber.e(cause, "Matrix password login failed")
+                            return@withContext ConnectionResult.Failure(
+                                cause?.message ?: "Matrix connect failed",
+                            )
                         }
                         passwordResult
                     }
                     else -> Result.failure(IllegalStateException("Missing Matrix credentials"))
                 }
                 if (fb.isFailure) {
-                    _connectionState.value = ConnectionState.ERROR
+                    refreshConnectionState(preferErrorIfEmpty = true)
                     val cause = fb.exceptionOrNull()
                     Timber.e(cause, "Matrix login failed")
                     return@withContext ConnectionResult.Failure(
@@ -329,7 +405,7 @@ class MatrixProtocol @Inject constructor(
                 )
             } catch (e: Exception) {
                 Timber.e(e, "Matrix connect failed")
-                _connectionState.value = ConnectionState.ERROR
+                refreshConnectionState(preferErrorIfEmpty = true)
                 ConnectionResult.Failure(e.message ?: "Matrix connect failed")
             }
         }
@@ -343,7 +419,10 @@ class MatrixProtocol @Inject constructor(
         password: String?,
         proxy: ProxyConfig,
         fallback: MatrixHttpFallback,
+        deviceId: String? = fallback.persistedDeviceId,
     ): ConnectionResult {
+        val resolvedDeviceId = deviceId?.takeIf { it.isNotBlank() }
+            ?: credentialStore.get(accountId, DEVICE_ID_KEY)
         // Do not publish the session until Trixnity E2EE is live (fail-closed).
         val engine = TrixnityMatrixEngine(repository, context.filesDir)
         var trixnityLogin = engine.loginWithAccessToken(
@@ -352,6 +431,7 @@ class MatrixProtocol @Inject constructor(
             matrixUser,
             accessToken,
             proxy,
+            deviceId = resolvedDeviceId,
         )
         var liveEngine = engine
         if (trixnityLogin.isFailure) {
@@ -365,6 +445,7 @@ class MatrixProtocol @Inject constructor(
                 matrixUser,
                 accessToken,
                 proxy,
+                deviceId = resolvedDeviceId,
             )
             if (trixnityLogin.isSuccess) {
                 liveEngine = retryEngine
@@ -376,7 +457,7 @@ class MatrixProtocol @Inject constructor(
         if (trixnityLogin.isFailure) {
             fallback.disconnect()
             liveEngine.close()
-            _connectionState.value = ConnectionState.ERROR
+            refreshConnectionState(preferErrorIfEmpty = true)
             return ConnectionResult.Failure(
                 "E2EE Matrix (Trixnity) indisponible: " +
                     (trixnityLogin.exceptionOrNull()?.message ?: "login failed"),
@@ -389,12 +470,15 @@ class MatrixProtocol @Inject constructor(
             httpFallback = null,
             e2eeEnabled = true,
         )
-        Timber.i("Matrix Trixnity E2EE session active for $accountId")
+        Timber.i("Matrix Trixnity E2EE session active for $accountId device=%s", resolvedDeviceId)
 
         credentialStore.put(accountId, ACCESS_TOKEN_KEY, accessToken)
         password?.let { credentialStore.put(accountId, "password", it) }
         credentialStore.put(accountId, "userId", matrixUser)
         credentialStore.put(accountId, "homeserver", apiBaseUrl)
+        resolvedDeviceId?.let { credentialStore.put(accountId, DEVICE_ID_KEY, it) }
+        // Prefer the live client device id if soft-login / fromStore recovered it.
+        liveEngine.currentDeviceId()?.let { credentialStore.put(accountId, DEVICE_ID_KEY, it) }
 
         repository.upsertAccount(
             ltechnologies.onionphone.securemessenger.core.model.Account(
@@ -404,8 +488,12 @@ class MatrixProtocol @Inject constructor(
                 connectionState = ConnectionState.CONNECTED,
             ),
         )
-        _pendingAuthStep.value = null
-        _connectionState.value = ConnectionState.CONNECTED
+        clearPendingSso(accountId)
+        val pending = _pendingAuthStep.value
+        if (pending?.accountId == null || pending.accountId == accountId) {
+            republishOrClearPendingSso()
+        }
+        refreshConnectionState()
         return ConnectionResult.Success
     }
 
@@ -446,6 +534,7 @@ class MatrixProtocol @Inject constructor(
                             tokenLogin.userId,
                             tokenLogin.accessToken,
                             pending.proxy,
+                            matrixDeviceId = tokenLogin.deviceId,
                         ).getOrThrow()
                         finalizeMatrixSession(
                             accountId = accountId,
@@ -456,11 +545,13 @@ class MatrixProtocol @Inject constructor(
                             password = null,
                             proxy = pending.proxy,
                             fallback = fallback,
+                            deviceId = tokenLogin.deviceId,
                         ).also { clearPendingSso(accountId) }
                     } catch (e: Exception) {
                         Timber.e(e, "Matrix SSO continue failed")
                         clearPendingSso(accountId)
-                        _connectionState.value = ConnectionState.ERROR
+                        republishOrClearPendingSso()
+                        refreshConnectionState(preferErrorIfEmpty = true)
                         ConnectionResult.Failure(e.message ?: "SSO Matrix échoué")
                     }
                 }
@@ -477,8 +568,8 @@ class MatrixProtocol @Inject constructor(
         withContext(Dispatchers.IO) {
             try {
                 networkGuard.assertNetworkAllowed()
-                val accId = conversationId.substringBefore('_', missingDelimiterValue = conversationId)
-                val roomId = conversationId.substringAfter('_', missingDelimiterValue = conversationId)
+                val accId = (ConversationIds.accountId(conversationId) ?: conversationId)
+                val roomId = (ConversationIds.remoteId(conversationId) ?: conversationId)
                 val session = sessions[accId]
                     ?: return@withContext HistoryLoadResult.Failure("Compte Matrix non connecté")
                 val engine = session.trixnityEngine
@@ -516,8 +607,14 @@ class MatrixProtocol @Inject constructor(
         accountId: String?,
         asGroup: Boolean,
     ): SendResult = withContext(Dispatchers.IO) {
-        val accId = accountId ?: sessions.keys.singleOrNull()
-            ?: return@withContext SendResult.Failure("Not connected")
+        val accId = when {
+            accountId != null -> accountId
+            sessions.size == 1 -> sessions.keys.single()
+            sessions.isEmpty() -> return@withContext SendResult.Failure("Not connected")
+            else -> return@withContext SendResult.Failure(
+                "Plusieurs comptes Matrix — précise accountId",
+            )
+        }
         val session = sessions[accId]
             ?: return@withContext SendResult.Failure("Not connected")
         val engine = session.trixnityEngine
@@ -559,9 +656,9 @@ class MatrixProtocol @Inject constructor(
             try {
                 networkGuard.assertNetworkAllowed()
                 val accId = accountId
-                    ?: conversationId.substringBefore('_', missingDelimiterValue = conversationId)
+                    ?: (ConversationIds.accountId(conversationId) ?: conversationId)
                 val session = sessions[accId] ?: return@withContext SendResult.Failure("Account not connected")
-                val roomId = conversationId.substringAfter('_', missingDelimiterValue = conversationId)
+                val roomId = (ConversationIds.remoteId(conversationId) ?: conversationId)
                 session.trixnityEngine?.let {
                     it.sendText(roomId, body.value)
                     val msg = Message(
@@ -614,9 +711,9 @@ class MatrixProtocol @Inject constructor(
                 try {
                     networkGuard.assertNetworkAllowed()
                     val accId = accountId
-                        ?: conversationId.substringBefore('_', missingDelimiterValue = conversationId)
+                        ?: (ConversationIds.accountId(conversationId) ?: conversationId)
                     val session = sessions[accId] ?: return@withContext SendResult.Failure("Account not connected")
-                    val roomId = conversationId.substringAfter('_', missingDelimiterValue = conversationId)
+                    val roomId = (ConversationIds.remoteId(conversationId) ?: conversationId)
                     val localPath = content.attachment.localPath
                         ?: return@withContext SendResult.Failure("Missing local file path")
                     val engine = session.trixnityEngine
@@ -654,9 +751,9 @@ class MatrixProtocol @Inject constructor(
                 try {
                     networkGuard.assertNetworkAllowed()
                     val accId = accountId
-                        ?: conversationId.substringBefore('_', missingDelimiterValue = conversationId)
+                        ?: (ConversationIds.accountId(conversationId) ?: conversationId)
                     val session = sessions[accId] ?: return@withContext SendResult.Failure("Account not connected")
-                    val roomId = conversationId.substringAfter('_', missingDelimiterValue = conversationId)
+                    val roomId = (ConversationIds.remoteId(conversationId) ?: conversationId)
                     val engine = session.trixnityEngine
                         ?: return@withContext SendResult.Failure("Location requires Trixnity E2EE session")
                     val sent = engine.sendLocation(
@@ -680,7 +777,7 @@ class MatrixProtocol @Inject constructor(
                         direction = MessageDirection.OUTGOING,
                         deliveryState = DeliveryState.SENT,
                         kind = MessageKind.LOCATION,
-                        payloadJson = """{"geoUri":"$geoUri","lat":${content.latitude},"lon":${content.longitude}}""",
+                        payloadJson = """{"geoUri":"$geoUri","latitude":${content.latitude},"longitude":${content.longitude},"lat":${content.latitude},"lon":${content.longitude}}""",
                     )
                     repository.upsertMessage(msg)
                     SendResult.Success(msg.id)
@@ -702,9 +799,9 @@ class MatrixProtocol @Inject constructor(
         try {
             networkGuard.assertNetworkAllowed()
             val accId = accountId
-                ?: conversationId.substringBefore('_', missingDelimiterValue = conversationId)
+                ?: (ConversationIds.accountId(conversationId) ?: conversationId)
             val session = sessions[accId] ?: return@withContext SendResult.Failure("Account not connected")
-            val roomId = conversationId.substringAfter('_', missingDelimiterValue = conversationId)
+            val roomId = (ConversationIds.remoteId(conversationId) ?: conversationId)
             val localPath = attachment.localPath
                 ?: return@withContext SendResult.Failure("Missing local file path")
             val engine = session.trixnityEngine
@@ -777,8 +874,8 @@ class MatrixProtocol @Inject constructor(
 
     override suspend fun setTyping(conversationId: String, typing: Boolean) {
         withContext(Dispatchers.IO) {
-            val accId = conversationId.substringBefore('_', missingDelimiterValue = conversationId)
-            val roomId = conversationId.substringAfter('_', missingDelimiterValue = conversationId)
+            val accId = (ConversationIds.accountId(conversationId) ?: conversationId)
+            val roomId = (ConversationIds.remoteId(conversationId) ?: conversationId)
             val engine = sessions[accId]?.trixnityEngine ?: return@withContext
             engine.setTyping(roomId, typing)
                 .onFailure { Timber.w(it, "Matrix setTyping failed for $conversationId") }
@@ -786,15 +883,15 @@ class MatrixProtocol @Inject constructor(
     }
 
     override fun observeTyping(conversationId: String): StateFlow<List<String>> {
-        val accId = conversationId.substringBefore('_', missingDelimiterValue = conversationId)
+        val accId = (ConversationIds.accountId(conversationId) ?: conversationId)
         return sessions[accId]?.trixnityEngine?.observeTyping(conversationId)
             ?: MutableStateFlow<List<String>>(emptyList()).asStateFlow()
     }
 
     override suspend fun markRead(conversationId: String, messageId: String?) {
         withContext(Dispatchers.IO) {
-            val accId = conversationId.substringBefore('_', missingDelimiterValue = conversationId)
-            val roomId = conversationId.substringAfter('_', missingDelimiterValue = conversationId)
+            val accId = (ConversationIds.accountId(conversationId) ?: conversationId)
+            val roomId = (ConversationIds.remoteId(conversationId) ?: conversationId)
             val engine = sessions[accId]?.trixnityEngine ?: return@withContext
             engine.markRead(roomId, messageId)
                 .onFailure { Timber.w(it, "Matrix markRead failed for $conversationId") }
@@ -846,6 +943,17 @@ class MatrixProtocol @Inject constructor(
 
     override suspend fun disconnect(accountId: String?) {
         withContext(Dispatchers.IO) {
+            if (accountId != null) {
+                clearPendingSso(accountId)
+                if (pendingSso.isEmpty() && _pendingAuthStep.value?.kind == AuthStepKind.MATRIX_SSO) {
+                    _pendingAuthStep.value = null
+                }
+            } else {
+                pendingSso.clear()
+                if (_pendingAuthStep.value?.kind == AuthStepKind.MATRIX_SSO) {
+                    _pendingAuthStep.value = null
+                }
+            }
             val toClose = if (accountId != null) {
                 sessions.remove(accountId)?.let { listOf(accountId to it) } ?: emptyList()
             } else {
@@ -856,26 +964,27 @@ class MatrixProtocol @Inject constructor(
             toClose.forEach { (id, session) ->
                 session.trixnityEngine?.close()
                 session.httpFallback?.disconnect()
+                val displayName = credentialStore.getDisplayName(id) ?: id
                 repository.upsertAccount(
                     ltechnologies.onionphone.securemessenger.core.model.Account(
                         id = id,
                         protocol = ProtocolId.MATRIX,
-                        displayName = id,
+                        displayName = displayName,
                         connectionState = ConnectionState.DISCONNECTED,
                     ),
                 )
             }
-            if (sessions.isEmpty()) {
-                _connectionState.value = ConnectionState.DISCONNECTED
-            }
+            refreshConnectionState()
         }
     }
 
     companion object {
         const val ACCESS_TOKEN_KEY = "accessToken"
+        const val DEVICE_ID_KEY = "deviceId"
         const val SYNC_SINCE_KEY = "syncSince"
 
-        fun conversationIdFor(accountId: String, roomId: String) = "${accountId}_$roomId"
+        fun conversationIdFor(accountId: String, roomId: String) =
+            ltechnologies.onionphone.securemessenger.core.model.ConversationIds.encode(accountId, roomId)
 
         fun mimeToKind(mimeType: String, fileName: String?): MessageKind = when {
             mimeType.equals("image/gif", ignoreCase = true) ||

@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.0.9
+
+### Multi-account aggregation
+- **ConnectionManager**: persist `CONNECTING` vs `CONNECTED` from per-account readiness (`isAccountConnected` + pending auth scoped to that `accountId`); parallel restore; per-account disconnect; do not wipe live Telegram/Signal mid-auth.
+- **Auth routing**: `AuthStep.accountId`; `pendingAuth(protocol, accountId)`; Telegram continue/resend/republish for sibling SMS/2FA; Matrix SSO cancel scoped per account.
+- **Signal**: refuse second connect/link while `CONNECTING`/`CONNECTED`; `cancelRegistration(accountId)` does not kill sibling; QR `startDeviceLink` returns provisional id; leave/cancel tears down unconnected link fully; AuthSteps carry `accountId`.
+- **Send/session**: Email/XMPP/Telegram/Signal resolve session from conversation/`accountId` (no multi-session `singleOrNull`); Unified inbox merges all protocol flows; account-scoped `capabilitiesFor`.
+- **UI**: Settings capabilities per account; Chat/NewChat/Shell wired; fail-fast `startConversation` when multi-account and no `accountId`.
+
+### Bug fixes (connect / sync)
+- **Signal link-and-sync**: long-poll `GET /v1/devices/transfer_archive` until archive/error (404/204 = not ready); await restore **before** WS drain / storage sync (Signal-Android order); 1h deadline; validate backup fail-closed; merge contacts during restore; advertise official `AppCapabilities` (incl. attachmentBackfill); provision `readReceipts`; 429 backoff.
+- **Telegram**: `LoadChats` until TDLib 404; history pages until **empty** (short page ≠ EOF); `authorizationReady` gates connected; login wait 180s under Tor; **WaitEmailAddress/WaitEmailCode** + UI; **UpdateChatPosition** (leave main list → drop conversation).
+- **Matrix**: persist/reuse real CS `device_id` for soft-login E2EE; **password re-login sends stored device_id**; login-flows fail-closed; SSO cancel; reuse existing DM before create; multi-pass `fillTimelineGaps`; encryption `initial_state` on new DMs/groups.
+- **XMPP OMEMO/MAM**: disco timeout ≠ plaintext; await device-list publish; MAM `pageNext` catchup (+ since local max); keep helper when publish pending; inbound/MAM media via that account’s Smack session.
+- **IRC**: connect timeout 90s (Tor); Netty HTTP codec on classpath.
+
+### Security / dependencies
+- **Netty**: bump to **4.1.137.Final** (CVE-2026-42580 HTTP request smuggling; IRC / Kitteh path).
+
 ## 1.0.8
 
 ### Security / control-flow

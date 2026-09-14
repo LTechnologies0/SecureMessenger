@@ -77,6 +77,7 @@ internal class SignalStorageSync(
             var contactsApplied = 0
             var groupsApplied = 0
             var profileKeys = 0
+            var readFailed = false
             val mergedContacts = repository.observeContacts(accountId).first()
                 .associateBy { it.remoteId }
                 .toMutableMap()
@@ -87,7 +88,8 @@ internal class SignalStorageSync(
                     is NetworkResult.Success -> readResult.result.items
                     else -> {
                         Timber.w("Storage read failed: %s", readResult)
-                        emptyList()
+                        readFailed = true
+                        break
                     }
                 }
                 val typeByKey = chunk.associateBy { it.raw }
@@ -164,6 +166,10 @@ internal class SignalStorageSync(
 
             if (mergedContacts.isNotEmpty()) {
                 repository.replaceContacts(accountId, mergedContacts.values.toList())
+            }
+            if (readFailed) {
+                Timber.w("Storage sync incomplete at version %d — not committing manifest", version)
+                return SyncStats(contactsApplied, groupsApplied, profileKeys)
             }
             credentialStore.put(accountId, SignalCredentialKeys.STORAGE_MANIFEST_VERSION, version.toString())
             Timber.i(

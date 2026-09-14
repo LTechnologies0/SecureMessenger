@@ -60,8 +60,10 @@ import net.folivo.trixnity.core.model.EventId
 import net.folivo.trixnity.core.model.RoomAliasId
 import net.folivo.trixnity.core.model.RoomId
 import net.folivo.trixnity.core.model.UserId
+import net.folivo.trixnity.core.model.events.InitialStateEvent
 import net.folivo.trixnity.core.model.events.m.ReceiptType
 import net.folivo.trixnity.core.model.events.m.room.EncryptedFile
+import net.folivo.trixnity.core.model.events.m.room.EncryptionEventContent
 import net.folivo.trixnity.core.model.events.m.room.RoomMessageEventContent
 import okhttp3.OkHttpClient
 import okio.Path.Companion.toPath
@@ -131,6 +133,8 @@ class TrixnityMatrixEngine(
         userId: String,
         accessToken: String,
         proxy: ProxyConfig,
+        /** Must be the homeserver device_id bound to [accessToken] (CS login / SSO). */
+        deviceId: String? = null,
     ): Result<MatrixClient> = withContext(Dispatchers.IO) {
         try {
             val paths = accountPaths(accountId)
@@ -140,7 +144,12 @@ class TrixnityMatrixEngine(
             }
             val baseUrl = Url(MatrixUrls.normalizeHomeserver(apiBaseUrl))
             val proxyEngine = proxiedOkHttp(proxy)
-            val deviceId = "SM_${accountId.take(8)}"
+            val resolvedDeviceId = deviceId?.takeIf { it.isNotBlank() }
+                ?: return@withContext Result.failure(
+                    IllegalStateException(
+                        "Matrix device_id manquant pour soft-login (requis pour lier le token E2EE)",
+                    ),
+                )
             val mxUser = UserId(userId)
 
             // Soft-login: reuse CS API access_token — do NOT call m.login.token (that's SSO one-shot).
@@ -152,7 +161,7 @@ class TrixnityMatrixEngine(
                     Result.success(
                         MatrixClient.LoginInfo(
                             userId = mxUser,
-                            deviceId = deviceId,
+                            deviceId = resolvedDeviceId,
                             accessToken = accessToken,
                             refreshToken = null,
                         ),
@@ -361,14 +370,24 @@ class TrixnityMatrixEngine(
             val roomService = matrixClient.di.get<RoomService>()
             val roomId = RoomId(roomIdFull)
             val pageSize = limit.coerceIn(1, 100).toLong()
-            val room = roomService.getById(roomId).firstOrNull()
-            val startFrom = room?.lastEventId ?: room?.lastRelevantEventId
-            if (startFrom != null) {
-                runCatching { roomService.fillTimelineGaps(roomId, startFrom, pageSize) }
-                    .onFailure { Timber.w(it, "Matrix fillTimelineGaps failed for $roomIdFull") }
+            var room = roomService.getById(roomId).firstOrNull()
+            var startFrom = room?.lastEventId ?: room?.lastRelevantEventId
+            // Element / matrix-rust-sdk keep filling gaps until the timeline is contiguous.
+            var gapPasses = 0
+            while (startFrom != null && gapPasses < 8) {
+                val ok = runCatching {
+                    roomService.fillTimelineGaps(roomId, startFrom, pageSize)
+                }.onFailure { Timber.w(it, "Matrix fillTimelineGaps failed for $roomIdFull") }
+                    .isSuccess
+                gapPasses++
+                if (!ok) break
+                room = roomService.getById(roomId).firstOrNull()
+                val nextStart = room?.lastEventId ?: room?.lastRelevantEventId
+                if (nextStart == null || nextStart == startFrom) break
+                startFrom = nextStart
             }
             val config: GetTimelineEventsConfig.() -> Unit = {
-                maxSize = pageSize
+                maxSize = (pageSize * gapPasses.coerceAtLeast(1)).coerceAtMost(500)
                 fetchSize = pageSize
                 decryptionTimeout = 15.seconds
             }
@@ -453,10 +472,12 @@ class TrixnityMatrixEngine(
                     matrixClient.api.room.joinRoom(roomAliasId = RoomAliasId(remoteId)).getOrThrow().full
                 }
                 remoteId.startsWith("@") && !asGroup -> {
+                    findExistingDmRoom(matrixClient, UserId(remoteId))?.let { return@runCatching it }
                     matrixClient.api.room.createRoom(
                         invite = setOf(UserId(remoteId)),
                         isDirect = true,
                         preset = CreateRoom.Request.Preset.TRUSTED_PRIVATE,
+                        initialState = encryptedRoomInitialState(),
                     ).getOrThrow().full
                 }
                 asGroup -> {
@@ -467,6 +488,7 @@ class TrixnityMatrixEngine(
                         invite = invitees,
                         isDirect = false,
                         preset = CreateRoom.Request.Preset.PRIVATE,
+                        initialState = encryptedRoomInitialState(),
                     ).getOrThrow().full
                 }
                 else -> error("Identifiant Matrix invalide: $remoteId (attendu @user, !room ou #alias)")
@@ -520,6 +542,30 @@ class TrixnityMatrixEngine(
     fun currentDisplayName(): String? = client?.displayName?.value
 
     fun currentUserId(): String? = client?.userId?.full
+
+    fun currentDeviceId(): String? = client?.deviceId?.takeIf { it.isNotBlank() }
+    /**
+     * matrix-rust-sdk `get_dm_room`: reuse an existing 1:1 direct room before create_dm.
+     */
+    private suspend fun findExistingDmRoom(matrixClient: MatrixClient, peer: UserId): String? {
+        val roomService = matrixClient.di.get<RoomService>()
+        val userService = matrixClient.di.get<UserService>()
+        val self = matrixClient.userId
+        val rooms = roomService.getAll().flattenValues().first()
+        for (room in rooms) {
+            if (!room.isDirect) continue
+            runCatching { userService.loadMembers(room.roomId, false) }
+            val members = userService.getAll(room.roomId).first()
+            val others = members.keys.filter { it != self }
+            if (others.size == 1 && others.first() == peer) {
+                return room.roomId.full
+            }
+        }
+        return null
+    }
+
+    private fun encryptedRoomInitialState(): List<InitialStateEvent<EncryptionEventContent>> =
+        listOf(InitialStateEvent(EncryptionEventContent(), ""))
 
     private suspend fun persistTimelineEvent(
         accountId: String,
@@ -657,6 +703,8 @@ class TrixnityMatrixEngine(
                 append("\"geoUri\":")
                 append('"').append(geo.replace("\"", "\\\"")).append('"')
                 if (lat != null && lon != null) {
+                    append(",\"latitude\":").append(lat)
+                    append(",\"longitude\":").append(lon)
                     append(",\"lat\":").append(lat)
                     append(",\"lon\":").append(lon)
                 }

@@ -57,28 +57,40 @@ class UnifiedMessengerClient @Inject constructor(
             return registry.get(protocol)?.observeConversations()
                 ?: kotlinx.coroutines.flow.flowOf(emptyList())
         }
-        // Adapters typically mirror the shared Room inbox; pick any registered protocol.
-        return registry.all().firstOrNull()?.observeConversations()
-            ?: kotlinx.coroutines.flow.flowOf(emptyList())
+        val flows = registry.all().map { it.observeConversations() }
+        if (flows.isEmpty()) return kotlinx.coroutines.flow.flowOf(emptyList())
+        if (flows.size == 1) return flows.first()
+        return kotlinx.coroutines.flow.combine(flows) { arrays ->
+            arrays.asList()
+                .flatten()
+                .distinctBy { it.id }
+                .sortedByDescending { it.lastMessageAt }
+        }
     }
 
     fun observeMessages(conversationId: String, protocol: ProtocolId): Flow<List<Message>> =
         registry.get(protocol)?.observeMessages(conversationId)
             ?: kotlinx.coroutines.flow.flowOf(emptyList())
 
-    suspend fun sendMessage(protocol: ProtocolId, conversationId: String, body: SanitizedText): SendResult {
+    suspend fun sendMessage(
+        protocol: ProtocolId,
+        conversationId: String,
+        body: SanitizedText,
+        accountId: String? = null,
+    ): SendResult {
         val impl = registry.get(protocol) ?: return SendResult.Failure("Protocol not registered")
-        return impl.sendMessage(conversationId, body)
+        return impl.sendMessage(conversationId, body, accountId)
     }
 
     suspend fun startConversation(
         protocol: ProtocolId,
         remoteId: String,
         initialMessage: SanitizedText? = null,
+        accountId: String? = null,
         asGroup: Boolean = false,
     ): SendResult {
         val impl = registry.get(protocol) ?: return SendResult.Failure("Protocol not registered")
-        return impl.startConversation(remoteId, initialMessage, asGroup = asGroup)
+        return impl.startConversation(remoteId, initialMessage, accountId, asGroup)
     }
 
     suspend fun disconnect(protocol: ProtocolId) {

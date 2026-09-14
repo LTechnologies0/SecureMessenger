@@ -23,6 +23,7 @@ internal class TelegramSession(
 
     var nativeAvailable: Boolean = false
     var awaitingAuth: AuthStepKind = AuthStepKind.NONE
+    var authorizationReady: Boolean = false
     var authPrompt: String = ""
     var otherDeviceLink: String? = null
     var openChatId: Long? = null

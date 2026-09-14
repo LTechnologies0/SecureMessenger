@@ -178,6 +178,10 @@ fun MessengerShellScreen(
                     viewModel = viewModel,
                     initialProtocol = ProtocolId.valueOf(addProtocol),
                     onClose = { overlay = ShellOverlay.ADD_ACCOUNT_PICKER },
+                    onConnected = { accountId ->
+                        selectedAccountId = accountId
+                        overlay = ShellOverlay.NONE
+                    },
                 )
             }
             return
@@ -263,7 +267,7 @@ fun MessengerShellScreen(
             onOpenContacts = { overlay = ShellOverlay.CONTACTS },
             onOpenSettings = { overlay = ShellOverlay.SETTINGS },
             contactsEnabled = selectedAccount?.let {
-                viewModel.capabilitiesFor(it.protocol).contacts
+                viewModel.capabilitiesFor(it.protocol, it.id).contacts
             } == true,
         )
 
@@ -285,6 +289,7 @@ fun MessengerShellScreen(
                 openConversationProtocol = protocol.name
             },
             onBackFromChat = { openConversationId = null },
+            onConversationRemapped = { openConversationId = it },
             onNewChat = { overlay = ShellOverlay.NEW_CHAT },
             onOpenContacts = { overlay = ShellOverlay.CONTACTS },
             onAddAccount = { overlay = ShellOverlay.ADD_ACCOUNT_PICKER },
@@ -426,6 +431,7 @@ private fun MainContentPane(
     openConversationProtocol: String,
     onConversationClick: (String, String, ProtocolId) -> Unit,
     onBackFromChat: () -> Unit,
+    onConversationRemapped: (String) -> Unit,
     onNewChat: () -> Unit,
     onOpenContacts: () -> Unit,
     onAddAccount: () -> Unit,
@@ -438,6 +444,7 @@ private fun MainContentPane(
             protocol = ProtocolId.valueOf(openConversationProtocol),
             viewModel = viewModel,
             onBack = onBackFromChat,
+            onConversationRemapped = onConversationRemapped,
         )
         return
     }
@@ -450,7 +457,7 @@ private fun MainContentPane(
         return
     }
 
-    val caps = viewModel.capabilitiesFor(selectedAccount.protocol)
+    val caps = viewModel.capabilitiesFor(selectedAccount.protocol, selectedAccount.id)
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
     val accent = protocolAccentColor(selectedAccount.protocol)
     Scaffold(

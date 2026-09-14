@@ -13,7 +13,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Email
-import androidx.compose.material.icons.filled.Forum
+import androidx.compose.material.icons.filled.Hub
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Tag
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -76,11 +78,11 @@ fun protocolAccentColor(protocol: ProtocolId): Color = when (protocol) {
 
 fun protocolIcon(protocol: ProtocolId): ImageVector = when (protocol) {
     ProtocolId.TELEGRAM -> Icons.AutoMirrored.Filled.Send
-    ProtocolId.MATRIX -> Icons.Default.Forum
+    ProtocolId.MATRIX -> Icons.Default.Hub
     ProtocolId.XMPP -> Icons.AutoMirrored.Filled.Chat
-    ProtocolId.SIGNAL -> Icons.AutoMirrored.Filled.Chat
+    ProtocolId.SIGNAL -> Icons.Default.Lock
     ProtocolId.EMAIL -> Icons.Default.Email
-    ProtocolId.IRC -> Icons.Default.Forum
+    ProtocolId.IRC -> Icons.Default.Tag
 }
 
 fun connectionStateLabel(state: ConnectionState): String = when (state) {
@@ -121,12 +123,12 @@ fun capabilityLabels(caps: ProtocolCapabilities?, canRegister: Boolean = false):
         if (caps.voiceNotes) add("vocal")
         if (caps.gifs) add("GIF")
         if (caps.stickers) add("stickers")
-        if (caps.locationShare) add("lieu")
+        if (caps.locationShare) add("localisation")
         if (caps.polls) add("sondages")
-        if (caps.contactShare) add("vCard")
-        if (caps.ephemeralMessages) add("éphémère")
+        if (caps.contactShare) add("contact")
+        if (caps.ephemeralMessages) add("éphémères")
         if (caps.messageHistory) add("historique")
-        if (caps.backupExport) add("backup")
+        if (caps.backupExport) add("export")
         if (canRegister) add("inscription")
     }
 }

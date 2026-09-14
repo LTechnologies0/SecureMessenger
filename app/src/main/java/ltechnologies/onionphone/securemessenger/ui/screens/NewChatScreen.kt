@@ -65,9 +65,10 @@ fun NewChatScreen(
     }
     var remoteId by remember { mutableStateOf("") }
     var firstMessage by remember { mutableStateOf("") }
+    var emailSubject by remember { mutableStateOf("") }
     var asGroup by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
-    val capabilities = remember(protocol) { viewModel.capabilitiesFor(protocol) }
+    val capabilities = viewModel.capabilitiesFor(protocol, boundAccount?.id)
     val snackbarHostState = remember { SnackbarHostState() }
 
     LaunchedEffect(status) {
@@ -242,6 +243,16 @@ fun NewChatScreen(
                 }
             }
 
+            if (protocol == ProtocolId.EMAIL) {
+                OutlinedTextField(
+                    value = emailSubject,
+                    onValueChange = { emailSubject = it },
+                    label = { Text("Objet") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                )
+            }
+
             OutlinedTextField(
                 value = firstMessage,
                 onValueChange = { firstMessage = it },
@@ -260,17 +271,26 @@ fun NewChatScreen(
                         status = "Groupes non supportés pour ce protocole"
                         return@Button
                     }
+                    val payloadMessage = when {
+                        protocol == ProtocolId.EMAIL && emailSubject.isNotBlank() -> {
+                            val body = firstMessage.trim()
+                            if (body.isBlank()) "Subject: ${emailSubject.trim()}"
+                            else "Subject: ${emailSubject.trim()}\n\n$body"
+                        }
+                        else -> firstMessage.takeIf { it.isNotBlank() }
+                    }
                     viewModel.startConversation(
                         protocol = protocol,
                         remoteId = remoteId.trim(),
-                        message = firstMessage.takeIf { it.isNotBlank() },
+                        message = payloadMessage,
                         accountId = boundAccount?.id,
                         asGroup = asGroup,
-                    ) { convId ->
+                    ) { convId, reason ->
                         if (convId != null) {
                             onStarted(convId, remoteId.trim(), protocol)
                         } else {
-                            status = "Échec démarrage conversation"
+                            status = reason?.takeIf { it.isNotBlank() }
+                                ?: "Échec démarrage conversation"
                         }
                     }
                 },

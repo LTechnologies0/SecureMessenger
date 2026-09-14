@@ -23,15 +23,15 @@ class MessengerRepository @Inject constructor(
 ) {
     /** Opens SQLCipher only when the Flow is collected (after app unlock). */
     fun observeAccounts(): Flow<List<Account>> = flow {
-        emitAll(database.get().accountDao().observeAll().map { list -> list.map { it.toDomain() } })
+        emitAll(database.get().accountDao().observeAll().map { list -> list.mapNotNull { it.toDomain() } })
     }
 
     fun observeConversations(): Flow<List<Conversation>> = flow {
-        emitAll(database.get().conversationDao().observeAll().map { list -> list.map { it.toDomain() } })
+        emitAll(database.get().conversationDao().observeAll().map { list -> list.mapNotNull { it.toDomain() } })
     }
 
     suspend fun listConversationsForAccount(accountId: String): List<Conversation> =
-        database.get().conversationDao().listForAccount(accountId).map { it.toDomain() }
+        database.get().conversationDao().listForAccount(accountId).mapNotNull { it.toDomain() }
 
     suspend fun getConversation(id: String): Conversation? =
         database.get().conversationDao().getById(id)?.toDomain()
@@ -40,7 +40,7 @@ class MessengerRepository @Inject constructor(
         emitAll(
             database.get().messageDao()
                 .observeRecentForConversation(conversationId, MessageDao.UI_MESSAGE_WINDOW)
-                .map { list -> list.map { it.toDomain() } },
+                .map { list -> list.mapNotNull { it.toDomain() } },
         )
     }
 
@@ -61,12 +61,12 @@ class MessengerRepository @Inject constructor(
         limit: Int,
         offset: Int,
     ): List<Message> =
-        database.get().messageDao().listPage(conversationId, limit, offset).map { it.toDomain() }
+        database.get().messageDao().listPage(conversationId, limit, offset).mapNotNull { it.toDomain() }
 
     fun observeContacts(accountId: String): Flow<List<Contact>> = flow {
         emitAll(
             database.get().contactDao().observeForAccount(accountId)
-                .map { list -> list.map { it.toDomain() } },
+                .map { list -> list.mapNotNull { it.toDomain() } },
         )
     }
 
@@ -127,7 +127,7 @@ class MessengerRepository @Inject constructor(
     }
 
     suspend fun listMessagesByTimestamp(conversationId: String, timestamp: Long): List<Message> =
-        database.get().messageDao().listByTimestamp(conversationId, timestamp).map { it.toDomain() }
+        database.get().messageDao().listByTimestamp(conversationId, timestamp).mapNotNull { it.toDomain() }
 
     suspend fun listMessagesByTimestamps(
         conversationId: String,
@@ -136,7 +136,7 @@ class MessengerRepository @Inject constructor(
         if (timestamps.isEmpty()) return emptyList()
         return database.get().messageDao()
             .listByTimestamps(conversationId, timestamps.toList())
-            .map { it.toDomain() }
+            .mapNotNull { it.toDomain() }
     }
 
     suspend fun deleteConversationMessages(conversationId: String) {
@@ -162,8 +162,12 @@ class MessengerRepository @Inject constructor(
     }
 
     suspend fun deleteAccount(id: String) {
-        database.get().accountDao().delete(id)
-        database.get().contactDao().deleteForAccount(id)
+        val db = database.get()
+        // Messages first (FK-style), then conversations, contacts, account.
+        db.messageDao().deleteForAccount(id)
+        db.conversationDao().deleteForAccount(id)
+        db.contactDao().deleteForAccount(id)
+        db.accountDao().delete(id)
     }
 
     /**

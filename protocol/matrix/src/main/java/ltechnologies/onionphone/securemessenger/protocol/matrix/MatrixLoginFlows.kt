@@ -43,21 +43,27 @@ internal object MatrixLoginFlows {
         @SerialName("device_id") val deviceId: String? = null,
     )
 
-    suspend fun fetchFlows(apiBaseUrl: String, proxy: ProxyConfig): List<String> {
+    suspend fun fetchFlows(apiBaseUrl: String, proxy: ProxyConfig): Result<List<String>> {
         val client = MatrixHttpClientFactory.create(proxy)
         return try {
             val response = client.get("${apiBaseUrl.trimEnd('/')}/_matrix/client/v3/login")
-            if (!response.status.isSuccess()) return emptyList()
-            response.body<LoginFlowList>().flows.map { it.type }
-        } catch (_: Exception) {
-            emptyList()
+            if (!response.status.isSuccess()) {
+                return Result.failure(
+                    IllegalStateException(
+                        "Matrix login flows HTTP ${response.status.value}",
+                    ),
+                )
+            }
+            Result.success(response.body<LoginFlowList>().flows.map { it.type })
+        } catch (e: Exception) {
+            Result.failure(e)
         } finally {
             client.close()
         }
     }
 
     fun supportsPassword(flows: List<String>): Boolean =
-        flows.isEmpty() || flows.any { it == "m.login.password" }
+        flows.any { it == "m.login.password" }
 
     fun supportsSso(flows: List<String>): Boolean =
         flows.any { it == "m.login.sso" || it == "m.login.token" }

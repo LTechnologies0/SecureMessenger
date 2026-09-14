@@ -31,6 +31,7 @@ import ltechnologies.onionphone.securemessenger.core.model.ConnectionResult
 import ltechnologies.onionphone.securemessenger.core.model.ConnectionState
 import ltechnologies.onionphone.securemessenger.core.model.Contact
 import ltechnologies.onionphone.securemessenger.core.model.Conversation
+import ltechnologies.onionphone.securemessenger.core.model.ConversationIds
 import ltechnologies.onionphone.securemessenger.core.model.FeatureFlags
 import ltechnologies.onionphone.securemessenger.core.model.Message
 import ltechnologies.onionphone.securemessenger.core.model.MessageKind
@@ -91,7 +92,7 @@ class SignalProtocol @Inject constructor(
                 contacts = true,
                 profileEdit = true,
                 voiceNotes = true,
-                stickers = true,
+                stickers = false, // No composer sticker picker yet.
                 // No dedicated GIF/animation path — would fall through as plain media.
                 gifs = false,
                 locationShare = true,
@@ -116,6 +117,20 @@ class SignalProtocol @Inject constructor(
 
     private val _pendingAuthStep = MutableStateFlow<AuthStep?>(null)
     fun observePendingAuthStep(): StateFlow<AuthStep?> = _pendingAuthStep.asStateFlow()
+
+    private fun signalAuthStep(
+        kind: AuthStepKind,
+        prompt: String,
+        fields: List<String> = emptyList(),
+        url: String? = null,
+        forAccountId: String? = accountId,
+    ) = AuthStep(
+        kind = kind,
+        prompt = prompt,
+        fields = fields,
+        url = url,
+        accountId = forAccountId,
+    )
 
     private var accountId: String? = null
     private var proxyConfig: ProxyConfig? = null
@@ -146,17 +161,18 @@ class SignalProtocol @Inject constructor(
         }
         return withContext(signalDispatcher) {
             try {
-                if (session != null &&
-                    accountId != null &&
-                    accountId != account.accountId &&
-                    _connectionState.value == ConnectionState.CONNECTED
-                ) {
+                val liveId = accountId
+                val state = _connectionState.value
+                val occupied = session != null ||
+                    state == ConnectionState.CONNECTING ||
+                    state == ConnectionState.CONNECTED
+                if (liveId != null && liveId != account.accountId && occupied) {
                     return@withContext ConnectionResult.Failure(
-                        "Un compte Signal est déjà connecté — déconnectez-le avant d'en ajouter un autre",
+                        "Un compte Signal est déjà en cours — déconnectez-le avant d'en ajouter un autre",
                     )
                 }
-                // Replace in-progress/orphan session for the same or new account.
-                if (session != null && accountId != account.accountId) {
+                // Orphan / same-account replace only when not occupied by a different live login.
+                if (session != null && liveId != account.accountId) {
                     session?.shutdown()
                     session = null
                 }
@@ -209,9 +225,37 @@ class SignalProtocol @Inject constructor(
         return try {
             applySignalSocks(proxy)
             session = SignalRuntimeFactory.open(trustStore, credentialStore, account.accountId, secrets)
+            val needsLinkSync = secrets[SignalCredentialKeys.EPHEMERAL_BACKUP_KEY] != null &&
+                credentialStore.get(account.accountId, SignalCredentialKeys.LINK_SYNC_IMPORTED) != "1" &&
+                credentialStore.get(account.accountId, SignalCredentialKeys.LINK_SYNC_SKIPPED) != "1"
+            // Official Signal: await transfer archive BEFORE storage restore / aggressive sync.
+            // Keep the auth websocket free of forceNewWebSocket until link-and-sync settles.
+            if (needsLinkSync) {
+                val active = session ?: return ConnectionResult.Failure("Session Signal indisponible")
+                _pendingAuthStep.value = signalAuthStep(
+                    kind = AuthStepKind.SIGNAL_DEVICE_LINK,
+                    prompt = "Réception de l'historique — ne fermez pas cet écran…",
+                    fields = emptyList(),
+                )
+                withContext(Dispatchers.IO) {
+                    SignalLinkAndSync.maybeFetchBackup(
+                        context,
+                        account.accountId,
+                        active,
+                        credentialStore,
+                        repository,
+                        onProgress = { msg ->
+                            _pendingAuthStep.value = signalAuthStep(
+                                kind = AuthStepKind.SIGNAL_DEVICE_LINK,
+                                prompt = msg,
+                                fields = emptyList(),
+                            )
+                        },
+                    )
+                }
+            }
             startSync(account.accountId, proxy)
             scheduleInitialSyncBootstrap(account.accountId)
-            scheduleLinkAndSync(account.accountId)
             _pendingAuthStep.value = null
             _connectionState.value = ConnectionState.CONNECTED
             ConnectionResult.Success
@@ -219,16 +263,6 @@ class SignalProtocol @Inject constructor(
             Timber.e(e, "Signal session restore failed")
             _connectionState.value = ConnectionState.ERROR
             ConnectionResult.Failure(e.message ?: "Session restore failed")
-        }
-    }
-
-    /** Best-effort download of primary link-and-sync backup when EPHEMERAL_BACKUP_KEY is present. */
-    private fun scheduleLinkAndSync(accId: String) {
-        ioScope.launch(signalDispatcher) {
-            delay(1_500)
-            val active = session ?: return@launch
-            if (accountId != accId) return@launch
-            SignalLinkAndSync.maybeFetchBackup(context, accId, active, credentialStore, repository)
         }
     }
 
@@ -267,8 +301,19 @@ class SignalProtocol @Inject constructor(
                         Timber.i("Signal CDSI fallback stored %d contacts", count)
                     }
                 }
-            runCatching { runStorageSyncLocked(accId) }
+            // Official: storage restore only after link-and-sync completes or is skipped.
+            if (isLinkAndSyncSettled(accId)) {
+                runCatching { runStorageSyncLocked(accId) }
+            }
         }
+    }
+
+    /** True when no ephemeral backup is expected, or archive was imported / explicitly skipped. */
+    private fun isLinkAndSyncSettled(accId: String): Boolean {
+        val expectsArchive = credentialStore.get(accId, SignalCredentialKeys.EPHEMERAL_BACKUP_KEY) != null
+        if (!expectsArchive) return true
+        return credentialStore.get(accId, SignalCredentialKeys.LINK_SYNC_IMPORTED) == "1" ||
+            credentialStore.get(accId, SignalCredentialKeys.LINK_SYNC_SKIPPED) == "1"
     }
 
     private suspend fun seedConversationsFromContactsLocked(accId: String, contacts: List<Contact>) {
@@ -292,32 +337,44 @@ class SignalProtocol @Inject constructor(
 
     /**
      * Classic secondary-device link: shows a QR (`sgnl://linkdevice?...`) for the primary Signal app to scan.
+     * @return result and the provisional [accountId] (non-null after a successful start) so UI can cancel/clean up.
      */
     suspend fun startDeviceLink(
         deviceName: String = "SecureMessenger",
         proxy: ProxyConfig,
-    ): ConnectionResult = withContext(signalDispatcher) {
+    ): Pair<ConnectionResult, String?> = withContext(signalDispatcher) {
         if (!isEnabled) {
             return@withContext ConnectionResult.Failure(
                 ProtocolNotEnabledException(id).message ?: "Signal not enabled",
-            )
+            ) to null
         }
         try {
-            if (session != null && _connectionState.value == ConnectionState.CONNECTED) {
+            val state = _connectionState.value
+            if (state == ConnectionState.CONNECTED) {
                 return@withContext ConnectionResult.Failure(
                     "Un compte Signal est déjà connecté — déconnectez-le avant de lier un appareil",
-                )
+                ) to null
+            }
+            val restartingLink =
+                _pendingAuthStep.value?.kind == AuthStepKind.SIGNAL_DEVICE_LINK
+            if (!restartingLink &&
+                (session != null || state == ConnectionState.CONNECTING)
+            ) {
+                return@withContext ConnectionResult.Failure(
+                    "Un compte Signal est déjà en cours — déconnectez-le avant de lier un appareil",
+                ) to null
             }
             cancelDeviceLinkLocked()
             session?.shutdown()
             session = null
             _connectionState.value = ConnectionState.CONNECTING
-            accountId = UUID.randomUUID().toString()
+            val linkAccountId = UUID.randomUUID().toString()
+            accountId = linkAccountId
             proxyConfig = proxy
             applySignalSocks(proxy)
             linkFlow = SignalLinkFlow(trustStore)
             _deviceLinkUrl.value = null
-            _pendingAuthStep.value = AuthStep(
+            _pendingAuthStep.value = signalAuthStep(
                 kind = AuthStepKind.SIGNAL_DEVICE_LINK,
                 prompt = "Scannez ce QR depuis Signal (appareil principal) → Paramètres → Appareils liés",
                 fields = emptyList(),
@@ -327,7 +384,7 @@ class SignalProtocol @Inject constructor(
                 deviceName = deviceName,
                 onProvisioningUrl = { url ->
                     _deviceLinkUrl.value = url
-                    _pendingAuthStep.value = AuthStep(
+                    _pendingAuthStep.value = signalAuthStep(
                         kind = AuthStepKind.SIGNAL_DEVICE_LINK,
                         prompt = "Scannez ce QR depuis Signal (appareil principal) → Paramètres → Appareils liés",
                         fields = emptyList(),
@@ -335,7 +392,7 @@ class SignalProtocol @Inject constructor(
                     )
                 },
                 onProgress = { msg ->
-                    _pendingAuthStep.value = AuthStep(
+                    _pendingAuthStep.value = signalAuthStep(
                         kind = AuthStepKind.SIGNAL_DEVICE_LINK,
                         prompt = msg,
                         fields = emptyList(),
@@ -348,18 +405,20 @@ class SignalProtocol @Inject constructor(
                     }
                 },
             )
-            ConnectionResult.Success
+            ConnectionResult.Success to linkAccountId
         } catch (e: Exception) {
             Timber.e(e, "Signal device link failed to start")
             _connectionState.value = ConnectionState.ERROR
-            ConnectionResult.Failure(e.message ?: "Impossible de démarrer le lien")
+            ConnectionResult.Failure(e.message ?: "Impossible de démarrer le lien") to accountId
         }
     }
 
     fun cancelDeviceLink() {
         ioScope.launch(signalDispatcher) {
+            val wasLink = _pendingAuthStep.value?.kind == AuthStepKind.SIGNAL_DEVICE_LINK
             cancelDeviceLinkLocked()
-            if (_connectionState.value != ConnectionState.CONNECTED) {
+            // Do not flip CONNECTING→DISCONNECTED when a phone/PIN registration is in flight.
+            if (wasLink && _connectionState.value != ConnectionState.CONNECTED) {
                 _connectionState.value = ConnectionState.DISCONNECTED
             }
         }
@@ -461,7 +520,7 @@ class SignalProtocol @Inject constructor(
         pendingSessionId = outcome.sessionId
         when (outcome.step) {
             SignalRegistrationStep.CaptchaRequired -> {
-                _pendingAuthStep.value = AuthStep(
+                _pendingAuthStep.value = signalAuthStep(
                     kind = AuthStepKind.SIGNAL_CAPTCHA,
                     prompt = outcome.message ?: "Captcha requis",
                     fields = listOf("captcha"),
@@ -478,7 +537,7 @@ class SignalProtocol @Inject constructor(
                     )
                     return applyRegistrationOutcome(smsOutcome)
                 }
-                _pendingAuthStep.value = AuthStep(
+                _pendingAuthStep.value = signalAuthStep(
                     kind = AuthStepKind.SIGNAL_SMS_CODE,
                     prompt = outcome.message ?: "Code SMS requis",
                     fields = listOf("code"),
@@ -486,7 +545,7 @@ class SignalProtocol @Inject constructor(
                 return outcome
             }
             SignalRegistrationStep.SmsCodeRequired -> {
-                _pendingAuthStep.value = AuthStep(
+                _pendingAuthStep.value = signalAuthStep(
                     kind = AuthStepKind.SIGNAL_SMS_CODE,
                     prompt = outcome.message ?: "Entrez le code SMS (service en ligne accepté)",
                     fields = listOf("code"),
@@ -495,7 +554,7 @@ class SignalProtocol @Inject constructor(
                 return outcome
             }
             SignalRegistrationStep.PinRequired -> {
-                _pendingAuthStep.value = AuthStep(
+                _pendingAuthStep.value = signalAuthStep(
                     kind = AuthStepKind.SIGNAL_PIN,
                     prompt = outcome.message ?: "PIN optionnel (Registration Lock)",
                     fields = listOf("pin"),
@@ -522,19 +581,58 @@ class SignalProtocol @Inject constructor(
                         id = accId,
                         protocol = ProtocolId.SIGNAL,
                         displayName = displayName,
+                        connectionState = ConnectionState.CONNECTING,
+                    ),
+                )
+                _connectionState.value = ConnectionState.CONNECTING
+                SignalForegroundService.start(context, accId)
+                val proxy = proxyConfig
+                if (proxy == null) {
+                    _connectionState.value = ConnectionState.ERROR
+                    _pendingAuthStep.value = signalAuthStep(
+                        kind = AuthStepKind.SIGNAL_DEVICE_LINK,
+                        prompt = "Session Signal non initialisée",
+                        fields = emptyList(),
+                    )
+                    return SignalRegistrationOutcome(
+                        step = SignalRegistrationStep.Failed("Session Signal non initialisée"),
+                        message = "Session Signal non initialisée",
+                    )
+                }
+                val restore = restoreSession(
+                    AccountCredentials(ProtocolId.SIGNAL, accId, displayName, creds),
+                    creds,
+                    proxy,
+                )
+                if (restore is ConnectionResult.Failure) {
+                    repository.upsertAccount(
+                        ltechnologies.onionphone.securemessenger.core.model.Account(
+                            id = accId,
+                            protocol = ProtocolId.SIGNAL,
+                            displayName = displayName,
+                            connectionState = ConnectionState.ERROR,
+                        ),
+                    )
+                    _pendingAuthStep.value = signalAuthStep(
+                        kind = AuthStepKind.SIGNAL_DEVICE_LINK,
+                        prompt = restore.reason,
+                        fields = emptyList(),
+                    )
+                    return SignalRegistrationOutcome(
+                        step = SignalRegistrationStep.Failed(restore.reason),
+                        message = restore.reason,
+                    )
+                }
+                repository.upsertAccount(
+                    ltechnologies.onionphone.securemessenger.core.model.Account(
+                        id = accId,
+                        protocol = ProtocolId.SIGNAL,
+                        displayName = displayName,
                         connectionState = ConnectionState.CONNECTED,
                     ),
                 )
-                proxyConfig?.let { proxy ->
-                    restoreSession(
-                        AccountCredentials(ProtocolId.SIGNAL, accId, displayName, creds),
-                        creds,
-                        proxy,
-                    )
-                }
                 _pendingAuthStep.value = null
                 _connectionState.value = ConnectionState.CONNECTED
-                SignalForegroundService.start(context, accId)
                 return outcome
             }
             is SignalRegistrationStep.Failed -> {
@@ -542,7 +640,7 @@ class SignalProtocol @Inject constructor(
                 Timber.w("Signal auth/link failed: %s", reason)
                 // Keep SIGNAL_DEVICE_LINK step so the QR screen can show the error.
                 if (_deviceLinkUrl.value != null || linkFlow != null) {
-                    _pendingAuthStep.value = AuthStep(
+                    _pendingAuthStep.value = signalAuthStep(
                         kind = AuthStepKind.SIGNAL_DEVICE_LINK,
                         prompt = reason,
                         fields = emptyList(),
@@ -603,6 +701,10 @@ class SignalProtocol @Inject constructor(
     private suspend fun runStorageSyncLocked(accId: String) {
         val active = session ?: return
         if (accountId != accId) return
+        if (!isLinkAndSyncSettled(accId)) {
+            Timber.i("Deferring storage sync until link-and-sync settles for %s", accId)
+            return
+        }
         val helper = groupHelper ?: SignalGroupHelper(context, accId, credentialStore).also { groupHelper = it }
         val stats = SignalStorageSync(accId, active, repository, credentialStore, helper).sync()
         if (stats.contacts > 0) {
@@ -661,6 +763,29 @@ class SignalProtocol @Inject constructor(
             this.accountId == accountId &&
             _connectionState.value == ConnectionState.CONNECTED
 
+    /**
+     * Signal hosts one live session. Refuse ops whose [requestedAccountId] is not that session
+     * so multi-account Room rows never send under the wrong identity.
+     */
+    private fun resolveLiveAccount(requestedAccountId: String?): Pair<String, SignalSessionContext>? {
+        val liveId = accountId ?: return null
+        val liveSession = session ?: return null
+        val accId = requestedAccountId ?: liveId
+        if (accId != liveId) return null
+        return accId to liveSession
+    }
+
+    private fun liveAccountFailure(requestedAccountId: String?): SendResult.Failure {
+        val liveId = accountId
+        return when {
+            liveId == null -> SendResult.Failure("Compte non connecté")
+            session == null -> SendResult.Failure("Session Signal indisponible")
+            requestedAccountId != null && requestedAccountId != liveId ->
+                SendResult.Failure("Ce compte Signal n'est pas connecté")
+            else -> SendResult.Failure("Compte non connecté")
+        }
+    }
+
     override fun observeConversations(): Flow<List<Conversation>> {
         val accId = accountId
         return repository.observeConversations().map { list ->
@@ -681,8 +806,8 @@ class SignalProtocol @Inject constructor(
         accountId: String?,
         asGroup: Boolean,
     ): SendResult = withContext(signalDispatcher) {
-        val accId = accountId ?: this@SignalProtocol.accountId ?: return@withContext SendResult.Failure("Compte non connecté")
-        val activeSession = session ?: return@withContext SendResult.Failure("Session Signal indisponible")
+        val (accId, activeSession) = resolveLiveAccount(accountId)
+            ?: return@withContext liveAccountFailure(accountId)
         val trimmed = remoteId.trim()
 
         if (asGroup) {
@@ -846,8 +971,8 @@ class SignalProtocol @Inject constructor(
         body: SanitizedText,
         accountId: String?,
     ): SendResult = withContext(signalDispatcher) {
-        val accId = accountId ?: this@SignalProtocol.accountId ?: return@withContext SendResult.Failure("Compte non connecté")
-        val activeSession = session ?: return@withContext SendResult.Failure("Session Signal indisponible")
+        val (accId, activeSession) = resolveLiveAccount(accountId)
+            ?: return@withContext liveAccountFailure(accountId)
         val remoteId = conversationId.removePrefix("${accId}_")
         if (remoteId == conversationId) {
             return@withContext SendResult.Failure("Conversation Signal invalide")
@@ -877,9 +1002,8 @@ class SignalProtocol @Inject constructor(
         caption: SanitizedText?,
         accountId: String?,
     ): SendResult = withContext(signalDispatcher) {
-        val accId = accountId ?: this@SignalProtocol.accountId
-            ?: return@withContext SendResult.Failure("Compte non connecté")
-        val activeSession = session ?: return@withContext SendResult.Failure("Session Signal indisponible")
+        val (accId, activeSession) = resolveLiveAccount(accountId)
+            ?: return@withContext liveAccountFailure(accountId)
         val remoteId = conversationId.removePrefix("${accId}_")
         if (remoteId == conversationId) {
             return@withContext SendResult.Failure("Conversation Signal invalide")
@@ -1121,8 +1245,8 @@ class SignalProtocol @Inject constructor(
         content: OutgoingContent.Ephemeral,
         accountId: String?,
     ): SendResult {
-        val accId = accountId ?: this.accountId ?: return SendResult.Failure("Compte non connecté")
-        val activeSession = session ?: return SendResult.Failure("Session Signal indisponible")
+        val (accId, activeSession) = resolveLiveAccount(accountId)
+            ?: return liveAccountFailure(accountId)
         val remoteId = conversationId.removePrefix("${accId}_")
         if (remoteId == conversationId) return SendResult.Failure("Conversation Signal invalide")
         return try {
@@ -1184,8 +1308,8 @@ class SignalProtocol @Inject constructor(
         content: OutgoingContent.VoiceNote,
         accountId: String?,
     ): SendResult {
-        val accId = accountId ?: this.accountId ?: return SendResult.Failure("Compte non connecté")
-        val activeSession = session ?: return SendResult.Failure("Session Signal indisponible")
+        val (accId, activeSession) = resolveLiveAccount(accountId)
+            ?: return liveAccountFailure(accountId)
         val remoteId = conversationId.removePrefix("${accId}_")
         if (remoteId == conversationId) return SendResult.Failure("Conversation Signal invalide")
         val path = content.attachment.localPath ?: return SendResult.Failure("Fichier vocal manquant")
@@ -1223,9 +1347,8 @@ class SignalProtocol @Inject constructor(
         content: OutgoingContent.Sticker,
         accountId: String?,
     ): SendResult = withContext(signalDispatcher) {
-        val accId = accountId ?: this@SignalProtocol.accountId
-            ?: return@withContext SendResult.Failure("Compte non connecté")
-        val activeSession = session ?: return@withContext SendResult.Failure("Session Signal indisponible")
+        val (accId, activeSession) = resolveLiveAccount(accountId)
+            ?: return@withContext liveAccountFailure(accountId)
         val remoteId = conversationId.removePrefix("${accId}_")
         if (remoteId == conversationId) {
             return@withContext SendResult.Failure("Conversation Signal invalide")
@@ -1328,8 +1451,8 @@ class SignalProtocol @Inject constructor(
         content: OutgoingContent.Poll,
         accountId: String?,
     ): SendResult {
-        val accId = accountId ?: this.accountId ?: return SendResult.Failure("Compte non connecté")
-        val activeSession = session ?: return SendResult.Failure("Session Signal indisponible")
+        val (accId, activeSession) = resolveLiveAccount(accountId)
+            ?: return liveAccountFailure(accountId)
         val remoteId = conversationId.removePrefix("${accId}_")
         if (remoteId == conversationId) return SendResult.Failure("Conversation Signal invalide")
         if (content.options.size < 2) return SendResult.Failure("Un sondage nécessite au moins 2 options")
@@ -1371,8 +1494,8 @@ class SignalProtocol @Inject constructor(
         content: OutgoingContent.ContactCard,
         accountId: String?,
     ): SendResult {
-        val accId = accountId ?: this.accountId ?: return SendResult.Failure("Compte non connecté")
-        val activeSession = session ?: return SendResult.Failure("Session Signal indisponible")
+        val (accId, activeSession) = resolveLiveAccount(accountId)
+            ?: return liveAccountFailure(accountId)
         val remoteId = conversationId.removePrefix("${accId}_")
         if (remoteId == conversationId) return SendResult.Failure("Conversation Signal invalide")
         return try {
@@ -1479,8 +1602,8 @@ class SignalProtocol @Inject constructor(
 
     override suspend fun setTyping(conversationId: String, typing: Boolean) {
         withContext(signalDispatcher) {
-            val accId = accountId ?: return@withContext
-            val activeSession = session ?: return@withContext
+            val convAccId = ConversationIds.accountId(conversationId) ?: return@withContext
+            val (accId, activeSession) = resolveLiveAccount(convAccId) ?: return@withContext
             val remoteId = conversationId.removePrefix("${accId}_")
             if (remoteId == conversationId) return@withContext
             try {
@@ -1535,8 +1658,8 @@ class SignalProtocol @Inject constructor(
 
     override suspend fun markRead(conversationId: String, messageId: String?) {
         withContext(signalDispatcher) {
-            val accId = accountId ?: return@withContext
-            val activeSession = session ?: return@withContext
+            val convAccId = ConversationIds.accountId(conversationId) ?: return@withContext
+            val (accId, activeSession) = resolveLiveAccount(convAccId) ?: return@withContext
             val remoteId = conversationId.removePrefix("${accId}_")
             if (remoteId == conversationId) return@withContext
             // Read receipts are 1:1 only.
@@ -1594,8 +1717,8 @@ class SignalProtocol @Inject constructor(
         content: OutgoingContent.Location,
         accountId: String?,
     ): SendResult {
-        val accId = accountId ?: this.accountId ?: return SendResult.Failure("Compte non connecté")
-        val activeSession = session ?: return SendResult.Failure("Session Signal indisponible")
+        val (accId, activeSession) = resolveLiveAccount(accountId)
+            ?: return liveAccountFailure(accountId)
         val remoteId = conversationId.removePrefix("${accId}_")
         if (remoteId == conversationId) return SendResult.Failure("Conversation Signal invalide")
         val geoBody = SanitizedText(
@@ -1679,8 +1802,8 @@ class SignalProtocol @Inject constructor(
         content: OutgoingContent.CallAction,
         accountId: String?,
     ): SendResult {
-        val accId = accountId ?: this.accountId ?: return SendResult.Failure("Compte non connecté")
-        val activeSession = session ?: return SendResult.Failure("Session Signal indisponible")
+        val (accId, activeSession) = resolveLiveAccount(accountId)
+            ?: return liveAccountFailure(accountId)
         val remoteId = conversationId.removePrefix("${accId}_")
         if (remoteId == conversationId || remoteId.startsWith("gv2:") || remoteId.startsWith("story:")) {
             return SendResult.Failure("Appel Signal 1:1 uniquement")
@@ -1742,8 +1865,8 @@ class SignalProtocol @Inject constructor(
         content: OutgoingContent.Story,
         accountId: String?,
     ): SendResult {
-        val accId = accountId ?: this.accountId ?: return SendResult.Failure("Compte non connecté")
-        val activeSession = session ?: return SendResult.Failure("Session Signal indisponible")
+        val (accId, activeSession) = resolveLiveAccount(accountId)
+            ?: return liveAccountFailure(accountId)
         val profileKey = activeSession.profileKey?.serialize()
             ?: return SendResult.Failure("Clé de profil Signal manquante pour les stories")
         val text = content.text?.trim()?.takeIf { it.isNotBlank() }
@@ -1859,16 +1982,21 @@ class SignalProtocol @Inject constructor(
 
     override suspend fun loadMessageHistory(conversationId: String): ltechnologies.onionphone.securemessenger.core.model.HistoryLoadResult =
         withContext(signalDispatcher) {
-            val accId = accountId
+            val convAccId = ConversationIds.accountId(conversationId)
                 ?: return@withContext ltechnologies.onionphone.securemessenger.core.model.HistoryLoadResult.Failure(
-                    "Compte non connecté",
+                    "Conversation Signal invalide",
                 )
+            val live = resolveLiveAccount(convAccId)
+                ?: return@withContext ltechnologies.onionphone.securemessenger.core.model.HistoryLoadResult.Failure(
+                    liveAccountFailure(convAccId).reason,
+                )
+            val (accId, active) = live
             val before = repository.countMessages(conversationId)
             val maxBefore = repository.maxMessageTimestamp(conversationId) ?: 0L
             val imported = credentialStore.get(accId, SignalCredentialKeys.LINK_SYNC_IMPORTED) == "1"
             if (!imported) {
-                val active = session
-                if (active != null) {
+                syncEngine?.holdReconnectForLinkSync = true
+                try {
                     runCatching {
                         SignalLinkAndSync.maybeFetchBackup(
                             context,
@@ -1878,6 +2006,8 @@ class SignalProtocol @Inject constructor(
                             repository,
                         )
                     }
+                } finally {
+                    syncEngine?.holdReconnectForLinkSync = false
                 }
             }
             runCatching { requestInitialSyncLocked() }
@@ -1895,34 +2025,45 @@ class SignalProtocol @Inject constructor(
         }
 
     override suspend fun getAccountProfile(accountId: String): AccountProfile? = withContext(signalDispatcher) {
-        val activeSession = session
         val storedName = credentialStore.get(accountId, SignalCredentialKeys.PROFILE_NAME)
         val storedAbout = credentialStore.get(accountId, SignalCredentialKeys.PROFILE_ABOUT)
-        if (activeSession != null && activeSession.profileKey != null) {
-            runCatching {
-                val result = activeSession.profileApi.getVersionedProfile(
-                    activeSession.aci,
-                    activeSession.profileKey,
-                    null,
-                )
-                val profile = result.successOrThrow()
-                val (name, about) = SignalFeatureHelpers.decryptProfile(activeSession.profileKey, profile)
-                if (name != null) credentialStore.put(accountId, SignalCredentialKeys.PROFILE_NAME, name)
-                if (about != null) credentialStore.put(accountId, SignalCredentialKeys.PROFILE_ABOUT, about)
-                return@withContext AccountProfile(
-                    accountId = accountId,
-                    protocol = ProtocolId.SIGNAL,
-                    displayName = name ?: storedName ?: activeSession.e164,
-                    phone = activeSession.e164,
-                    bio = about ?: storedAbout,
-                )
-            }.onFailure { Timber.d(it, "Signal profile fetch failed") }
+        val live = resolveLiveAccount(accountId)
+        if (live != null) {
+            val (_, activeSession) = live
+            if (activeSession.profileKey != null) {
+                runCatching {
+                    val result = activeSession.profileApi.getVersionedProfile(
+                        activeSession.aci,
+                        activeSession.profileKey,
+                        null,
+                    )
+                    val profile = result.successOrThrow()
+                    val (name, about) = SignalFeatureHelpers.decryptProfile(activeSession.profileKey, profile)
+                    if (name != null) credentialStore.put(accountId, SignalCredentialKeys.PROFILE_NAME, name)
+                    if (about != null) credentialStore.put(accountId, SignalCredentialKeys.PROFILE_ABOUT, about)
+                    return@withContext AccountProfile(
+                        accountId = accountId,
+                        protocol = ProtocolId.SIGNAL,
+                        displayName = name ?: storedName ?: activeSession.e164,
+                        phone = activeSession.e164,
+                        bio = about ?: storedAbout,
+                    )
+                }.onFailure { Timber.d(it, "Signal profile fetch failed") }
+            }
+            return@withContext AccountProfile(
+                accountId = accountId,
+                protocol = ProtocolId.SIGNAL,
+                displayName = storedName ?: activeSession.e164,
+                phone = activeSession.e164,
+                bio = storedAbout,
+            )
         }
+        // Non-live Signal row: local credentials only — never leak the other session's e164/profile.
         AccountProfile(
             accountId = accountId,
             protocol = ProtocolId.SIGNAL,
-            displayName = storedName ?: activeSession?.e164 ?: pendingE164 ?: accountId,
-            phone = activeSession?.e164 ?: pendingE164,
+            displayName = storedName ?: accountId,
+            phone = credentialStore.get(accountId, SignalCredentialKeys.E164),
             bio = storedAbout,
         )
     }
@@ -1932,8 +2073,11 @@ class SignalProtocol @Inject constructor(
         displayName: String,
         bio: String?,
     ): Result<Unit> = withContext(signalDispatcher) {
-        val activeSession = session
-            ?: return@withContext Result.failure(IllegalStateException("Session Signal indisponible"))
+        val live = resolveLiveAccount(accountId)
+            ?: return@withContext Result.failure(
+                IllegalStateException(liveAccountFailure(accountId).reason),
+            )
+        val (_, activeSession) = live
         runCatching {
             var profileKey = activeSession.profileKey
             if (profileKey == null) {
@@ -2047,9 +2191,16 @@ class SignalProtocol @Inject constructor(
         }
     }
 
-    fun cancelRegistration() {
+    /**
+     * Abort an in-flight registration/link. Only tears down the live session when
+     * [forAccountId] matches (or is null) — canceling a failed second-login attempt
+     * must not disconnect an already-connected Signal account.
+     */
+    fun cancelRegistration(forAccountId: String? = null) {
         ioScope.launch {
-            disconnect(accountId)
+            val live = accountId ?: return@launch
+            if (forAccountId != null && forAccountId != live) return@launch
+            disconnect(live)
         }
     }
 }

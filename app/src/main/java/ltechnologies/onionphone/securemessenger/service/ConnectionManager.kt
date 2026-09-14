@@ -7,13 +7,18 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import ltechnologies.onionphone.securemessenger.core.model.AccountCredentials
 import ltechnologies.onionphone.securemessenger.core.model.ConnectionResult
 import ltechnologies.onionphone.securemessenger.core.model.ConnectionState
@@ -159,29 +164,23 @@ class ConnectionManager @Inject constructor(
         val result = protocol.connect(credentials, proxy)
         if (result is ConnectionResult.Success) {
             val pending = protocol.pendingAuthStep()
-            val telegramConnecting = credentials.protocol == ProtocolId.TELEGRAM &&
-                protocol.connectionState.value != ConnectionState.CONNECTED
-            val signalConnecting = credentials.protocol == ProtocolId.SIGNAL &&
-                protocol.connectionState.value != ConnectionState.CONNECTED
+            // Only this account's pending step counts — a sibling Matrix SSO / TG SMS
+            // must not keep a fully-ready connect stuck on CONNECTING.
+            val pendingForThis = pending != null &&
+                (pending.accountId == null || pending.accountId == credentials.accountId)
             val state = when {
-                pending != null -> ConnectionState.CONNECTING
-                telegramConnecting || signalConnecting -> ConnectionState.CONNECTING
+                pendingForThis -> ConnectionState.CONNECTING
+                !protocol.isAccountConnected(credentials.accountId) -> ConnectionState.CONNECTING
                 else -> ConnectionState.CONNECTED
             }
-            val shouldPersistAccount = when (credentials.protocol) {
-                ProtocolId.TELEGRAM, ProtocolId.SIGNAL -> state == ConnectionState.CONNECTED
-                else -> true
-            }
-            if (shouldPersistAccount) {
-                repository.get().upsertAccount(
-                    ltechnologies.onionphone.securemessenger.core.model.Account(
-                        id = credentials.accountId,
-                        protocol = credentials.protocol,
-                        displayName = credentials.displayName,
-                        connectionState = state,
-                    ),
-                )
-            }
+            repository.get().upsertAccount(
+                ltechnologies.onionphone.securemessenger.core.model.Account(
+                    id = credentials.accountId,
+                    protocol = credentials.protocol,
+                    displayName = credentials.displayName,
+                    connectionState = state,
+                ),
+            )
         }
         return result
     }
@@ -252,44 +251,86 @@ class ConnectionManager @Inject constructor(
             _killswitchActive.value = false
 
             val roomAccounts = repository.get().observeAccounts().first()
+            val telegram = protocolRegistry.get(ProtocolId.TELEGRAM)
+                as? ltechnologies.onionphone.securemessenger.protocol.telegram.TelegramProtocol
             for (account in roomAccounts) {
                 if (account.protocol == ProtocolId.TELEGRAM &&
                     account.connectionState != ConnectionState.CONNECTED
                 ) {
-                    Timber.i("Removing incomplete Telegram account ${account.id}")
-                    credentialStore.removeAccount(account.id)
-                    repository.get().deleteAccount(account.id)
+                    // Live TDLib auth/session — do not wipe mid-SMS or mid-2FA on restore flaps.
+                    if (telegram?.hasLiveSession(account.id) == true) {
+                        Timber.i("Keeping in-flight Telegram login ${account.id}")
+                    } else {
+                        Timber.i("Removing incomplete Telegram account ${account.id}")
+                        credentialStore.removeAccount(account.id)
+                        repository.get().deleteAccount(account.id)
+                    }
                 }
                 if (account.protocol == ProtocolId.SIGNAL &&
                     account.connectionState != ConnectionState.CONNECTED
                 ) {
-                    Timber.i("Removing incomplete Signal account ${account.id}")
-                    credentialStore.removeAccount(account.id)
-                    repository.get().deleteAccount(account.id)
+                    // Official Signal keeps the secondary through link-and-sync (up to ~1h).
+                    // SESSION_READY+ACI means provision finished — only wait for archive/sync.
+                    if (isSignalProvisioned(account.id)) {
+                        Timber.i(
+                            "Keeping Signal account ${account.id} while CONNECTING (link-and-sync)",
+                        )
+                    } else {
+                        Timber.i("Removing incomplete Signal account ${account.id}")
+                        credentialStore.removeAccount(account.id)
+                        repository.get().deleteAccount(account.id)
+                    }
                 }
             }
             val cleanedRoomAccounts = repository.get().observeAccounts().first()
             val ids = (cleanedRoomAccounts.map { it.id } + credentialStore.listAccountIds()).toSet()
-            for (accountId in ids) {
+            // Bounded parallel restore: a slow Signal/Matrix/Telegram connect must not block
+            // every other account after unlock or proxy recovery.
+            val restoreGate = Semaphore(permits = 3)
+            coroutineScope {
+                ids.map { accountId ->
+                    async {
+                        restoreGate.withPermit {
+                            restoreOneAccount(accountId, cleanedRoomAccounts, config)
+                        }
+                    }
+                }.awaitAll()
+            }
+    }
+
+    private suspend fun restoreOneAccount(
+        accountId: String,
+        cleanedRoomAccounts: List<ltechnologies.onionphone.securemessenger.core.model.Account>,
+        config: ProxyConfig,
+    ) {
                 if (!appLockManager.isUnlocked) return
                 val protocolName = credentialStore.getProtocol(accountId)
                     ?: cleanedRoomAccounts.firstOrNull { it.id == accountId }?.protocol?.name
-                    ?: continue
-                val protocolId = runCatching { ProtocolId.valueOf(protocolName) }.getOrNull() ?: continue
-                if (protocolId !in FeatureFlags.enabled) continue
+                    ?: return
+                val protocolId = runCatching { ProtocolId.valueOf(protocolName) }.getOrNull() ?: return
+                if (protocolId !in FeatureFlags.enabled) return
 
                 val existing = cleanedRoomAccounts.firstOrNull { it.id == accountId }
                 if (config.torRequired && !proxyManager.isNetworkAllowed()) {
                     Timber.i("Skip restore for $accountId ($protocolId): Tor required but SOCKS down")
-                    continue
+                    return
                 }
                 if (protocolId == ProtocolId.TELEGRAM && existing?.connectionState != ConnectionState.CONNECTED) {
+                    val liveTg = (protocolRegistry.get(ProtocolId.TELEGRAM)
+                        as? ltechnologies.onionphone.securemessenger.protocol.telegram.TelegramProtocol)
+                        ?.hasLiveSession(accountId) == true
+                    if (liveTg) {
+                        return
+                    }
                     credentialStore.removeAccount(accountId)
-                    continue
+                    return
                 }
                 if (protocolId == ProtocolId.SIGNAL && existing?.connectionState != ConnectionState.CONNECTED) {
-                    credentialStore.removeAccount(accountId)
-                    continue
+                    if (!isSignalProvisioned(accountId)) {
+                        credentialStore.removeAccount(accountId)
+                        return
+                    }
+                    // Provisioned but still CONNECTING (link-and-sync) — reconnect to finish.
                 }
 
                 // restorePersistedAccounts() runs on every "proxy became healthy" transition, not
@@ -301,12 +342,12 @@ class ConnectionManager @Inject constructor(
                 if (existing?.connectionState == ConnectionState.CONNECTED &&
                     protocolRegistry.get(protocolId)?.isAccountConnected(accountId) == true
                 ) {
-                    continue
+                    return
                 }
 
                 val secrets = credentialStore.getAllForAccount(accountId)
                     .filterKeys { !it.startsWith("__") }
-                if (secrets.isEmpty()) continue
+                if (secrets.isEmpty()) return
 
                 val displayName = credentialStore.getDisplayName(accountId)
                     ?: existing?.displayName
@@ -320,7 +361,6 @@ class ConnectionManager @Inject constructor(
                 )
                 Timber.i("Restoring account $accountId ($protocolId)")
                 connect(creds)
-            }
     }
 
     suspend fun cancelTelegramLogin(accountId: String) {
@@ -331,7 +371,8 @@ class ConnectionManager @Inject constructor(
     }
 
     suspend fun cancelSignalLogin(accountId: String) {
-        (protocolRegistry.get(ProtocolId.SIGNAL) as? SignalProtocol)?.cancelRegistration()
+        (protocolRegistry.get(ProtocolId.SIGNAL) as? SignalProtocol)
+            ?.cancelRegistration(forAccountId = accountId)
         credentialStore.removeAccount(accountId)
         repository.get().deleteAccount(accountId)
     }
@@ -364,26 +405,37 @@ class ConnectionManager @Inject constructor(
             return
         }
         if (!proxyManager.isNetworkAllowed()) {
-            FeatureFlags.enabled.forEach { id ->
-                try {
-                    protocolRegistry.get(id)?.disconnect()
-                } catch (e: Exception) {
-                    Timber.w(e, "Disconnect failed for $id")
-                }
-            }
+            disconnectAllSessions()
         } else {
             lastProxyHealthy = true
         }
     }
 
-    suspend fun disconnectAll() {
+    /**
+     * Tears down live sessions per accountId so multi-account protocols (XMPP/Matrix/Telegram)
+     * update Room rows one-by-one. Protocol-wide [disconnect] is used as a mop-up for orphan
+     * mid-auth sessions that never got a Room row.
+     */
+    private suspend fun disconnectAllSessions() {
+        val accounts = runCatching { repository.get().observeAccounts().first() }.getOrDefault(emptyList())
+        for (account in accounts) {
+            try {
+                protocolRegistry.get(account.protocol)?.disconnect(account.id)
+            } catch (e: Exception) {
+                Timber.w(e, "Disconnect failed for ${account.id}")
+            }
+        }
         FeatureFlags.enabled.forEach { id ->
             try {
                 protocolRegistry.get(id)?.disconnect()
             } catch (e: Exception) {
-                Timber.w(e, "Disconnect failed for $id")
+                Timber.w(e, "Disconnect mop-up failed for $id")
             }
         }
+    }
+
+    suspend fun disconnectAll() {
+        disconnectAllSessions()
     }
 
     fun protocolFor(id: ProtocolId) = protocolRegistry.get(id)
@@ -438,7 +490,7 @@ class ConnectionManager @Inject constructor(
 
     private suspend fun reapplyTelegramProxy(config: ProxyConfig) {
         val telegram = protocolRegistry.get(ProtocolId.TELEGRAM) as? TelegramProtocol ?: return
-        if (telegram.connectionState.value != ConnectionState.CONNECTED) return
+        // Apply to every live TDLib client — including mid-auth CONNECTING sessions.
         telegram.reapplyProxy(config)
     }
 
@@ -466,5 +518,14 @@ class ConnectionManager @Inject constructor(
         ) {
             onProxyStateChanged(proxyManager.isNetworkAllowed(), proxyManager.currentConfig())
         }
+    }
+
+    /**
+     * True once secondary/primary registration wrote ACI + sessionReady — even if the UI
+     * account row is still CONNECTING during link-and-sync archive wait.
+     */
+    private fun isSignalProvisioned(accountId: String): Boolean {
+        val secrets = credentialStore.getAllForAccount(accountId)
+        return secrets["sessionReady"] == "true" && !secrets["aci"].isNullOrBlank()
     }
 }

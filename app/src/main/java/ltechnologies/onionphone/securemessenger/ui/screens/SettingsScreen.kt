@@ -11,7 +11,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.Logout
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Lock
@@ -82,6 +82,7 @@ fun SettingsScreen(
     val context = LocalContext.current
     var profileAccount by remember { mutableStateOf<Account?>(null) }
     var backupStatus by remember { mutableStateOf<String?>(null) }
+    var pendingDeleteAccount by remember { mutableStateOf<Account?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
 
     LaunchedEffect(backupStatus) {
@@ -162,7 +163,7 @@ fun SettingsScreen(
                 )
             } else {
                 accounts.forEach { account ->
-                    val caps = viewModel?.capabilitiesFor(account.protocol)
+                    val caps = viewModel?.capabilitiesFor(account.protocol, account.id)
                     ListItem(
                         leadingContent = { ProtocolAvatar(protocol = account.protocol) },
                         headlineContent = { Text(account.displayName) },
@@ -198,9 +199,28 @@ fun SettingsScreen(
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
-            SettingsSectionHeader("Capacités par protocole")
-            FeatureFlags.enabled.forEach { protocol ->
-                ProtocolCapabilityRow(protocol = protocol, viewModel = viewModel)
+            SettingsSectionHeader("Capacités")
+            if (accounts.isNotEmpty() && viewModel != null) {
+                accounts.forEach { account ->
+                    val caps = viewModel.capabilitiesFor(account.protocol, account.id)
+                    val features = capabilityLabels(caps, viewModel.canRegister(account.protocol))
+                    ListItem(
+                        leadingContent = { ProtocolAvatar(protocol = account.protocol, size = 36.dp) },
+                        headlineContent = {
+                            Text("${protocolDisplayName(account.protocol)} · ${account.displayName}")
+                        },
+                        supportingContent = {
+                            CapabilityChipRow(
+                                labels = features,
+                                modifier = Modifier.padding(top = 4.dp),
+                            )
+                        },
+                    )
+                }
+            } else {
+                FeatureFlags.enabled.forEach { protocol ->
+                    ProtocolCapabilityRow(protocol = protocol, viewModel = viewModel)
+                }
             }
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
@@ -213,7 +233,7 @@ fun SettingsScreen(
                 )
             } else {
                 accounts.forEach { account ->
-                    val caps = viewModel.capabilitiesFor(account.protocol)
+                    val caps = viewModel.capabilitiesFor(account.protocol, account.id)
                     if (caps.backupExport) {
                         ListItem(
                             leadingContent = {
@@ -254,28 +274,30 @@ fun SettingsScreen(
 
             if (onDisconnectAccount != null && accounts.isNotEmpty()) {
                 HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                SettingsSectionHeader("Déconnexion")
+                SettingsSectionHeader("Suppression de compte")
                 accounts.forEach { account ->
                     ListItem(
                         leadingContent = {
                             Icon(
-                                Icons.AutoMirrored.Filled.Logout,
+                                Icons.Filled.Delete,
                                 contentDescription = null,
                                 tint = MaterialTheme.colorScheme.error,
                             )
                         },
                         headlineContent = {
                             Text(
-                                "Déconnecter ${account.displayName}",
+                                "Supprimer ${account.displayName}",
                                 color = MaterialTheme.colorScheme.error,
                             )
                         },
                         supportingContent = {
-                            Text(protocolDisplayName(account.protocol))
+                            Text(
+                                "${protocolDisplayName(account.protocol)} — efface conversations, messages et identifiants",
+                            )
                         },
                         trailingContent = {
-                            TextButton(onClick = { onDisconnectAccount(account.id) }) {
-                                Text("OK", color = MaterialTheme.colorScheme.error)
+                            TextButton(onClick = { pendingDeleteAccount = account }) {
+                                Text("Supprimer", color = MaterialTheme.colorScheme.error)
                             }
                         },
                     )
@@ -298,6 +320,34 @@ fun SettingsScreen(
                 onDismiss = { profileAccount = null },
             )
         }
+    }
+
+    pendingDeleteAccount?.let { account ->
+        AlertDialog(
+            onDismissRequest = { pendingDeleteAccount = null },
+            title = { Text("Supprimer ce compte ?") },
+            text = {
+                Text(
+                    "« ${account.displayName} » (${protocolDisplayName(account.protocol)}) sera retiré définitivement : " +
+                        "identifiants, conversations, messages et contacts locaux. Cette action est irréversible.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onDisconnectAccount?.invoke(account.id)
+                        pendingDeleteAccount = null
+                    },
+                ) {
+                    Text("Supprimer", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDeleteAccount = null }) {
+                    Text("Annuler")
+                }
+            },
+        )
     }
 }
 

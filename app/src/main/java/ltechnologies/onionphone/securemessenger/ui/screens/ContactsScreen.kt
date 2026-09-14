@@ -221,11 +221,12 @@ fun ContactsScreen(
                                             remoteId = contact.remoteId,
                                             message = null,
                                             accountId = accountId,
-                                        ) { convId ->
+                                        ) { convId, reason ->
                                             if (convId != null) {
                                                 onStarted(convId, contact.displayName, protocol)
                                             } else {
-                                                status = "Impossible d'ouvrir la conversation"
+                                                status = reason?.takeIf { it.isNotBlank() }
+                                                    ?: "Impossible d'ouvrir la conversation"
                                             }
                                         }
                                     },

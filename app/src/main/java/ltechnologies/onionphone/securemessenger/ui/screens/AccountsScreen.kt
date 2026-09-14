@@ -9,8 +9,10 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
@@ -26,6 +28,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import java.util.UUID
 import ltechnologies.onionphone.securemessenger.core.model.AccountCredentials
@@ -36,16 +39,19 @@ import ltechnologies.onionphone.securemessenger.core.model.ProtocolId
 import ltechnologies.onionphone.securemessenger.core.model.RegistrationRequest
 import ltechnologies.onionphone.securemessenger.core.model.RegistrationResult
 import ltechnologies.onionphone.securemessenger.ui.MainViewModel
+import ltechnologies.onionphone.securemessenger.ui.components.connectionStateLabel
+import ltechnologies.onionphone.securemessenger.ui.components.protocolDisplayName
 
 private enum class FormMode { LOGIN, REGISTER }
 
-@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun AccountsScreen(
     modifier: Modifier = Modifier,
     viewModel: MainViewModel,
     initialProtocol: ProtocolId = ProtocolId.XMPP,
     onClose: (() -> Unit)? = null,
+    onConnected: ((accountId: String) -> Unit)? = null,
 ) {
     var selectedProtocol by remember { mutableStateOf(initialProtocol) }
     var mode by remember { mutableStateOf(FormMode.LOGIN) }
@@ -71,6 +77,7 @@ fun AccountsScreen(
     val pendingFieldValues = remember { mutableStateMapOf<String, String>() }
     var webViewState by remember { mutableStateOf<RegistrationResult.NeedsWebView?>(null) }
     var matrixSsoStep by remember { mutableStateOf<AuthStep?>(null) }
+    var pendingConnectAccountId by remember { mutableStateOf<String?>(null) }
 
     fun resetRegistrationFlow() {
         pendingSessionId = null
@@ -79,6 +86,7 @@ fun AccountsScreen(
         pendingFieldValues.clear()
         webViewState = null
         matrixSsoStep = null
+        pendingConnectAccountId = null
     }
 
     fun handleRegistrationResult(result: RegistrationResult) {
@@ -123,16 +131,28 @@ fun AccountsScreen(
                 onDismiss = {
                     matrixSsoStep = null
                     statusMessage = "SSO Matrix annulé"
+                    viewModel.cancelMatrixSso(pendingConnectAccountId)
                 },
                 onLoginToken = { loginToken ->
                     matrixSsoStep = null
+                    val accountId = pendingConnectAccountId
+                    pendingConnectAccountId = null
                     viewModel.continueAuth(
                         ProtocolId.MATRIX,
-                        mapOf("loginToken" to loginToken),
+                        buildMap {
+                            put("loginToken", loginToken)
+                            accountId?.let { put("accountId", it) }
+                        },
                     ) { result ->
-                        statusMessage = when (result) {
-                            is ConnectionResult.Success -> "Connecté (SSO Matrix + E2EE)"
-                            is ConnectionResult.Failure -> result.reason
+                        when (result) {
+                            is ConnectionResult.Success -> {
+                                if (accountId != null && onConnected != null) {
+                                    onConnected(accountId)
+                                } else {
+                                    statusMessage = "Connecté (SSO Matrix + E2EE)"
+                                }
+                            }
+                            is ConnectionResult.Failure -> statusMessage = result.reason
                         }
                     }
                 },
@@ -172,7 +192,7 @@ fun AccountsScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         TopAppBar(
-            title = { Text("Accounts") },
+            title = { Text("Comptes") },
             navigationIcon = {
                 onClose?.let { close ->
                     IconButton(onClick = close) {
@@ -210,20 +230,32 @@ fun AccountsScreen(
             OutlinedTextField(
                 value = displayName,
                 onValueChange = { displayName = it },
-                label = { Text("Display name") },
+                label = { Text("Nom d'affichage") },
                 modifier = Modifier.fillMaxWidth(),
             )
 
             when (selectedProtocol) {
                 ProtocolId.XMPP -> {
                     OutlinedTextField(field1, { field1 = it }, label = { Text("JID (user@domain)") }, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(field2, { field2 = it }, label = { Text("Password") }, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(field3, { field3 = it }, label = { Text("Server (optional)") }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(
+                        field2,
+                        { field2 = it },
+                        label = { Text("Mot de passe") },
+                        modifier = Modifier.fillMaxWidth(),
+                        visualTransformation = PasswordVisualTransformation(),
+                    )
+                    OutlinedTextField(field3, { field3 = it }, label = { Text("Serveur (optionnel)") }, modifier = Modifier.fillMaxWidth())
                 }
                 ProtocolId.MATRIX -> {
                     OutlinedTextField(field1, { field1 = it }, label = { Text("Homeserver (ex. matrix.org)") }, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(field2, { field2 = it }, label = { Text("User ID (@user:server, optionnel si SSO)") }, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(field3, { field3 = it }, label = { Text("Password / access token (vide = SSO)") }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(
+                        field3,
+                        { field3 = it },
+                        label = { Text("Mot de passe / access token (vide = SSO)") },
+                        modifier = Modifier.fillMaxWidth(),
+                        visualTransformation = PasswordVisualTransformation(),
+                    )
                 }
                 ProtocolId.IRC -> {
                     OutlinedTextField(field1, { field1 = it }, label = { Text("Serveur (ex. irc.libera.chat)") }, modifier = Modifier.fillMaxWidth())
@@ -240,6 +272,7 @@ fun AccountsScreen(
                         { field4 = it },
                         label = { Text("Mot de passe NickServ / SASL (optionnel)") },
                         modifier = Modifier.fillMaxWidth(),
+                        visualTransformation = PasswordVisualTransformation(),
                     )
                     OutlinedTextField(
                         field5,
@@ -339,18 +372,21 @@ fun AccountsScreen(
                             is ConnectionResult.Failure -> statusMessage = result.reason
                             is ConnectionResult.Success -> {
                                 if (selectedProtocol == ProtocolId.MATRIX) {
-                                    viewModel.pendingAuth(ProtocolId.MATRIX) { step ->
+                                    viewModel.pendingAuth(ProtocolId.MATRIX, creds.accountId) { step ->
                                         if (step?.kind == AuthStepKind.MATRIX_SSO &&
                                             !step.url.isNullOrBlank()
                                         ) {
+                                            pendingConnectAccountId = creds.accountId
                                             matrixSsoStep = step
                                             statusMessage = step.prompt
                                         } else {
-                                            statusMessage = "Connecté"
+                                            onConnected?.invoke(creds.accountId)
+                                                ?: run { statusMessage = "Connecté" }
                                         }
                                     }
                                 } else {
-                                    statusMessage = "Connecté"
+                                    onConnected?.invoke(creds.accountId)
+                                        ?: run { statusMessage = "Connecté" }
                                 }
                             }
                         }
@@ -361,7 +397,7 @@ fun AccountsScreen(
                     selectedProtocol != ProtocolId.SIGNAL &&
                     selectedProtocol != ProtocolId.EMAIL,
             ) {
-                Text("Connect")
+                Text("Se connecter")
             }
         } else {
             // Registration mode — same protocols, different flow (create a brand new account).
@@ -378,8 +414,20 @@ fun AccountsScreen(
             }
 
             if (selectedProtocol == ProtocolId.XMPP || selectedProtocol == ProtocolId.MATRIX) {
-                OutlinedTextField(regPassword, { regPassword = it }, label = { Text("Mot de passe") }, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(regConfirmPassword, { regConfirmPassword = it }, label = { Text("Confirmer le mot de passe") }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(
+                    regPassword,
+                    { regPassword = it },
+                    label = { Text("Mot de passe") },
+                    modifier = Modifier.fillMaxWidth(),
+                    visualTransformation = PasswordVisualTransformation(),
+                )
+                OutlinedTextField(
+                    regConfirmPassword,
+                    { regConfirmPassword = it },
+                    label = { Text("Confirmer le mot de passe") },
+                    modifier = Modifier.fillMaxWidth(),
+                    visualTransformation = PasswordVisualTransformation(),
+                )
 
                 if (pendingSessionId != null && pendingFields.isNotEmpty()) {
                     pendingInstructions?.let { Text(it) }
@@ -433,26 +481,51 @@ fun AccountsScreen(
 
         statusMessage?.let { Text(it) }
 
-        Text("Connected accounts: ${accounts.size}")
+        Text("Comptes connectés : ${accounts.size}")
         accounts.forEach { account ->
+            var confirmDelete by remember(account.id) { mutableStateOf(false) }
             RowAccount(
-                label = "${account.protocol.name}: ${account.displayName} (${account.connectionState})",
-                onDisconnect = {
-                    viewModel.disconnectAccount(account.id) {
-                        statusMessage = "Compte supprimé"
-                    }
-                },
+                label = "${protocolDisplayName(account.protocol)} : ${account.displayName} (${connectionStateLabel(account.connectionState)})",
+                onDelete = { confirmDelete = true },
             )
+            if (confirmDelete) {
+                AlertDialog(
+                    onDismissRequest = { confirmDelete = false },
+                    title = { Text("Supprimer ce compte ?") },
+                    text = {
+                        Text(
+                            "Efface identifiants, conversations, messages et contacts locaux. Irréversible.",
+                        )
+                    },
+                    confirmButton = {
+                        TextButton(
+                            onClick = {
+                                confirmDelete = false
+                                viewModel.disconnectAccount(account.id) {
+                                    statusMessage = "Compte supprimé"
+                                }
+                            },
+                        ) {
+                            Text("Supprimer")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { confirmDelete = false }) {
+                            Text("Annuler")
+                        }
+                    },
+                )
+            }
         }
     }
 }
 
 @Composable
-private fun RowAccount(label: String, onDisconnect: () -> Unit) {
+private fun RowAccount(label: String, onDelete: () -> Unit) {
     Column(modifier = Modifier.fillMaxWidth()) {
         Text(label)
-        OutlinedButton(onClick = onDisconnect, modifier = Modifier.fillMaxWidth()) {
-            Text("Disconnect")
+        OutlinedButton(onClick = onDelete, modifier = Modifier.fillMaxWidth()) {
+            Text("Supprimer le compte")
         }
     }
 }

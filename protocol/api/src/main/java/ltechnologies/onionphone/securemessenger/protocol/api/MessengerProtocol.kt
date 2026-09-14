@@ -36,6 +36,12 @@ interface MessengerProtocol {
     /** Feature flags describing what this adapter supports (registration, history sync, etc.). */
     val capabilities: ProtocolCapabilities
 
+    /**
+     * Account-scoped capabilities when multi-account sessions differ (e.g. Email JMAP vs IMAP,
+     * Matrix E2EE per session). Defaults to [capabilities].
+     */
+    fun capabilitiesFor(accountId: String?): ProtocolCapabilities = capabilities
+
     /** Live connection status, observed by the UI to render connected/connecting/error states. */
     val connectionState: StateFlow<ConnectionState>
 

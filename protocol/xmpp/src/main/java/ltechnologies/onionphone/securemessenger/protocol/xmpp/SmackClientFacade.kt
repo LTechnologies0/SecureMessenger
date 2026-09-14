@@ -10,6 +10,7 @@ import java.net.URL
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import timber.log.Timber
 import org.jivesoftware.smack.AbstractXMPPConnection
 import org.jivesoftware.smack.ConnectionConfiguration
 import org.jivesoftware.smack.MessageListener
@@ -63,6 +64,8 @@ class SmackClientFacade(
 ) {
     var connection: XMPPTCPConnection? = null
         private set
+
+    fun filesDir(): java.io.File = context.filesDir
 
     private val joinedMucs = ConcurrentHashMap<String, MultiUserChat>()
     private val mucMessageListeners = ConcurrentHashMap<String, MessageListener>()
@@ -204,8 +207,14 @@ class SmackClientFacade(
         try {
             val omemo = OmemoManager.getInstanceFor(conn)
             omemoHelper = OmemoHelper(omemo, conn)
-            omemoHelper?.initializeAsync()
-        } catch (_: Exception) {
+            val published = omemoHelper?.initialize() == true
+            if (!published) {
+                // Keep helper (Conversations keeps AxolotlService) — encrypt stays blocked
+                // until device list publish succeeds; plaintext only for peers that advertise none.
+                Timber.w("OMEMO device list not published yet — encrypt blocked until retry")
+            }
+        } catch (e: Exception) {
+            Timber.w(e, "OMEMO init failed — encrypt blocked; helper discarded")
             omemoHelper = null
         }
 
@@ -274,19 +283,26 @@ class SmackClientFacade(
         val jid: EntityBareJid = JidCreate.entityBareFrom(remoteJid)
         val chat = ChatManager.getInstanceFor(conn).chatWith(jid)
         val helper = omemoHelper
-        if (helper != null) {
-            if (!helper.ready) {
-                throw IllegalStateException("OMEMO en cours d'initialisation — réessayez dans un instant")
-            }
-            if (helper.contactSupportsOmemo(remoteJid)) {
-                // Fail-closed: never fall back to cleartext when the contact supports OMEMO.
-                val encrypted = helper.sendEncrypted(remoteJid, body)
+        when (
+            OmemoHelper.decideSend(
+                helperPresent = helper != null,
+                helperReady = helper?.ready == true,
+                peerSupports = helper?.contactSupportsOmemo(remoteJid),
+            )
+        ) {
+            OmemoSendDecision.ENCRYPT -> {
+                val encrypted = helper!!.sendEncrypted(remoteJid, body)
                 if (requestReceipts) {
                     attachReceiptExtensions(encrypted)
                 }
                 chat.send(encrypted)
                 return encrypted.stanzaId.orEmpty()
             }
+            OmemoSendDecision.BLOCK ->
+                throw IllegalStateException(
+                    "OMEMO indisponible ou identité du contact inconnue — message non envoyé en clair",
+                )
+            OmemoSendDecision.PLAINTEXT -> Unit
         }
         val builder = conn.stanzaFactory.buildMessageStanza().setBody(body)
         if (requestReceipts) {
@@ -305,16 +321,23 @@ class SmackClientFacade(
                 .getMultiUserChat(JidCreate.entityBareFrom(roomJid))
         }
         val helper = omemoHelper
-        if (helper != null) {
-            if (!helper.ready) {
-                throw IllegalStateException("OMEMO en cours d'initialisation — réessayez dans un instant")
-            }
-            if (helper.multiUserChatSupportsOmemo(muc)) {
-                // Fail-closed: never send cleartext when the room advertises OMEMO.
-                val encrypted = helper.encryptMuc(muc, body)
+        when (
+            OmemoHelper.decideSend(
+                helperPresent = helper != null,
+                helperReady = helper?.ready == true,
+                peerSupports = helper?.multiUserChatSupportsOmemo(muc),
+            )
+        ) {
+            OmemoSendDecision.ENCRYPT -> {
+                val encrypted = helper!!.encryptMuc(muc, body)
                 muc.sendMessage(encrypted)
                 return encrypted.stanzaId.orEmpty()
             }
+            OmemoSendDecision.BLOCK ->
+                throw IllegalStateException(
+                    "OMEMO du salon inconnu — message non envoyé en clair",
+                )
+            OmemoSendDecision.PLAINTEXT -> Unit
         }
         val conn = connection ?: throw SmackException.NotConnectedException()
         val message = conn.stanzaFactory.buildMessageStanza().setBody(body).build()
@@ -329,19 +352,18 @@ class SmackClientFacade(
         accuracy: Double = 0.0,
     ) {
         val helper = omemoHelper
-        // Prefer OMEMO-encrypted geo URI when the peer advertises OMEMO — XEP-0080 is cleartext.
-        if (helper != null) {
-            if (!helper.ready) {
-                throw IllegalStateException("OMEMO en cours d'initialisation — réessayez dans un instant")
+        val decision = OmemoHelper.decideSend(
+            helperPresent = helper != null,
+            helperReady = helper?.ready == true,
+            peerSupports = helper?.contactSupportsOmemo(remoteJid),
+        )
+        if (decision != OmemoSendDecision.PLAINTEXT) {
+            val body = buildString {
+                append("geo:$latitude,$longitude")
+                if (accuracy > 0.0) append(";u=$accuracy")
             }
-            if (helper.contactSupportsOmemo(remoteJid)) {
-                val body = buildString {
-                    append("geo:$latitude,$longitude")
-                    if (accuracy > 0.0) append(";u=$accuracy")
-                }
-                sendChatMessage(remoteJid, body, requestReceipts = false)
-                return
-            }
+            sendChatMessage(remoteJid, body, requestReceipts = false)
+            return
         }
         val manager = geoLocationManager ?: throw SmackException.NotConnectedException()
         val builder = GeoLocation.builder()
@@ -470,6 +492,45 @@ class SmackClientFacade(
         omemoHelper = null
     }
 
+    /**
+     * Downloads an XEP-0363 / XEP-0454 URL through this connection's proxy, decrypting aesgcm
+     * payloads when a fragment key is present.
+     */
+    fun downloadHttpUploadUrl(url: String, destination: File): Result<File> = runCatching {
+        val parsed = parseUploadFetch(url)
+        val conn = connection
+            ?: throw SmackException.NotConnectedException()
+        val proxyInfo = (conn as? AbstractXMPPConnection)?.configuration?.proxyInfo
+        val urlConnection = (
+            if (proxyInfo != null) {
+                parsed.fetchUrl.openConnection(proxyInfo.toJavaProxy())
+            } else {
+                parsed.fetchUrl.openConnection()
+            }
+            ) as HttpURLConnection
+        urlConnection.requestMethod = "GET"
+        urlConnection.useCaches = false
+        urlConnection.connectTimeout = 30_000
+        urlConnection.readTimeout = 60_000
+        try {
+            val status = urlConnection.responseCode
+            if (status != HttpURLConnection.HTTP_OK) {
+                throw IOException("HTTP download failed: $status ${urlConnection.responseMessage}")
+            }
+            val cipherBytes = urlConnection.inputStream.use { it.readBytes() }
+            val plain = if (parsed.iv != null && parsed.key != null) {
+                decryptAesGcm(cipherBytes, parsed.iv, parsed.key)
+            } else {
+                cipherBytes
+            }
+            destination.parentFile?.mkdirs()
+            destination.outputStream().use { it.write(plain) }
+            destination
+        } finally {
+            urlConnection.disconnect()
+        }
+    }.onFailure { Timber.w(it, "XMPP media download failed for %s", url) }
+
     fun isConnected(): Boolean = connection?.isConnected == true && connection?.isAuthenticated == true
 
     fun myBareJid(): String? = connection?.user?.asBareJid()?.toString()
@@ -484,6 +545,48 @@ class SmackClientFacade(
     }
 
     companion object {
+        private data class UploadFetch(
+            val fetchUrl: URL,
+            val iv: ByteArray?,
+            val key: ByteArray?,
+        )
+
+        /** aesgcm://host/path#iv+keyhex → https GET + AES-GCM decrypt (XEP-0454). */
+        private fun parseUploadFetch(raw: String): UploadFetch {
+            if (raw.startsWith("aesgcm://", ignoreCase = true)) {
+                val without = raw.removePrefix("aesgcm://").removePrefix("AESGCM://")
+                val hash = without.lastIndexOf('#')
+                val pathPart = if (hash >= 0) without.substring(0, hash) else without
+                val frag = if (hash >= 0) without.substring(hash + 1) else ""
+                val hex = frag.filter { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }
+                val material = hexToBytes(hex)
+                if (material.size < 28) {
+                    throw IOException("aesgcm fragment too short (${material.size} bytes)")
+                }
+                val iv = material.copyOfRange(0, 12)
+                val key = material.copyOfRange(12, material.size)
+                return UploadFetch(URL("https://$pathPart"), iv, key)
+            }
+            return UploadFetch(URL(raw), null, null)
+        }
+
+        private fun hexToBytes(hex: String): ByteArray {
+            if (hex.length % 2 != 0) throw IOException("Odd aesgcm hex length")
+            return ByteArray(hex.length / 2) { i ->
+                hex.substring(i * 2, i * 2 + 2).toInt(16).toByte()
+            }
+        }
+
+        private fun decryptAesGcm(ciphertext: ByteArray, iv: ByteArray, key: ByteArray): ByteArray {
+            val cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(
+                javax.crypto.Cipher.DECRYPT_MODE,
+                javax.crypto.spec.SecretKeySpec(key, "AES"),
+                javax.crypto.spec.GCMParameterSpec(128, iv),
+            )
+            return cipher.doFinal(ciphertext)
+        }
+
         fun extractDelayTimestamp(message: SmackMessage): Long? =
             message.getExtension(DelayInformation::class.java)?.stamp?.time
 

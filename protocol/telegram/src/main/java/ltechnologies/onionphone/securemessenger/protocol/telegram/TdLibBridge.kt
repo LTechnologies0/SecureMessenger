@@ -2,6 +2,7 @@ package ltechnologies.onionphone.securemessenger.protocol.telegram
 
 import org.drinkless.tdlib.Client
 import org.drinkless.tdlib.TdApi
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 import timber.log.Timber
@@ -190,6 +191,17 @@ class TdLibFacade(private val client: TdLibClient) {
 
     suspend fun registerUser(firstName: String, lastName: String): String? = awaitResult {
         client.send(TdApi.RegisterUser(firstName, lastName, false), it)
+    }
+
+    suspend fun setAuthenticationEmailAddress(email: String): String? = awaitResult {
+        client.send(TdApi.SetAuthenticationEmailAddress(email.trim()), it)
+    }
+
+    suspend fun checkAuthenticationEmailCode(code: String): String? = awaitResult {
+        client.send(
+            TdApi.CheckAuthenticationEmailCode(TdApi.EmailAddressAuthenticationCode(code.trim())),
+            it,
+        )
     }
 
     suspend fun downloadFile(fileId: Int, priority: Int = 32): TdApi.File? =
@@ -748,7 +760,7 @@ class TdLibFacade(private val client: TdLibClient) {
         fromMessageId: Long = 0,
         limit: Int = 100,
         onlyLocal: Boolean = false,
-    ): List<TdApi.Message> = suspendCancellableCoroutine { cont ->
+    ): List<TdApi.Message>? = suspendCancellableCoroutine { cont ->
         client.send(TdApi.GetChatHistory(chatId, fromMessageId, 0, limit, onlyLocal)) { result ->
             when (result) {
                 is TdApi.Messages -> {
@@ -757,9 +769,9 @@ class TdLibFacade(private val client: TdLibClient) {
                 }
                 is TdApi.Error -> {
                     Timber.w("GetChatHistory error ${result.code}: ${result.message}")
-                    if (cont.isActive) cont.resume(emptyList())
+                    if (cont.isActive) cont.resume(null)
                 }
-                else -> if (cont.isActive) cont.resume(emptyList())
+                else -> if (cont.isActive) cont.resume(null)
             }
         }
     }
@@ -780,11 +792,23 @@ class TdLibFacade(private val client: TdLibClient) {
         var pages = 0
         while (pages < maxPages) {
             val page = getChatHistory(chatId, fromMessageId, pageSize, onlyLocal)
+            if (page == null) {
+                delay(400)
+                val retry = getChatHistory(chatId, fromMessageId, pageSize, onlyLocal)
+                if (retry.isNullOrEmpty()) break
+                onPage(retry)
+                total += retry.size
+                pages++
+                // TDLib may return fewer than [pageSize] without EOF (td_api.tl).
+                val oldestId = retry.last().id
+                if (oldestId == fromMessageId) break
+                fromMessageId = oldestId
+                continue
+            }
             if (page.isEmpty()) break
             onPage(page)
             total += page.size
             pages++
-            if (page.size < pageSize) break
             val oldestId = page.last().id
             if (oldestId == fromMessageId) break
             fromMessageId = oldestId
@@ -811,10 +835,35 @@ class TdLibFacade(private val client: TdLibClient) {
         return local to remote
     }
 
+    /**
+     * Mirrors TDLib `Example.getMainChatList`: keep calling [TdApi.LoadChats] until the
+     * server answers HTTP-style 404 ("chat list already fully loaded"), then snapshot via
+     * [TdApi.GetChats]. Stopping at the first non-empty id list leaves chats unloaded.
+     */
     suspend fun syncChatList(limit: Int = 200): List<TdApi.Chat> {
-        loadChats(limit)
+        val deadline = System.currentTimeMillis() + 60_000L
+        while (System.currentTimeMillis() < deadline) {
+            when (val load = awaitLoadChats(limit)) {
+                is TdApi.Error -> {
+                    if (load.code == 404) break
+                    Timber.w("LoadChats error ${load.code}: ${load.message}")
+                    delay(400)
+                }
+                is TdApi.Ok -> {
+                    // Chats arrived via updates; ask again like Example.java.
+                    delay(50)
+                }
+                else -> delay(200)
+            }
+        }
         val ids = getChatIds(limit)
         return ids.mapNotNull { getChat(it) }
+    }
+
+    private suspend fun awaitLoadChats(limit: Int): TdApi.Object? = suspendCancellableCoroutine { cont ->
+        client.send(TdApi.LoadChats(TdApi.ChatListMain(), limit)) { result ->
+            if (cont.isActive) cont.resume(result)
+        }
     }
 
     fun close() = client.close()

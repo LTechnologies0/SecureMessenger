@@ -270,7 +270,8 @@ internal object SignalRuntimeFactory {
     }
 }
 
-internal fun signalConversationId(accountId: String, remoteId: String): String = "${accountId}_$remoteId"
+internal fun signalConversationId(accountId: String, remoteId: String): String =
+    ltechnologies.onionphone.securemessenger.core.model.ConversationIds.encode(accountId, remoteId)
 
 internal fun resolveSignalAddress(remoteId: String): SignalServiceAddress {
     val trimmed = remoteId.trim()

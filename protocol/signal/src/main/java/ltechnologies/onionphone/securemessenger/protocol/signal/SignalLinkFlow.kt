@@ -159,6 +159,9 @@ internal class SignalLinkFlow(
                             android.util.Base64.encodeToString(key.toByteArray(), android.util.Base64.NO_WRAP),
                         )
                     }
+                    message.readReceipts?.let { enabled ->
+                        put(SignalCredentialKeys.CONFIG_READ_RECEIPTS, enabled.toString())
+                    }
                 }
                 Timber.i("Signal link: success deviceId=%s", deviceId)
                 SignalRegistrationOutcome(

@@ -25,8 +25,8 @@ coil = "3.5.0"
 ktor = "3.5.1"
 smack = "4.4.8"
 trixnity = "4.22.7"
-tdlib = "v1.8.8-20221107"
-tdlib-android = "0.1.0"
+tdlib = "v1.8.8-20221107" # Maven stub only — runtime uses prebuilt AAR (see docs/tdlib-build.md); do not rely on this for natives
+tdlib-android = "0.1.0" # AkashPriyadarshii/tdlib-android prebuilt (latest as of 2026-08)
 netcipher = "2.1.0"
 libsignal-client = "0.96.3"
 wire = "6.4.5"
@@ -42,7 +42,7 @@ desugar = "2.1.5"
 angus-mail = "2.0.3"
 angus-activation = "2.0.2"
 kitteh-irc = "9.0.0"
-netty = "4.1.104.Final"
+netty = "4.1.137.Final"
 
 junit = "4.13.2"
 androidx-test-ext = "1.3.0"
@@ -103,6 +103,7 @@ smack-experimental = { group = "org.igniterealtime.smack", name = "smack-experim
 
 kitteh-irc = { group = "org.kitteh.irc", name = "client-lib", version.ref = "kitteh-irc" }
 netty-codec = { group = "io.netty", name = "netty-codec", version.ref = "netty" }
+netty-codec-http = { group = "io.netty", name = "netty-codec-http", version.ref = "netty" }
 netty-handler = { group = "io.netty", name = "netty-handler", version.ref = "netty" }
 netty-handler-proxy = { group = "io.netty", name = "netty-handler-proxy", version.ref = "netty" }
 

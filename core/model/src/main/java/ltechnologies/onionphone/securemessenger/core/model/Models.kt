@@ -85,6 +85,10 @@ enum class AuthStepKind {
     TELEGRAM_PASSWORD,
     TELEGRAM_REGISTRATION,
     TELEGRAM_OTHER_DEVICE,
+    /** TDLib AuthorizationStateWaitEmailAddress */
+    TELEGRAM_EMAIL_ADDRESS,
+    /** TDLib AuthorizationStateWaitEmailCode */
+    TELEGRAM_EMAIL_CODE,
     MATRIX_SSO,
     SIGNAL_SMS_CODE,
     SIGNAL_CAPTCHA,
@@ -99,6 +103,8 @@ data class AuthStep(
     val fields: List<String> = emptyList(),
     /** Optional browser URL (e.g. Matrix SSO redirect). */
     val url: String? = null,
+    /** Account currently awaiting this step (multi-account auth). */
+    val accountId: String? = null,
 )
 
 /** Deep-link target for Matrix SSO WebView redirects (`m.login.sso`). */
@@ -199,7 +205,11 @@ data class AccountProfile(
  * Protocols map what they support; unsupported kinds return [SendResult.Failure].
  */
 sealed class OutgoingContent {
-    data class Text(val body: SanitizedText) : OutgoingContent()
+    data class Text(
+        val body: SanitizedText,
+        /** Optional email subject (ignored by IM protocols). */
+        val subject: String? = null,
+    ) : OutgoingContent()
 
     data class Media(
         val attachment: Attachment,
@@ -366,7 +376,11 @@ sealed class RegistrationResult {
 }
 
 sealed class SendResult {
-    data class Success(val messageId: String) : SendResult()
+    data class Success(
+        val messageId: String,
+        /** Non-null when the protocol remapped the open conversation (e.g. email mailbox→thread). */
+        val conversationId: String? = null,
+    ) : SendResult()
     data class Failure(val reason: String) : SendResult()
 }
 

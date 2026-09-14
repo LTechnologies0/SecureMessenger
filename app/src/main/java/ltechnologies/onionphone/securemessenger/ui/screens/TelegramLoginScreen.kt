@@ -48,6 +48,8 @@ private enum class TelegramLoginStep {
     PASSWORD,
     REGISTRATION,
     OTHER_DEVICE,
+    EMAIL_ADDRESS,
+    EMAIL_CODE,
 }
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
@@ -64,9 +66,16 @@ fun TelegramLoginScreen(
     var password by rememberSaveable { mutableStateOf("") }
     var firstName by rememberSaveable { mutableStateOf("") }
     var lastName by rememberSaveable { mutableStateOf("") }
+    var email by rememberSaveable { mutableStateOf("") }
+    var emailCode by rememberSaveable { mutableStateOf("") }
     var accountId by rememberSaveable { mutableStateOf<String?>(null) }
     var statusMessage by rememberSaveable { mutableStateOf<String?>(null) }
     var loading by rememberSaveable { mutableStateOf(false) }
+
+    fun telegramAuthFields(vararg pairs: Pair<String, String>): Map<String, String> = buildMap {
+        accountId?.let { put("accountId", it) }
+        pairs.forEach { (k, v) -> put(k, v) }
+    }
 
     val accounts by viewModel.accounts.collectAsState()
     val apiConfigured = BuildConfig.TELEGRAM_API_ID != 0 && BuildConfig.TELEGRAM_API_HASH.isNotBlank()
@@ -86,6 +95,7 @@ fun TelegramLoginScreen(
         val protocol = viewModel.telegramProtocol() ?: return@LaunchedEffect
         protocol.observePendingAuthStep().collectLatest { authStep ->
             if (authStep == null) return@collectLatest
+            if (authStep.accountId != null && authStep.accountId != accountId) return@collectLatest
             loading = false
             when (authStep.kind) {
                 AuthStepKind.TELEGRAM_SMS_CODE -> {
@@ -104,6 +114,14 @@ fun TelegramLoginScreen(
                     step = TelegramLoginStep.OTHER_DEVICE
                     statusMessage = authStep.prompt
                 }
+                AuthStepKind.TELEGRAM_EMAIL_ADDRESS -> {
+                    step = TelegramLoginStep.EMAIL_ADDRESS
+                    statusMessage = authStep.prompt
+                }
+                AuthStepKind.TELEGRAM_EMAIL_CODE -> {
+                    step = TelegramLoginStep.EMAIL_CODE
+                    statusMessage = authStep.prompt
+                }
                 else -> Unit
             }
         }
@@ -111,12 +129,10 @@ fun TelegramLoginScreen(
 
     LaunchedEffect(loading, accountId, step) {
         if (!loading || accountId == null || step != TelegramLoginStep.PHONE) return@LaunchedEffect
-        delay(60_000)
+        delay(180_000)
         if (loading && step == TelegramLoginStep.PHONE) {
             loading = false
-            statusMessage = "Délai dépassé. Vérifiez la connexion (et Tor si activé), puis réessayez."
-            accountId?.let { viewModel.cancelTelegramLogin(it) }
-            accountId = null
+            statusMessage = "Toujours en attente de Telegram (Tor peut être lent). Ne fermez pas si le SMS arrive."
         }
     }
 
@@ -241,14 +257,14 @@ fun TelegramLoginScreen(
                         }
                         loading = true
                         statusMessage = null
-                        viewModel.continueAuth(ProtocolId.TELEGRAM, mapOf("code" to code.trim())) { result ->
+                        viewModel.continueAuth(ProtocolId.TELEGRAM, telegramAuthFields("code" to code.trim())) { result ->
                             when (result) {
                                 is ConnectionResult.Failure -> {
                                     loading = false
                                     statusMessage = result.reason
                                 }
                                 is ConnectionResult.Success -> {
-                                    viewModel.pendingAuth(ProtocolId.TELEGRAM) { authStep ->
+                                    viewModel.pendingAuth(ProtocolId.TELEGRAM, accountId) { authStep ->
                                         when (authStep?.kind) {
                                             AuthStepKind.TELEGRAM_PASSWORD -> {
                                                 loading = false
@@ -287,7 +303,7 @@ fun TelegramLoginScreen(
                 Button(
                     onClick = {
                         loading = true
-                        viewModel.resendTelegramCode { result ->
+                        viewModel.resendTelegramCode(accountId) { result ->
                             loading = false
                             statusMessage = when (result) {
                                 is ConnectionResult.Success -> "Nouveau code envoyé"
@@ -331,7 +347,10 @@ fun TelegramLoginScreen(
                         loading = true
                         viewModel.continueAuth(
                             ProtocolId.TELEGRAM,
-                            mapOf("firstName" to firstName.trim(), "lastName" to lastName.trim()),
+                            telegramAuthFields(
+                                "firstName" to firstName.trim(),
+                                "lastName" to lastName.trim(),
+                            ),
                         ) { result ->
                             loading = false
                             statusMessage = when (result) {
@@ -387,7 +406,7 @@ fun TelegramLoginScreen(
                         loading = true
                         viewModel.continueAuth(
                             ProtocolId.TELEGRAM,
-                            mapOf("password" to password),
+                            telegramAuthFields("password" to password),
                         ) { result ->
                             loading = false
                             statusMessage = when (result) {
@@ -400,6 +419,93 @@ fun TelegramLoginScreen(
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text("Confirmer")
+                }
+            }
+
+            TelegramLoginStep.EMAIL_ADDRESS -> {
+                Text(
+                    text = "Adresse e-mail",
+                    style = MaterialTheme.typography.headlineSmall,
+                )
+                Text(
+                    text = statusMessage
+                        ?: "Telegram demande une adresse e-mail pour finaliser la connexion.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = email,
+                    onValueChange = { email = it },
+                    label = { Text("E-mail") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Button(
+                    onClick = {
+                        if (email.isBlank() || !email.contains('@')) {
+                            statusMessage = "Adresse e-mail invalide"
+                            return@Button
+                        }
+                        loading = true
+                        viewModel.continueAuth(
+                            ProtocolId.TELEGRAM,
+                            telegramAuthFields("email" to email.trim()),
+                        ) { result ->
+                            loading = false
+                            statusMessage = when (result) {
+                                is ConnectionResult.Success -> "Code e-mail en cours d'envoi…"
+                                is ConnectionResult.Failure -> result.reason
+                            }
+                        }
+                    },
+                    enabled = !loading,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Continuer")
+                }
+            }
+
+            TelegramLoginStep.EMAIL_CODE -> {
+                Text(
+                    text = "Code e-mail",
+                    style = MaterialTheme.typography.headlineSmall,
+                )
+                Text(
+                    text = statusMessage ?: "Entrez le code reçu par e-mail.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = emailCode,
+                    onValueChange = { emailCode = it },
+                    label = { Text("Code") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Button(
+                    onClick = {
+                        if (emailCode.isBlank()) {
+                            statusMessage = "Entrez le code"
+                            return@Button
+                        }
+                        loading = true
+                        viewModel.continueAuth(
+                            ProtocolId.TELEGRAM,
+                            telegramAuthFields("emailCode" to emailCode.trim()),
+                        ) { result ->
+                            loading = false
+                            statusMessage = when (result) {
+                                is ConnectionResult.Success -> "Connexion en cours…"
+                                is ConnectionResult.Failure -> result.reason
+                            }
+                        }
+                    },
+                    enabled = !loading,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Vérifier")
                 }
             }
         }

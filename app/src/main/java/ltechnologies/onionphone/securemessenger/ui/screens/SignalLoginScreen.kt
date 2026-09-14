@@ -41,6 +41,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -103,21 +104,17 @@ fun SignalLoginScreen(
         }
     }
 
-    // Also detect connect after device link (account id may change on complete).
-    LaunchedEffect(accounts, step) {
-        if (step != SignalLoginStep.LINK_QR) return@LaunchedEffect
-        val connected = accounts.firstOrNull {
-            it.protocol == ProtocolId.SIGNAL && it.connectionState == ConnectionState.CONNECTED
-        } ?: return@LaunchedEffect
-        loading = false
-        onConnected(connected.id)
-    }
-
-    LaunchedEffect(accountId) {
-        val id = accountId ?: return@LaunchedEffect
+    LaunchedEffect(Unit) {
         val protocol = viewModel.signalProtocol() ?: return@LaunchedEffect
         protocol.observePendingAuthStep().collectLatest { authStep ->
             if (authStep == null) return@collectLatest
+            // QR link creates accountId in the protocol first — adopt it for connect/cancel.
+            authStep.accountId?.let { id ->
+                if (accountId == null) accountId = id
+            }
+            if (authStep.accountId != null && accountId != null && authStep.accountId != accountId) {
+                return@collectLatest
+            }
             loading = false
             when (authStep.kind) {
                 AuthStepKind.SIGNAL_CAPTCHA -> {
@@ -138,15 +135,16 @@ fun SignalLoginScreen(
                     if (!authStep.url.isNullOrBlank()) {
                         linkUrl = authStep.url
                     }
-                    // Errors keep SIGNAL_DEVICE_LINK with a failure prompt and no success path.
-                    if (authStep.prompt.contains("refusé", ignoreCase = true) ||
-                        authStep.prompt.contains("échou", ignoreCase = true) ||
-                        authStep.prompt.contains("invalide", ignoreCase = true) ||
-                        authStep.prompt.contains("Erreur", ignoreCase = true) ||
-                        authStep.prompt.contains("interrompu", ignoreCase = true)
-                    ) {
-                        loading = false
-                    }
+                    val transferring = isSignalLinkTransferring(authStep.prompt)
+                    val failed = !transferring && (
+                        authStep.prompt.contains("refusé", ignoreCase = true) ||
+                            authStep.prompt.contains("échou", ignoreCase = true) ||
+                            authStep.prompt.contains("invalide", ignoreCase = true) ||
+                            authStep.prompt.contains("Erreur", ignoreCase = true) ||
+                            authStep.prompt.contains("interrompu", ignoreCase = true)
+                        )
+                    loading = transferring || (!failed && linkUrl != null)
+                    if (failed) loading = false
                 }
                 else -> Unit
             }
@@ -164,28 +162,43 @@ fun SignalLoginScreen(
         }
     }
 
-    LaunchedEffect(step, linkUrl) {
+    LaunchedEffect(step, linkUrl, statusMessage) {
         if (step != SignalLoginStep.LINK_QR || linkUrl == null) return@LaunchedEffect
+        if (isSignalLinkTransferring(statusMessage)) return@LaunchedEffect
         delay(90_000)
-        if (step == SignalLoginStep.LINK_QR) {
+        if (step == SignalLoginStep.LINK_QR && !isSignalLinkTransferring(statusMessage)) {
             statusMessage = "QR expiré — régénérez un nouveau code."
             loading = false
         }
     }
 
+    val view = LocalView.current
+    DisposableEffect(step, statusMessage) {
+        view.keepScreenOn = step == SignalLoginStep.LINK_QR && isSignalLinkTransferring(statusMessage)
+        onDispose { view.keepScreenOn = false }
+    }
+
+    fun abortInFlightSignalLogin() {
+        val id = accountId
+        if (id != null) {
+            val protocol = viewModel.signalProtocol()
+            if (protocol?.isAccountConnected(id) != true) {
+                viewModel.cancelSignalLogin(id)
+            }
+            accountId = null
+        } else {
+            viewModel.cancelSignalDeviceLink()
+        }
+    }
+
     DisposableEffect(Unit) {
         onDispose {
-            // Only tear down an in-flight QR link. Once CONNECTED, leave the session alone.
-            val protocol = viewModel.signalProtocol()
-            if (protocol?.connectionState?.value != ConnectionState.CONNECTED) {
-                viewModel.cancelSignalDeviceLink()
-            }
+            abortInFlightSignalLogin()
         }
     }
 
     fun handleClose() {
-        accountId?.let { viewModel.cancelSignalLogin(it) }
-        viewModel.cancelSignalDeviceLink()
+        abortInFlightSignalLogin()
         onClose()
     }
 
@@ -229,9 +242,10 @@ fun SignalLoginScreen(
                         loading = true
                         statusMessage = "Génération du QR…"
                         linkUrl = null
-                        viewModel.startSignalDeviceLink { result ->
+                        viewModel.startSignalDeviceLink { result, linkId ->
                             when (result) {
                                 is ConnectionResult.Success -> {
+                                    if (linkId != null) accountId = linkId
                                     statusMessage = "Scannez le QR depuis Signal"
                                 }
                                 is ConnectionResult.Failure -> {
@@ -249,21 +263,30 @@ fun SignalLoginScreen(
             }
 
             SignalLoginStep.LINK_QR -> {
+                val transferring = isSignalLinkTransferring(statusMessage)
                 Text(
                     text = "Lier cet appareil",
                     style = MaterialTheme.typography.headlineSmall,
                 )
                 Text(
-                    text = "Sur votre téléphone Signal principal : Paramètres → Appareils liés → " +
-                        "Lier un nouvel appareil, puis scannez ce QR. Après le scan, " +
-                        "l'association se termine ici (ne fermez pas cet écran).",
+                    text = if (transferring) {
+                        "Ne fermez pas cet écran. Signal envoie l'historique — ça peut prendre plusieurs minutes."
+                    } else {
+                        "Sur votre téléphone Signal principal : Paramètres → Appareils liés → " +
+                            "Lier un nouvel appareil, puis scannez ce QR. Après le scan, " +
+                            "l'association se termine ici (ne fermez pas cet écran)."
+                    },
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 val url = linkUrl
                 if (url != null && loading) {
                     Text(
-                        text = "En attente du scan / finalisation…",
+                        text = if (transferring) {
+                            "Réception de l'historique…"
+                        } else {
+                            "En attente du scan / finalisation…"
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.align(Alignment.CenterHorizontally),
@@ -274,7 +297,7 @@ fun SignalLoginScreen(
                             .align(Alignment.CenterHorizontally),
                     )
                 }
-                if (url != null) {
+                if (url != null && !transferring) {
                     val qr by produceState<ImageBitmap?>(initialValue = null, url) {
                         value = withContext(Dispatchers.Default) { qrImageBitmap(url) }
                     }
@@ -297,7 +320,7 @@ fun SignalLoginScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.align(Alignment.CenterHorizontally),
                     )
-                } else if (loading) {
+                } else if (loading && url == null) {
                     CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
                 }
                 Button(
@@ -305,10 +328,12 @@ fun SignalLoginScreen(
                         loading = true
                         statusMessage = "Nouveau QR…"
                         linkUrl = null
-                        viewModel.startSignalDeviceLink { result ->
+                        viewModel.startSignalDeviceLink { result, linkId ->
                             when (result) {
-                                is ConnectionResult.Success ->
+                                is ConnectionResult.Success -> {
+                                    if (linkId != null) accountId = linkId
                                     statusMessage = "Scannez le nouveau QR"
+                                }
                                 is ConnectionResult.Failure -> {
                                     loading = false
                                     statusMessage = result.reason
@@ -316,14 +341,14 @@ fun SignalLoginScreen(
                             }
                         }
                     },
-                    enabled = true,
+                    enabled = !transferring,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text("Régénérer le QR")
                 }
                 TextButton(
                     onClick = {
-                        viewModel.cancelSignalDeviceLink()
+                        abortInFlightSignalLogin()
                         step = SignalLoginStep.CHOICE
                         loading = false
                         linkUrl = null
@@ -572,4 +597,15 @@ fun SignalLoginScreen(
             }
         }
     }
+}
+
+/** After the primary scans the QR, SecureMessenger long-polls for the transfer archive. */
+internal fun isSignalLinkTransferring(prompt: String?): Boolean {
+    val s = prompt ?: return false
+    return s.contains("Provision", ignoreCase = true) ||
+        s.contains("historique", ignoreCase = true) ||
+        s.contains("finalisation", ignoreCase = true) ||
+        s.contains("Téléchargement", ignoreCase = true) ||
+        s.contains("Import des messages", ignoreCase = true) ||
+        s.contains("Connexion à Signal", ignoreCase = true)
 }

@@ -90,6 +90,8 @@ internal object SignalCredentialKeys {
     const val LINK_SYNC_BACKUP_PATH = "linkSyncBackupPath"
     /** Set to "1" after transfer-archive frames were imported into local DB. */
     const val LINK_SYNC_IMPORTED = "linkSyncImported"
+    /** Set to "1" when the primary aborted or the poll deadline elapsed — do not poll again. */
+    const val LINK_SYNC_SKIPPED = "linkSyncSkipped"
     const val STORAGE_MANIFEST_VERSION = "storageManifestVersion"
     const val LAST_DEVICE_NAME_CHANGE = "lastDeviceNameChange"
     const val INITIAL_SYNC_DONE = "initialSyncDone"

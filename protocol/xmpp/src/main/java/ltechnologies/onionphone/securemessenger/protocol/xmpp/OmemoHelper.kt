@@ -114,12 +114,6 @@ class OmemoHelper(
         return sent.buildMessage(builder, muc.room)
     }
 
-    fun multiUserChatSupportsOmemo(muc: org.jivesoftware.smackx.muc.MultiUserChat): Boolean = try {
-        omemoManager.multiUserChatSupportsOmemo(muc)
-    } catch (_: Exception) {
-        false
-    }
-
     fun tryDecrypt(remoteJid: String, stanza: SmackMessage): String? {
         if (stanza.getExtension(OmemoElement::class.java) == null) return null
         val element = stanza.getExtension(OmemoElement::class.java) ?: return null
@@ -136,10 +130,41 @@ class OmemoHelper(
     fun hasOmemoPayload(stanza: SmackMessage): Boolean =
         stanza.getExtension(OmemoElement::class.java) != null
 
-    fun contactSupportsOmemo(remoteJid: String): Boolean = try {
+    fun multiUserChatSupportsOmemo(muc: org.jivesoftware.smackx.muc.MultiUserChat): Boolean? = try {
+        omemoManager.multiUserChatSupportsOmemo(muc)
+    } catch (_: Exception) {
+        null
+    }
+
+    /**
+     * Disco/PEP timeout is **unknown**, not "no OMEMO". Callers must not send cleartext
+     * when this returns null (same class as Signal treating HTTP 404 as "no backup").
+     */
+    fun contactSupportsOmemo(remoteJid: String): Boolean? = try {
         omemoManager.contactSupportsOmemo(JidCreate.bareFrom(remoteJid))
     } catch (_: Exception) {
-        false
+        null
+    }
+
+    companion object {
+        /**
+         * Conversations-style: without an OMEMO stack, plaintext is allowed.
+         * While OMEMO is initializing, block (do not race cleartext).
+         * When ready, unknown disco is block; known OMEMO encrypts; known cleartext peers may plain.
+         */
+        internal fun decideSend(
+            helperPresent: Boolean,
+            helperReady: Boolean,
+            peerSupports: Boolean?,
+        ): OmemoSendDecision {
+            if (!helperPresent) return OmemoSendDecision.PLAINTEXT
+            if (!helperReady) return OmemoSendDecision.BLOCK
+            return when (peerSupports) {
+                true -> OmemoSendDecision.ENCRYPT
+                false -> OmemoSendDecision.PLAINTEXT
+                null -> OmemoSendDecision.BLOCK
+            }
+        }
     }
 
     private fun resolveUndecidedOrThrow(e: UndecidedOmemoIdentityException) {
@@ -154,4 +179,10 @@ class OmemoHelper(
 
     private fun deviceKey(device: OmemoDevice): String =
         "${device.jid}|${device.deviceId}"
+}
+
+internal enum class OmemoSendDecision {
+    ENCRYPT,
+    PLAINTEXT,
+    BLOCK,
 }

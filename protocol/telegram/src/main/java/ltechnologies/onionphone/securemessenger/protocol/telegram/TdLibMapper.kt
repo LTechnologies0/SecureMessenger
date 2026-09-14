@@ -4,6 +4,7 @@ import ltechnologies.onionphone.securemessenger.core.model.Attachment
 import ltechnologies.onionphone.securemessenger.core.model.AttachmentState
 import ltechnologies.onionphone.securemessenger.core.model.Contact
 import ltechnologies.onionphone.securemessenger.core.model.Conversation
+import ltechnologies.onionphone.securemessenger.core.model.ConversationIds
 import ltechnologies.onionphone.securemessenger.core.model.DeliveryState
 import ltechnologies.onionphone.securemessenger.core.model.Message
 import ltechnologies.onionphone.securemessenger.core.model.MessageDirection
@@ -17,20 +18,17 @@ import org.json.JSONObject
 object TdLibMapper {
 
     fun conversationId(accountId: String, chatId: Long): String =
-        "${accountId}_$chatId"
+        ConversationIds.encode(accountId, chatId.toString())
 
     fun messageId(conversationId: String, tdMessageId: Long): String =
         "${conversationId}_$tdMessageId"
 
     fun chatIdFromConversation(conversationId: String): Long? =
-        conversationId.substringAfterLast('_').toLongOrNull()
+        ConversationIds.remoteId(conversationId)?.toLongOrNull()
 
-    /** UUID account ids contain hyphens; chat id follows the last underscore. */
-    fun accountIdFromConversation(conversationId: String): String? {
-        val sep = conversationId.lastIndexOf('_')
-        if (sep <= 0) return null
-        return conversationId.substring(0, sep)
-    }
+    /** UUID account ids contain hyphens; remote chat id follows the first underscore. */
+    fun accountIdFromConversation(conversationId: String): String? =
+        ConversationIds.accountId(conversationId)
 
     fun toConversation(accountId: String, chat: TdApi.Chat): Conversation {
         val convId = conversationId(accountId, chat.id)
@@ -156,6 +154,7 @@ object TdLibMapper {
             put("firstName", content.contact.firstName)
             put("lastName", content.contact.lastName)
             put("phoneNumber", content.contact.phoneNumber)
+            put("phone", content.contact.phoneNumber)
             put("userId", content.contact.userId)
         }.toString()
         else -> null

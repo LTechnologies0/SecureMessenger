@@ -21,6 +21,7 @@ import ltechnologies.onionphone.securemessenger.core.model.AttachmentState
 import ltechnologies.onionphone.securemessenger.core.model.ConnectionResult
 import ltechnologies.onionphone.securemessenger.core.model.ConnectionState
 import ltechnologies.onionphone.securemessenger.core.model.Conversation
+import ltechnologies.onionphone.securemessenger.core.model.ConversationIds
 import ltechnologies.onionphone.securemessenger.core.model.DeliveryState
 import ltechnologies.onionphone.securemessenger.core.model.HistoryLoadResult
 import ltechnologies.onionphone.securemessenger.core.model.Message
@@ -100,7 +101,11 @@ class XmppProtocol @Inject constructor(
 
     /** Exposes the underlying Smack facade for [accountId] (or the sole connected one if omitted). */
     fun smackFacade(accountId: String? = null): SmackClientFacade? =
-        accountId?.let { sessions[it] } ?: sessions.values.singleOrNull()
+        when {
+            accountId != null -> sessions[accountId]
+            sessions.size == 1 -> sessions.values.single()
+            else -> null
+        }
 
     override fun isAccountConnected(accountId: String): Boolean =
         sessions[accountId]?.isConnected() == true
@@ -248,6 +253,9 @@ class XmppProtocol @Inject constructor(
                 scope.launch {
                     smack.rosterEntries().forEach { entry ->
                         val remote = SmackClientFacade.rosterJidString(entry)
+                        if (smack.omemoHelper != null && smack.omemoHelper?.ready != true) {
+                            smack.omemoHelper?.initialize()
+                        }
                         XmppMamSync.syncHistory(smack, account.accountId, repository, remote)
                     }
                 }
@@ -260,11 +268,11 @@ class XmppProtocol @Inject constructor(
                         connectionState = ConnectionState.CONNECTED,
                     ),
                 )
-                _connectionState.value = ConnectionState.CONNECTED
+                refreshConnectionState()
                 ConnectionResult.Success
             } catch (e: Exception) {
                 Timber.w(e, "XMPP connect failed")
-                _connectionState.value = ConnectionState.ERROR
+                refreshConnectionState(preferErrorIfEmpty = true)
                 ConnectionResult.Failure(e.message ?: "XMPP connection failed")
             }
         }
@@ -364,12 +372,11 @@ class XmppProtocol @Inject constructor(
             ?: SmackClientFacade.extractOobUrl(smackMessage)
         val attachments = uploadUrl?.let { url ->
             listOf(
-                Attachment(
-                    id = "${convId}_${smackMessage.stanzaId ?: ts}_file",
-                    mimeType = guessMimeFromUrl(url),
-                    fileName = url.substringAfterLast('/').takeIf { it.isNotBlank() },
-                    remoteRef = url,
-                    state = AttachmentState.READY,
+                buildInboundAttachment(
+                    smack = smack,
+                    accountId = accId,
+                    attachmentId = "${convId}_${smackMessage.stanzaId ?: ts}_file",
+                    url = url,
                 ),
             )
         } ?: emptyList()
@@ -431,6 +438,40 @@ class XmppProtocol @Inject constructor(
         val myJid = smack.myBareJid()
         return SmackClientFacade.isCarbonSent(smackMessage) ||
             smackMessage.from?.asBareJid()?.toString() == myJid
+    }
+
+    /**
+     * Downloads HTTP-upload / aesgcm media on the receiving account's Smack connection (proxy-aware).
+     * Never use [smackFacade] without [accountId] — multi-account would pick the wrong session.
+     */
+    private fun buildInboundAttachment(
+        smack: SmackClientFacade,
+        accountId: String,
+        attachmentId: String,
+        url: String,
+    ): Attachment {
+        val fileName = url.substringAfterLast('/')
+            .substringBefore('?')
+            .substringBefore('#')
+            .takeIf { it.isNotBlank() }
+        val mime = guessMimeFromUrl(url)
+        val destDir = java.io.File(context.filesDir, "xmpp_media/$accountId")
+        val dest = java.io.File(destDir, "${System.currentTimeMillis()}_${fileName ?: "file"}")
+        val downloaded = smack.downloadHttpUploadUrl(url, dest)
+        val local = downloaded.getOrNull()?.absolutePath
+        val needsLocal = url.startsWith("aesgcm://", ignoreCase = true)
+        return Attachment(
+            id = attachmentId,
+            mimeType = mime,
+            fileName = fileName,
+            remoteRef = url,
+            localPath = local,
+            state = when {
+                local != null -> AttachmentState.READY
+                needsLocal -> AttachmentState.FAILED
+                else -> AttachmentState.READY
+            },
+        )
     }
 
     private suspend fun persistStructuredIncoming(
@@ -521,8 +562,14 @@ class XmppProtocol @Inject constructor(
         asGroup: Boolean,
     ): SendResult =
         withContext(Dispatchers.IO) {
-            val accId = accountId ?: sessions.keys.singleOrNull()
-                ?: return@withContext SendResult.Failure("Not connected")
+            val accId = when {
+                accountId != null -> accountId
+                sessions.size == 1 -> sessions.keys.single()
+                sessions.isEmpty() -> return@withContext SendResult.Failure("Not connected")
+                else -> return@withContext SendResult.Failure(
+                    "Plusieurs comptes XMPP — précise accountId",
+                )
+            }
             val smack = sessions[accId]
                 ?: return@withContext SendResult.Failure("Account not connected")
             networkGuard.assertNetworkAllowed()
@@ -557,10 +604,10 @@ class XmppProtocol @Inject constructor(
         withContext(Dispatchers.IO) {
             try {
                 networkGuard.assertNetworkAllowed()
-                val accId = accountId ?: conversationId.substringBefore('_', missingDelimiterValue = conversationId)
+                val accId = accountId ?: (ConversationIds.accountId(conversationId) ?: conversationId)
                 val smack = sessions[accId]
                     ?: return@withContext SendResult.Failure("Account not connected")
-                val remoteJid = conversationId.substringAfter('_', missingDelimiterValue = conversationId)
+                val remoteJid = (ConversationIds.remoteId(conversationId) ?: conversationId)
                 val stanzaId = if (smack.isMucRoom(remoteJid)) {
                     smack.sendMucMessage(remoteJid, body.value)
                 } else {
@@ -614,10 +661,10 @@ class XmppProtocol @Inject constructor(
     ): SendResult = withContext(Dispatchers.IO) {
         try {
             networkGuard.assertNetworkAllowed()
-            val accId = accountId ?: conversationId.substringBefore('_', missingDelimiterValue = conversationId)
+            val accId = accountId ?: (ConversationIds.accountId(conversationId) ?: conversationId)
             val smack = sessions[accId]
                 ?: return@withContext SendResult.Failure("Account not connected")
-            val remoteJid = conversationId.substringAfter('_', missingDelimiterValue = conversationId)
+            val remoteJid = (ConversationIds.remoteId(conversationId) ?: conversationId)
             val localPath = attachment.localPath
                 ?: return@withContext SendResult.Failure("Missing local file path")
             val file = java.io.File(localPath)
@@ -725,10 +772,10 @@ class XmppProtocol @Inject constructor(
     ): SendResult = withContext(Dispatchers.IO) {
         try {
             networkGuard.assertNetworkAllowed()
-            val accId = accountId ?: conversationId.substringBefore('_', missingDelimiterValue = conversationId)
+            val accId = accountId ?: (ConversationIds.accountId(conversationId) ?: conversationId)
             val smack = sessions[accId]
                 ?: return@withContext SendResult.Failure("Account not connected")
-            val remoteJid = conversationId.substringAfter('_', missingDelimiterValue = conversationId)
+            val remoteJid = (ConversationIds.remoteId(conversationId) ?: conversationId)
             if (smack.isMucRoom(remoteJid)) {
                 // GeoLocationManager targets a JID; for MUC send a geo URI body as fallback.
                 val body = "geo:${content.latitude},${content.longitude}"
@@ -790,10 +837,10 @@ class XmppProtocol @Inject constructor(
     ): SendResult = withContext(Dispatchers.IO) {
         try {
             networkGuard.assertNetworkAllowed()
-            val accId = accountId ?: conversationId.substringBefore('_', missingDelimiterValue = conversationId)
+            val accId = accountId ?: (ConversationIds.accountId(conversationId) ?: conversationId)
             val smack = sessions[accId]
                 ?: return@withContext SendResult.Failure("Account not connected")
-            val remoteJid = conversationId.substringAfter('_', missingDelimiterValue = conversationId)
+            val remoteJid = (ConversationIds.remoteId(conversationId) ?: conversationId)
             val vcard = SmackClientFacade.formatContactVCard(
                 content.firstName,
                 content.lastName,
@@ -838,10 +885,13 @@ class XmppProtocol @Inject constructor(
         withContext(Dispatchers.IO) {
             try {
                 networkGuard.assertNetworkAllowed()
-                val accId = conversationId.substringBefore('_', missingDelimiterValue = conversationId)
-                val remoteJid = conversationId.substringAfter('_', missingDelimiterValue = conversationId)
+                val accId = (ConversationIds.accountId(conversationId) ?: conversationId)
+                val remoteJid = (ConversationIds.remoteId(conversationId) ?: conversationId)
                 val smack = sessions[accId]
                     ?: return@withContext HistoryLoadResult.Failure("Compte XMPP non connecté")
+                if (smack.omemoHelper != null && smack.omemoHelper?.ready != true) {
+                    smack.omemoHelper?.initialize()
+                }
                 val synced = XmppMamSync.syncHistory(smack, accId, repository, remoteJid)
                 val count = repository.countMessages(conversationId)
                 HistoryLoadResult.Success(
@@ -903,8 +953,8 @@ class XmppProtocol @Inject constructor(
 
     override suspend fun setTyping(conversationId: String, typing: Boolean) {
         withContext(Dispatchers.IO) {
-            val accId = conversationId.substringBefore('_', missingDelimiterValue = conversationId)
-            val remoteJid = conversationId.substringAfter('_', missingDelimiterValue = conversationId)
+            val accId = (ConversationIds.accountId(conversationId) ?: conversationId)
+            val remoteJid = (ConversationIds.remoteId(conversationId) ?: conversationId)
             val smack = sessions[accId] ?: return@withContext
             if (smack.isMucRoom(remoteJid)) return@withContext
             runCatching { smack.setTyping(remoteJid, typing) }
@@ -914,8 +964,8 @@ class XmppProtocol @Inject constructor(
 
     override suspend fun markRead(conversationId: String, messageId: String?) {
         withContext(Dispatchers.IO) {
-            val accId = conversationId.substringBefore('_', missingDelimiterValue = conversationId)
-            val remoteJid = conversationId.substringAfter('_', missingDelimiterValue = conversationId)
+            val accId = (ConversationIds.accountId(conversationId) ?: conversationId)
+            val remoteJid = (ConversationIds.remoteId(conversationId) ?: conversationId)
             val smack = sessions[accId] ?: return@withContext
             if (smack.isMucRoom(remoteJid)) return@withContext
             val stanzaId = messageId?.removePrefix("${conversationId}_")
@@ -984,11 +1034,14 @@ class XmppProtocol @Inject constructor(
             toClose.forEach { (id, facade) ->
                 facade.disconnect()
                 typingFlows.keys.filter { it.startsWith("${id}_") }.forEach { typingFlows.remove(it) }
+                val displayName = repository.observeAccounts().first()
+                    .firstOrNull { it.id == id }?.displayName
+                    ?: id
                 repository.upsertAccount(
                     ltechnologies.onionphone.securemessenger.core.model.Account(
                         id = id,
                         protocol = ProtocolId.XMPP,
-                        displayName = id,
+                        displayName = displayName,
                         connectionState = ConnectionState.DISCONNECTED,
                     ),
                 )
@@ -996,16 +1049,25 @@ class XmppProtocol @Inject constructor(
             if (accountId == null) {
                 typingFlows.clear()
             }
-            if (sessions.isEmpty()) {
-                _connectionState.value = ConnectionState.DISCONNECTED
-            }
+            refreshConnectionState()
         }
     }
 
-    private fun conversationId(accountId: String, remoteJid: String) = "${accountId}_$remoteJid"
+    private fun refreshConnectionState(preferErrorIfEmpty: Boolean = false) {
+        _connectionState.value = when {
+            sessions.values.any { it.isConnected() } -> ConnectionState.CONNECTED
+            sessions.isNotEmpty() -> ConnectionState.CONNECTING
+            preferErrorIfEmpty -> ConnectionState.ERROR
+            else -> ConnectionState.DISCONNECTED
+        }
+    }
+
+    private fun conversationId(accountId: String, remoteJid: String) =
+        ConversationIds.encode(accountId, remoteJid)
 
     companion object {
-        fun conversationIdFor(accountId: String, remoteJid: String) = "${accountId}_$remoteJid"
+        fun conversationIdFor(accountId: String, remoteJid: String) =
+            ConversationIds.encode(accountId, remoteJid)
     }
 }
 

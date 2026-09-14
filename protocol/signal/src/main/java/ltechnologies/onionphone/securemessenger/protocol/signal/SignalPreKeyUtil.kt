@@ -46,6 +46,7 @@ internal data class SignalPreKeyMaterial(
             registrationLock = registrationLock,
             unidentifiedAccessKey = null,
             unrestrictedUnidentifiedAccess = false,
+            // Match Signal-Android AppCapabilities.getCapabilities(storageCapable=true).
             capabilities = AccountAttributes.Capabilities(
                 storage = true,
                 versionedExpirationTimer = true,
@@ -75,6 +76,7 @@ internal data class SignalPreKeyMaterial(
             registrationId = aciRegistrationId,
             pniRegistrationId = pniRegistrationId,
             name = nameB64,
+            // Same flags as AppCapabilities — primary gates attachment backfill on this bit.
             capabilities = AccountAttributes.Capabilities(
                 storage = true,
                 versionedExpirationTimer = true,

@@ -132,6 +132,10 @@ internal object SignalFeatureHelpers {
         dataMessage.pollCreate?.let { poll ->
             val options = JSONArray()
             poll.options.forEach { options.put(it) }
+            // Flat schema matches ChatScreen / outbound Signal; keep nested for debug.
+            payload.put("question", poll.question)
+            payload.put("allowMultiple", poll.allowMultiple == true)
+            payload.put("options", options)
             payload.put(
                 "poll",
                 JSONObject()
@@ -143,6 +147,10 @@ internal object SignalFeatureHelpers {
         }
         if (dataMessage.contact.isNotEmpty()) {
             val contacts = JSONArray()
+            val first = dataMessage.contact.first()
+            val firstName = first.name?.givenName.orEmpty()
+            val lastName = first.name?.familyName.orEmpty()
+            val phone = first.number.firstOrNull()?.value_
             dataMessage.contact.forEach { contact ->
                 val name = listOfNotNull(
                     contact.name?.givenName,
@@ -153,11 +161,16 @@ internal object SignalFeatureHelpers {
                 contacts.put(
                     JSONObject()
                         .put("name", name)
+                        .put("firstName", contact.name?.givenName)
+                        .put("lastName", contact.name?.familyName)
                         .put("phone", contact.number.firstOrNull()?.value_)
                         .put("organization", contact.organization),
                 )
             }
             payload.put("contacts", contacts)
+            payload.put("firstName", firstName)
+            payload.put("lastName", lastName)
+            if (!phone.isNullOrBlank()) payload.put("phone", phone)
             if (kind == MessageKind.TEXT) kind = MessageKind.CONTACT
         }
         if (hasVoiceAttachment && kind == MessageKind.TEXT) {
@@ -169,11 +182,15 @@ internal object SignalFeatureHelpers {
             val coords = bodyHint.removePrefix("geo:").removePrefix("GEO:").substringBefore(';')
             val parts = coords.split(',')
             if (parts.size >= 2) {
+                val lat = parts[0].toDoubleOrNull()
+                val lon = parts[1].toDoubleOrNull()
+                payload.put("latitude", lat)
+                payload.put("longitude", lon)
                 payload.put(
                     "location",
                     JSONObject()
-                        .put("latitude", parts[0].toDoubleOrNull())
-                        .put("longitude", parts[1].toDoubleOrNull()),
+                        .put("latitude", lat)
+                        .put("longitude", lon),
                 )
             }
         }

@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material3.AssistChip
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.FilledIconButton
@@ -92,24 +93,31 @@ fun ChatScreen(
     protocol: ProtocolId,
     viewModel: MainViewModel,
     onBack: () -> Unit,
+    onConversationRemapped: (newConversationId: String) -> Unit = {},
 ) {
-    val capabilities = remember(protocol) { viewModel.capabilitiesFor(protocol) }
+    // Re-read each composition so Matrix E2EE/media and Email JMAP flags stay honest per account.
+    val accountId = remember(conversationId) {
+        ltechnologies.onionphone.securemessenger.core.model.ConversationIds.accountId(conversationId)
+    }
+    val capabilities = viewModel.capabilitiesFor(protocol, accountId)
     val messagesFlow = remember(conversationId) { viewModel.messagesFor(conversationId) }
     val messages by messagesFlow.collectAsState()
-    val typingUsers by remember(conversationId, protocol) {
+    val typingUsers by remember(conversationId, protocol, capabilities.typingIndicators) {
         if (capabilities.typingIndicators) {
             viewModel.observeTyping(conversationId, protocol)
         } else {
             MutableStateFlow(emptyList())
         }
     }.collectAsState()
-    var draft by remember { mutableStateOf("") }
-    var sendError by remember { mutableStateOf<String?>(null) }
+    // Key composer state by conversation — ChatScreen stays mounted across inbox switches.
+    var draft by remember(conversationId) { mutableStateOf("") }
+    var emailSubject by remember(conversationId) { mutableStateOf("") }
+    var sendError by remember(conversationId) { mutableStateOf<String?>(null) }
     var loadingHistory by remember(conversationId) { mutableStateOf(true) }
     var historyError by remember(conversationId) { mutableStateOf<String?>(null) }
-    var dialog by remember { mutableStateOf(ComposerDialog.NONE) }
-    var showAttachSheet by remember { mutableStateOf(false) }
-    var pendingPick by remember { mutableStateOf(ComposerPickKind.IMAGE) }
+    var dialog by remember(conversationId) { mutableStateOf(ComposerDialog.NONE) }
+    var showAttachSheet by remember(conversationId) { mutableStateOf(false) }
+    var pendingPick by remember(conversationId) { mutableStateOf(ComposerPickKind.IMAGE) }
     val timeFormat = remember { DateFormat.getTimeInstance(DateFormat.SHORT) }
     val listState = rememberLazyListState()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -122,25 +130,26 @@ fun ChatScreen(
     LaunchedEffect(conversationId, protocol) {
         loadingHistory = true
         historyError = null
+        if (!capabilities.messageHistory) {
+            // IRC / Signal pre-import: local cache only — skip network "Chargement…"
+            loadingHistory = false
+            return@LaunchedEffect
+        }
         when (val result = viewModel.loadMessageHistory(conversationId, protocol)) {
             is HistoryLoadResult.Failure -> historyError = result.reason
-            is HistoryLoadResult.Success -> {
-                if (result.messageCount == 0) {
-                    historyError = "Aucun message trouvé dans cette conversation."
-                }
-            }
+            // Empty inbox is normal (new DM, IRC channel, email draft thread) — not an error.
+            is HistoryLoadResult.Success -> Unit
         }
         loadingHistory = false
     }
 
-    LaunchedEffect(messages.size) {
+    LaunchedEffect(messages.size, conversationId, protocol) {
         if (messages.isNotEmpty()) {
             listState.animateScrollToItem(messages.lastIndex)
-            if (capabilities.readReceipts) {
-                val lastIncoming = messages.lastOrNull { it.direction == MessageDirection.INCOMING }
-                viewModel.markRead(conversationId, protocol, lastIncoming?.id)
-            }
         }
+        // Always clear local unread (Email/IRC); read-receipt UI stays gated on capabilities.
+        val lastIncoming = messages.lastOrNull { it.direction == MessageDirection.INCOMING }
+        viewModel.markRead(conversationId, protocol, lastIncoming?.id)
     }
 
     LaunchedEffect(draft, conversationId, protocol) {
@@ -197,12 +206,18 @@ fun ChatScreen(
             }.getOrNull()
         }
 
-    fun sendAttachmentResult(ok: Boolean, failureLabel: String) {
+    fun sendAttachmentResult(
+        ok: Boolean,
+        failureLabel: String,
+        reason: String? = null,
+        remappedConversationId: String? = null,
+    ) {
         if (ok) {
             draft = ""
             sendError = null
+            remappedConversationId?.let(onConversationRemapped)
         } else {
-            sendError = failureLabel
+            sendError = reason?.takeIf { it.isNotBlank() } ?: failureLabel
         }
     }
 
@@ -230,7 +245,7 @@ fun ChatScreen(
                         conversationId,
                         protocol,
                         OutgoingContent.VoiceNote(attachment = attachment),
-                    ) { ok -> sendAttachmentResult(ok, "Envoi vocal échoué") }
+                    ) { ok, reason, remapped -> sendAttachmentResult(ok, "Envoi vocal échoué", reason, remapped) }
                 }
                 ComposerPickKind.IMAGE, ComposerPickKind.GIF, ComposerPickKind.FILE -> {
                     val messageKind = when (kind) {
@@ -243,7 +258,7 @@ fun ChatScreen(
                         conversationId,
                         protocol,
                         OutgoingContent.Media(attachment = attachment, caption = caption, kind = messageKind),
-                    ) { ok -> sendAttachmentResult(ok, "Envoi média échoué") }
+                    ) { ok, reason, remapped -> sendAttachmentResult(ok, "Envoi média échoué", reason, remapped) }
                 }
             }
         }
@@ -307,12 +322,6 @@ fun ChatScreen(
                                     color = MaterialTheme.colorScheme.primary,
                                     maxLines = 1,
                                 )
-                            } else if (capabilities.readReceipts) {
-                                Text(
-                                    "Accusés de lecture",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
                             }
                         }
                     }
@@ -330,7 +339,18 @@ fun ChatScreen(
                     .fillMaxWidth()
                     .navigationBarsPadding()
                     .padding(horizontal = 8.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
+                if (protocol == ProtocolId.EMAIL) {
+                    OutlinedTextField(
+                        value = emailSubject,
+                        onValueChange = { emailSubject = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        placeholder = { Text("Objet") },
+                        shape = MaterialTheme.shapes.large,
+                        singleLine = true,
+                    )
+                }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -355,13 +375,17 @@ fun ChatScreen(
                                 viewModel.sendContent(
                                     conversationId,
                                     protocol,
-                                    OutgoingContent.Text(MessageSanitizer.sanitize(draft)),
-                                ) { ok ->
+                                    OutgoingContent.Text(
+                                        body = MessageSanitizer.sanitize(draft),
+                                        subject = emailSubject.trim().takeIf { it.isNotEmpty() },
+                                    ),
+                                ) { ok, reason, remapped ->
                                     if (ok) {
                                         draft = ""
                                         sendError = null
+                                        remapped?.let(onConversationRemapped)
                                     } else {
-                                        sendError = "Envoi échoué"
+                                        sendError = reason?.takeIf { it.isNotBlank() } ?: "Envoi échoué"
                                     }
                                 }
                             }
@@ -382,11 +406,17 @@ fun ChatScreen(
                         .padding(padding),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Text(
-                        text = "Chargement des messages…",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        CircularProgressIndicator()
+                        Text(
+                            text = "Chargement des messages…",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
             else -> {
@@ -417,6 +447,16 @@ fun ChatScreen(
                             message = message,
                             timeFormat = timeFormat,
                             showReadReceipts = capabilities.readReceipts,
+                            canVotePoll = protocol == ProtocolId.TELEGRAM && capabilities.polls,
+                            onVotePoll = { optionIndex ->
+                                viewModel.votePoll(
+                                    conversationId,
+                                    message.id,
+                                    intArrayOf(optionIndex),
+                                ) { ok ->
+                                    if (!ok) sendError = "Vote échoué"
+                                }
+                            },
                         )
                     }
                     if (typingLabel != null) {
@@ -452,9 +492,9 @@ fun ChatScreen(
                     conversationId,
                     protocol,
                     OutgoingContent.Location(latitude = lat, longitude = lon),
-                ) { ok ->
+                ) { ok, reason, remapped ->
                     dialog = ComposerDialog.NONE
-                    sendAttachmentResult(ok, "Envoi lieu échoué")
+                    sendAttachmentResult(ok, "Envoi lieu échoué", reason, remapped)
                 }
             },
         )
@@ -465,9 +505,9 @@ fun ChatScreen(
                     conversationId,
                     protocol,
                     OutgoingContent.Poll(question = question, options = options),
-                ) { ok ->
+                ) { ok, reason, remapped ->
                     dialog = ComposerDialog.NONE
-                    sendAttachmentResult(ok, "Envoi sondage échoué")
+                    sendAttachmentResult(ok, "Envoi sondage échoué", reason, remapped)
                 }
             },
         )
@@ -478,9 +518,9 @@ fun ChatScreen(
                     conversationId,
                     protocol,
                     OutgoingContent.ContactCard(firstName = first, lastName = last, phone = phone),
-                ) { ok ->
+                ) { ok, reason, remapped ->
                     dialog = ComposerDialog.NONE
-                    sendAttachmentResult(ok, "Envoi contact échoué")
+                    sendAttachmentResult(ok, "Envoi contact échoué", reason, remapped)
                 }
             },
         )
@@ -495,10 +535,10 @@ fun ChatScreen(
                         body = MessageSanitizer.sanitize(body),
                         expireSeconds = seconds,
                     ),
-                ) { ok ->
+                ) { ok, reason, remapped ->
                     dialog = ComposerDialog.NONE
                     if (ok) draft = ""
-                    sendAttachmentResult(ok, "Envoi éphémère échoué")
+                    sendAttachmentResult(ok, "Envoi éphémère échoué", reason, remapped)
                 }
             },
         )
@@ -510,6 +550,8 @@ private fun MessageBubble(
     message: Message,
     timeFormat: DateFormat,
     showReadReceipts: Boolean,
+    canVotePoll: Boolean = false,
+    onVotePoll: (optionIndex: Int) -> Unit = {},
 ) {
     val outgoing = message.direction == MessageDirection.OUTGOING
     Column(
@@ -544,7 +586,11 @@ private fun MessageBubble(
                 message.attachments.forEach { attachment ->
                     AttachmentContent(attachment)
                 }
-                StructuredPayload(message)
+                StructuredPayload(
+                    message = message,
+                    canVotePoll = canVotePoll,
+                    onVotePoll = onVotePoll,
+                )
                 if (message.body.isNotBlank() && message.kind != MessageKind.LOCATION &&
                     message.kind != MessageKind.POLL && message.kind != MessageKind.CONTACT
                 ) {
@@ -624,33 +670,46 @@ private fun KindChip(kind: MessageKind, expireSeconds: Int?) {
 }
 
 @Composable
-private fun StructuredPayload(message: Message) {
+private fun StructuredPayload(
+    message: Message,
+    canVotePoll: Boolean = false,
+    onVotePoll: (optionIndex: Int) -> Unit = {},
+) {
     val json = message.payloadJson ?: return
     val parsed = runCatching { JSONObject(json) }.getOrNull() ?: return
+    val emailSubject = parsed.optString("subject").takeIf { it.isNotBlank() }
+    if (emailSubject != null &&
+        (message.protocol == ProtocolId.EMAIL || message.kind == MessageKind.TEXT)
+    ) {
+        Text(
+            text = "Objet : $emailSubject",
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(bottom = 4.dp),
+        )
+    }
     when (message.kind) {
         MessageKind.LOCATION -> {
-            val lat = parsed.optDouble("latitude", Double.NaN)
-            val lon = parsed.optDouble("longitude", Double.NaN)
-            if (!lat.isNaN() && !lon.isNaN()) {
-                Surface(
-                    color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f),
-                    shape = MaterialTheme.shapes.small,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(bottom = 4.dp),
-                ) {
-                    Column(Modifier.padding(8.dp)) {
-                        Text("Lieu partagé", style = MaterialTheme.typography.labelMedium)
-                        Text(
-                            "%.5f, %.5f".format(lat, lon),
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                    }
+            val (lat, lon) = readLocationCoords(parsed) ?: return
+            Surface(
+                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f),
+                shape = MaterialTheme.shapes.small,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 4.dp),
+            ) {
+                Column(Modifier.padding(8.dp)) {
+                    Text("Lieu partagé", style = MaterialTheme.typography.labelMedium)
+                    Text(
+                        "%.5f, %.5f".format(lat, lon),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
                 }
             }
         }
         MessageKind.POLL -> {
-            val question = parsed.optString("question").ifBlank { message.body }
+            val poll = readPollFields(parsed, fallbackBody = message.body)
             Surface(
                 color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.45f),
                 shape = MaterialTheme.shapes.small,
@@ -659,26 +718,36 @@ private fun StructuredPayload(message: Message) {
                     .padding(bottom = 4.dp),
             ) {
                 Column(Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(question, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-                    val options = parsed.optJSONArray("options")
-                    if (options != null) {
-                        for (i in 0 until options.length()) {
-                            AssistChip(
-                                onClick = {},
-                                enabled = false,
-                                label = { Text(options.optString(i)) },
-                            )
+                    Text(poll.question, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                    poll.options.forEach { option ->
+                        val label = buildString {
+                            append(option.text)
+                            option.voterCount?.let { append(" · $it") }
                         }
+                        AssistChip(
+                            onClick = {
+                                if (canVotePoll && !poll.isClosed) onVotePoll(option.index)
+                            },
+                            enabled = canVotePoll && !poll.isClosed,
+                            label = {
+                                Text(
+                                    if (option.isChosen) "✓ $label" else label,
+                                )
+                            },
+                        )
+                    }
+                    if (poll.isClosed) {
+                        Text(
+                            "Sondage clos",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                 }
             }
         }
         MessageKind.CONTACT -> {
-            val name = listOf(
-                parsed.optString("firstName"),
-                parsed.optString("lastName"),
-            ).filter { it.isNotBlank() }.joinToString(" ").ifBlank { message.body }
-            val phone = parsed.optString("phone").takeIf { it.isNotBlank() }
+            val (name, phone) = readContactFields(parsed, fallbackBody = message.body)
             Surface(
                 color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f),
                 shape = MaterialTheme.shapes.small,
@@ -696,6 +765,110 @@ private fun StructuredPayload(message: Message) {
         }
         else -> Unit
     }
+}
+
+/** Accepts flat latitude/longitude, Matrix lat/lon, or nested Signal location{}. */
+private fun readLocationCoords(parsed: JSONObject): Pair<Double, Double>? {
+    fun from(obj: JSONObject): Pair<Double, Double>? {
+        val lat = when {
+            obj.has("latitude") -> obj.optDouble("latitude", Double.NaN)
+            obj.has("lat") -> obj.optDouble("lat", Double.NaN)
+            else -> Double.NaN
+        }
+        val lon = when {
+            obj.has("longitude") -> obj.optDouble("longitude", Double.NaN)
+            obj.has("lon") -> obj.optDouble("lon", Double.NaN)
+            else -> Double.NaN
+        }
+        return if (!lat.isNaN() && !lon.isNaN()) lat to lon else null
+    }
+    from(parsed)?.let { return it }
+    val nested = parsed.optJSONObject("location") ?: return null
+    return from(nested)
+}
+
+private data class PollOptionUi(
+    val index: Int,
+    val text: String,
+    val isChosen: Boolean = false,
+    val voterCount: Int? = null,
+)
+
+private data class PollUi(
+    val question: String,
+    val options: List<PollOptionUi>,
+    val isClosed: Boolean = false,
+)
+
+/** Accepts flat question/options, nested poll{}, and Telegram option objects {text}. */
+private fun readPollFields(parsed: JSONObject, fallbackBody: String): PollUi {
+    val root = parsed.optJSONObject("poll") ?: parsed
+    val question = root.optString("question").ifBlank { fallbackBody }
+    val isClosed = root.optBoolean("isClosed", false)
+    val optionsArr = root.optJSONArray("options")
+    val options = buildList {
+        if (optionsArr != null) {
+            for (i in 0 until optionsArr.length()) {
+                val asObj = optionsArr.optJSONObject(i)
+                val text = when {
+                    asObj != null -> asObj.optString("text").ifBlank { asObj.optString("label") }
+                    else -> optionsArr.optString(i)
+                }
+                if (text.isBlank()) continue
+                add(
+                    PollOptionUi(
+                        index = i,
+                        text = text,
+                        isChosen = asObj?.optBoolean("isChosen", false) == true,
+                        voterCount = asObj?.optInt("voterCount", -1)?.takeIf { it >= 0 },
+                    ),
+                )
+            }
+        }
+    }
+    return PollUi(question = question, options = options, isClosed = isClosed)
+}
+
+/** Accepts firstName/lastName/phone, phoneNumber, contacts[], or XMPP vcard FN/TEL. */
+private fun readContactFields(parsed: JSONObject, fallbackBody: String): Pair<String, String?> {
+    val first = parsed.optString("firstName")
+    val last = parsed.optString("lastName")
+    var name = listOf(first, last).filter { it.isNotBlank() }.joinToString(" ")
+    var phone = parsed.optString("phone").takeIf { it.isNotBlank() }
+        ?: parsed.optString("phoneNumber").takeIf { it.isNotBlank() }
+
+    if (name.isBlank() || phone == null) {
+        val contacts = parsed.optJSONArray("contacts")
+        val firstContact = contacts?.optJSONObject(0)
+        if (firstContact != null) {
+            if (name.isBlank()) {
+                name = firstContact.optString("name").ifBlank {
+                    listOf(
+                        firstContact.optString("firstName"),
+                        firstContact.optString("lastName"),
+                    ).filter { it.isNotBlank() }.joinToString(" ")
+                }
+            }
+            if (phone == null) {
+                phone = firstContact.optString("phone").takeIf { it.isNotBlank() }
+                    ?: firstContact.optString("phoneNumber").takeIf { it.isNotBlank() }
+            }
+        }
+    }
+
+    if (name.isBlank() || phone == null) {
+        val vcard = parsed.optString("vcard").takeIf { it.isNotBlank() }
+        if (vcard != null) {
+            if (name.isBlank()) {
+                name = Regex("""(?im)^FN:(.+)$""").find(vcard)?.groupValues?.getOrNull(1)?.trim().orEmpty()
+            }
+            if (phone == null) {
+                phone = Regex("""(?im)^TEL[^:]*:(.+)$""").find(vcard)?.groupValues?.getOrNull(1)?.trim()
+            }
+        }
+    }
+
+    return name.ifBlank { fallbackBody } to phone
 }
 
 @Composable
@@ -717,11 +890,12 @@ private fun AttachmentContent(attachment: Attachment) {
                 modifier = Modifier.padding(bottom = 4.dp),
             )
         }
-        AttachmentState.READY -> {
+                AttachmentState.READY -> {
             when {
-                attachment.mimeType.startsWith("image/") && attachment.localPath != null -> {
+                attachment.mimeType.startsWith("image/") &&
+                    (attachment.localPath != null || !attachment.remoteRef.isNullOrBlank()) -> {
                     AsyncImage(
-                        model = File(attachment.localPath!!),
+                        model = attachment.localPath?.let { File(it) } ?: attachment.remoteRef,
                         contentDescription = attachment.fileName,
                         modifier = Modifier
                             .padding(bottom = 4.dp)

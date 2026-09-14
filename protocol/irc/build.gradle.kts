@@ -32,6 +32,7 @@ dependencies {
     implementation(project(":data"))
     implementation(libs.kitteh.irc)
     implementation(libs.netty.codec)
+    implementation(libs.netty.codec.http)
     implementation(libs.netty.handler)
     implementation(libs.netty.handler.proxy)
     // Kitteh / Netty APIs reference checker-qual annotations on types; keep them on classpath.

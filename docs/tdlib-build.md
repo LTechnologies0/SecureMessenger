@@ -70,6 +70,9 @@ In the app, Telegram connect should no longer show `libtdjni.so missing`.
 Users supply `api_id` and `api_hash` from [my.telegram.org](https://my.telegram.org).
 Stored in EncryptedSharedPreferences — never hardcode.
 
-## 6. Proxy
+## 7. Version / CVE notes
 
-`TdApi.AddProxy` (SOCKS5) runs before `setTdlibParameters` when a proxy is configured.
+- Runtime natives come from **prebuilt AAR** `tdlib-android` **v0.1.0** (`scripts/fetch-tdlib-prebuilt.sh`), not from the Maven `ca.denisab85:tdlib` stub (`v1.8.8-20221107` in the version catalog).
+- The Maven coordinate remains only as a historical compile fallback and is **API-incompatible** with `:protocol:telegram` — CI always fetches the AAR.
+- To pick up newer Telegram TDLib security fixes: rebuild with `scripts/build-tdlib.sh` against current [tdlib/td](https://github.com/tdlib/td), or bump `TDLIB_ANDROID_VERSION` when a newer signed prebuilt release is published.
+- Prefer SOCKS5 via OnionVPN PAC before `setTdlibParameters` (see §6).
