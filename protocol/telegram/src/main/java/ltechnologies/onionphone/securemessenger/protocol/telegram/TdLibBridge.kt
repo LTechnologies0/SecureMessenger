@@ -310,9 +310,11 @@ class TdLibFacade(private val client: TdLibClient) {
             TdApi.MessageSelfDestructTypeTimer(it)
         }
         val content = TdApi.InputMessageVoiceNote(
-            TdApi.InputFileLocal(localPath),
-            durationSec,
-            ByteArray(0),
+            TdApi.InputVoiceNote(
+                TdApi.InputFileLocal(localPath),
+                durationSec,
+                ByteArray(0),
+            ),
             TdApi.FormattedText("", emptyArray()),
             selfDestruct,
         )
@@ -589,10 +591,12 @@ class TdLibFacade(private val client: TdLibClient) {
         emoji: String = "⭐",
     ): String? {
         val content = TdApi.InputMessageSticker(
-            TdApi.InputFileLocal(localPath),
-            null,
-            0,
-            0,
+            TdApi.InputSticker(
+                TdApi.InputFileLocal(localPath),
+                null,
+                0,
+                0,
+            ),
             emoji,
         )
         return sendMessageContent(chatId, content)
