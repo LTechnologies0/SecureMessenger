@@ -40,7 +40,10 @@ jobs:
           java-version: 21
           cache: gradle
 
+      # Default packages include obsolete `tools` (removed from Google's repo).
       - uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
 
       - name: Create local.properties
         run: |
@@ -130,7 +133,10 @@ jobs:
           java-version: 21
           cache: gradle
 
+      # Default packages include obsolete `tools` (removed from Google's repo).
       - uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
 
       - name: Create local.properties
         run: echo "sdk.dir=${ANDROID_SDK_ROOT}" >> local.properties
