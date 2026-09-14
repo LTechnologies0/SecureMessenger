@@ -191,13 +191,13 @@ jobs:
     steps:
       - uses: actions/first-interaction@v3
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-          issue-message: |
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          issue_message: |
             Thanks for opening an issue on **SecureMessenger**!
 
             - Check [docs/ARCHITECTURE.md](https://github.com/LTechnologies0/SecureMessenger/blob/main/docs/ARCHITECTURE.md)
             - For security issues, use **private vulnerability reporting** (see SECURITY.md)
-          pr-message: |
+          pr_message: |
             Thanks for your pull request! CI runs tests, debug APK build, and CodeQL.
             Please add KDoc for new public APIs and ensure no secrets are committed.
 
