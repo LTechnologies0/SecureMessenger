@@ -330,7 +330,7 @@ class SmackClientFacade(
         ) {
             OmemoSendDecision.ENCRYPT -> {
                 val encrypted = helper!!.encryptMuc(muc, body)
-                muc.sendMessage(encrypted)
+                muc.sendMessage(encrypted.asBuilder())
                 return encrypted.stanzaId.orEmpty()
             }
             OmemoSendDecision.BLOCK ->
@@ -341,7 +341,7 @@ class SmackClientFacade(
         }
         val conn = connection ?: throw SmackException.NotConnectedException()
         val message = conn.stanzaFactory.buildMessageStanza().setBody(body).build()
-        muc.sendMessage(message)
+        muc.sendMessage(message.asBuilder())
         return message.stanzaId.orEmpty()
     }
 
