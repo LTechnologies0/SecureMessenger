@@ -25,6 +25,10 @@ android {
 }
 
 dependencies {
+    configurations.configureEach {
+        exclude(group = "org.codelibs", module = "xpp3")
+    }
+
     implementation(project(":protocol:api"))
     implementation(project(":core:proxy"))
     implementation(project(":core:network"))
