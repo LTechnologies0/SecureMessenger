@@ -89,7 +89,7 @@ jobs:
           retention-days: 14
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4.38.0
+        uses: github/codeql-action/init@v4.38.2
         with:
           languages: java-kotlin
           build-mode: manual
@@ -101,7 +101,7 @@ jobs:
             --no-daemon --no-build-cache --rerun-tasks
 
       - name: Analyze
-        uses: github/codeql-action/analyze@v4.38.0
+        uses: github/codeql-action/analyze@v4.38.2
 
   # ── OWASP dependency diff (PR only) ───────────────────────────────
   dependency-review:
