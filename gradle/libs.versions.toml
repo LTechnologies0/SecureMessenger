@@ -6,12 +6,12 @@ compileSdk = "37"
 targetSdk = "37"
 minSdk = "26"
 
-core-ktx = "1.19.0"
+core-ktx = "1.19.1"
 activity-compose = "1.13.0"
 lifecycle = "2.11.0"
-navigation = "2.9.0"
+navigation = "2.10.2"
 compose-bom = "2026.09.00"
-compose-material3 = "1.5.0-alpha22"
+compose-material3 = "1.5.0-alpha29"
 hilt = "2.60.1"
 room = "2.8.5"
 coroutines = "1.11.0"
@@ -28,14 +28,14 @@ trixnity = "4.22.7"
 tdlib = "v1.8.8-20221107" # Maven stub only — runtime uses prebuilt AAR (see docs/tdlib-build.md); do not rely on this for natives
 tdlib-android = "0.1.0" # AkashPriyadarshii/tdlib-android prebuilt (latest as of 2026-08)
 netcipher = "2.1.0"
-libsignal-client = "0.96.3"
-wire = "7.0.3"
+libsignal-client = "0.103.0"
+wire = "7.1.0"
 okhttp = "5.5.0"
 okio = "3.18.2"
 rxjava3 = "3.1.12"
 rxjava3-kotlin = "3.0.1"
-jackson = "2.22.2"
-libphonenumber = "9.0.39"
+jackson = "2.22.3"
+libphonenumber = "9.0.40"
 jsr305 = "3.0.2"
 kotlin-serialization = "1.11.0"
 desugar = "2.1.5"
@@ -112,7 +112,7 @@ trixnity-client-jvm = { group = "net.folivo", name = "trixnity-client-jvm", vers
 trixnity-client-media-okio-jvm = { group = "net.folivo", name = "trixnity-client-media-okio-jvm", version.ref = "trixnity" }
 trixnity-client-repository-exposed-jvm = { group = "net.folivo", name = "trixnity-client-repository-exposed-jvm", version.ref = "trixnity" }
 trixnity-crypto-jvm = { group = "net.folivo", name = "trixnity-crypto-jvm", version.ref = "trixnity" }
-h2 = { group = "com.h2database", name = "h2", version = "2.5.250" }
+h2 = { group = "com.h2database", name = "h2", version = "2.5.252" }
 
 tdlib-java = { group = "ca.denisab85", name = "tdlib", version.ref = "tdlib" }
 
