@@ -36,7 +36,7 @@ dependencies {
     implementation(libs.netty.handler)
     implementation(libs.netty.handler.proxy)
     // Kitteh / Netty APIs reference checker-qual annotations on types; keep them on classpath.
-    compileOnly("org.checkerframework:checker-qual:4.2.3")
+    compileOnly("org.checkerframework:checker-qual:4.3.0")
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.hilt.android)
