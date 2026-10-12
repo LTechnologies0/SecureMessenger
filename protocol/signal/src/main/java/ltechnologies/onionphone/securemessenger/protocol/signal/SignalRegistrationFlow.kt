@@ -6,6 +6,7 @@ import org.signal.core.models.ServiceId.PNI
 import org.signal.network.NetworkResult
 import org.whispersystems.signalservice.api.push.SignalServiceAddress
 import org.whispersystems.signalservice.api.registration.RegistrationApi
+import org.signal.core.util.SignalSocksHolder
 import org.whispersystems.signalservice.internal.push.PushServiceSocket
 import org.whispersystems.signalservice.internal.push.RegistrationSessionMetadataResponse
 import org.whispersystems.signalservice.internal.util.StaticCredentialsProvider
@@ -33,6 +34,9 @@ internal class SignalRegistrationFlow(
     private val configuration by lazy { SignalServiceEnvironment.configuration(trustStore) }
 
     private fun registrationApi(e164: String, password: String): RegistrationApi {
+        check(SignalSocksHolder.get() != null) {
+            "SignalSocksHolder must be set before PushServiceSocket registration"
+        }
         val credentials = StaticCredentialsProvider(
             null,
             null,

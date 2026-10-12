@@ -15,10 +15,23 @@ class EmailSession(
     val store: Store? = null,
     val transport: Transport? = null,
     val jmapClient: JmapClient? = null,
+    val storeConnectHost: String? = null,
+    val storePort: Int = 0,
+    val smtpConnectHost: String? = null,
 ) {
     fun isConnected(): Boolean = when (config.storeKind) {
         EmailStoreKind.JMAP -> jmapClient?.isConnected() == true
         EmailStoreKind.IMAP, EmailStoreKind.POP3 -> store?.isConnected == true
+    }
+
+    fun reconnectStore(): Boolean {
+        val store = this.store ?: return false
+        if (store.isConnected) return true
+        val host = storeConnectHost ?: return false
+        return runCatching {
+            store.connect(host, storePort, config.email, config.password)
+            true
+        }.getOrDefault(false)
     }
 
     fun close() {
@@ -99,6 +112,7 @@ class EmailSession(
             store.connect(storeConnectHost, storePort, config.email, config.password)
 
             val transport = session.getTransport(smtpProtocol)
+            // Reuse the Tor-resolved IP — never pass the original hostname (local DNS leak).
             transport.connect(smtpConnectHost, config.smtpPort, config.email, config.password)
 
             return EmailSession(
@@ -108,6 +122,9 @@ class EmailSession(
                 angusSession = session,
                 store = store,
                 transport = transport,
+                storeConnectHost = storeConnectHost,
+                storePort = storePort,
+                smtpConnectHost = smtpConnectHost,
             )
         }
     }

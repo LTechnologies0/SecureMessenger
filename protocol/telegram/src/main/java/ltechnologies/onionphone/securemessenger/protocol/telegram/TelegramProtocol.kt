@@ -38,8 +38,10 @@ import ltechnologies.onionphone.securemessenger.core.model.SanitizedText
 import ltechnologies.onionphone.securemessenger.core.model.SendResult
 import ltechnologies.onionphone.securemessenger.core.network.NetworkBlockedException
 import ltechnologies.onionphone.securemessenger.core.network.NetworkGuard
+import ltechnologies.onionphone.securemessenger.core.security.EncryptedCredentialStore
 import ltechnologies.onionphone.securemessenger.data.MessengerRepository
 import ltechnologies.onionphone.securemessenger.protocol.api.MessengerProtocol
+import ltechnologies.onionphone.securemessenger.protocol.api.protocolIoScope
 import org.drinkless.tdlib.TdApi
 import org.json.JSONObject
 import timber.log.Timber
@@ -63,6 +65,7 @@ class TelegramProtocol @Inject constructor(
     @ApplicationContext private val context: Context,
     private val networkGuard: NetworkGuard,
     private val repository: MessengerRepository,
+    private val credentialStore: EncryptedCredentialStore,
     private val apiCredentials: TelegramApiCredentials,
 ) : MessengerProtocol {
 
@@ -103,7 +106,7 @@ class TelegramProtocol @Inject constructor(
     /** conversationId → display names of users currently typing. */
     private val typingFlows = ConcurrentHashMap<String, MutableStateFlow<List<String>>>()
 
-    private val updateScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val updateScope = protocolIoScope("telegram")
 
     /**
      * One [TelegramSession] per connected accountId. Connecting account B must never tear down
@@ -188,26 +191,10 @@ class TelegramProtocol @Inject constructor(
 
                 if (!nativeAvailable) {
                     newSession.close()
+                    _lastAuthError.value = null
                     return@withContext null to ConnectionResult.Failure(
                         "libtdjni.so missing — build per docs/tdlib-build.md",
                     )
-                }
-
-                if (proxy.torRequired) {
-                    val proxyOk = withContext(newSession.dispatcher) {
-                        tdFacade.configureProxy(proxy.host, proxy.port, proxy.username, proxy.password)
-                    }
-                    if (!proxyOk) {
-                        newSession.close()
-                        refreshConnectionState()
-                        return@withContext null to ConnectionResult.Failure(
-                            "Tor activé : démarrez OnionVPN, ou désactivez Tor pour Telegram",
-                        )
-                    }
-                } else {
-                    withContext(newSession.dispatcher) {
-                        tdFacade.disableProxy()
-                    }
                 }
 
                 sessions[account.accountId] = newSession
@@ -472,7 +459,17 @@ class TelegramProtocol @Inject constructor(
                 _lastAuthError.value = null
                 val proxy = session.pendingProxy
                 updateScope.launch {
-                    if (proxy != null && proxy.torRequired) {
+                    val key = runCatching { credentialStore.getOrCreateTdlibKey(accId) }
+                        .getOrElse { ByteArray(32).also { java.security.SecureRandom().nextBytes(it) } }
+                    withContext(session.dispatcher) {
+                        session.facade.setParameters(
+                            session.pendingDbDir,
+                            session.pendingApiId,
+                            session.pendingApiHash,
+                            key,
+                        )
+                    }
+                    if (proxy != null) {
                         val proxyOk = withContext(session.dispatcher) {
                             session.facade.configureProxy(
                                 proxy.host,
@@ -483,22 +480,11 @@ class TelegramProtocol @Inject constructor(
                         }
                         if (!proxyOk) {
                             _lastAuthError.value =
-                                "Tor activé : démarrez OnionVPN, ou désactivez Tor pour Telegram"
+                                "Tor requis : démarrez OnionVPN pour Telegram"
                             disconnect(accId)
                             refreshConnectionState()
                             return@launch
                         }
-                    } else {
-                        withContext(session.dispatcher) {
-                            session.facade.disableProxy()
-                        }
-                    }
-                    withContext(session.dispatcher) {
-                        session.facade.setParameters(
-                            session.pendingDbDir,
-                            session.pendingApiId,
-                            session.pendingApiHash,
-                        )
                     }
                 }
             }
@@ -975,12 +961,50 @@ class TelegramProtocol @Inject constructor(
         if (!session.nativeAvailable) return SendResult.Failure("Telegram not connected")
         val chatId = TdLibMapper.chatIdFromConversation(conversationId)
             ?: return SendResult.Failure("Invalid conversation")
+        val localId = "tg_out_${accId}_${System.currentTimeMillis()}"
+        repository.upsertMessage(
+            Message(
+                id = localId,
+                conversationId = conversationId,
+                protocol = ProtocolId.TELEGRAM,
+                body = body.value,
+                timestamp = System.currentTimeMillis(),
+                direction = ltechnologies.onionphone.securemessenger.core.model.MessageDirection.OUTGOING,
+                deliveryState = DeliveryState.PENDING,
+            ),
+        )
         return withContext(session.dispatcher) {
             try {
                 networkGuard.assertNetworkAllowed()
                 val error = session.facade.sendTextMessage(chatId, body.value)
-                if (error != null) SendResult.Failure(error) else SendResult.Success("pending")
+                if (error != null) {
+                    repository.upsertMessage(
+                        Message(
+                            id = localId,
+                            conversationId = conversationId,
+                            protocol = ProtocolId.TELEGRAM,
+                            body = body.value,
+                            timestamp = System.currentTimeMillis(),
+                            direction = ltechnologies.onionphone.securemessenger.core.model.MessageDirection.OUTGOING,
+                            deliveryState = DeliveryState.FAILED,
+                        ),
+                    )
+                    SendResult.Failure(error)
+                } else {
+                    SendResult.Success(localId)
+                }
             } catch (e: NetworkBlockedException) {
+                repository.upsertMessage(
+                    Message(
+                        id = localId,
+                        conversationId = conversationId,
+                        protocol = ProtocolId.TELEGRAM,
+                        body = body.value,
+                        timestamp = System.currentTimeMillis(),
+                        direction = ltechnologies.onionphone.securemessenger.core.model.MessageDirection.OUTGOING,
+                        deliveryState = DeliveryState.FAILED,
+                    ),
+                )
                 SendResult.Failure(e.message ?: "Réseau indisponible")
             }
         }
@@ -1498,6 +1522,12 @@ class TelegramProtocol @Inject constructor(
             )
         }.getOrElse { e ->
             BackupExportResult.Failure(e.message ?: "Export failed")
+        }
+    }
+
+    override suspend fun wipeLocalData(accountId: String) {
+        withContext(Dispatchers.IO) {
+            runCatching { File(context.filesDir, "tdlib_$accountId").deleteRecursively() }
         }
     }
 

@@ -204,6 +204,8 @@ class SignalProtocol @Inject constructor(
                         ConnectionResult.Failure(failed.reason)
                     }
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Timber.e(e, "Signal connect failed")
                 _connectionState.value = ConnectionState.ERROR
@@ -259,6 +261,8 @@ class SignalProtocol @Inject constructor(
             _pendingAuthStep.value = null
             _connectionState.value = ConnectionState.CONNECTED
             ConnectionResult.Success
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             Timber.e(e, "Signal session restore failed")
             _connectionState.value = ConnectionState.ERROR
@@ -471,6 +475,8 @@ class SignalProtocol @Inject constructor(
                         ConnectionResult.Failure(failed.reason)
                     }
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
                 ConnectionResult.Failure(e.message ?: "Authentification échouée")
             }
@@ -745,16 +751,11 @@ class SignalProtocol @Inject constructor(
         Timber.i("Signal initial sync requests dispatched for deviceId=%d", active.deviceId)
     }
 
-    /** Routes Signal OkHttp/WebSocket through OnionVPN SOCKS when Tor is enabled. */
+    /** Routes Signal OkHttp/WebSocket (including [PushServiceSocket] registration) through Tor SOCKS. */
     private fun applySignalSocks(proxy: ProxyConfig) {
-        if (proxy.torRequired) {
-            val host = SocksEndpointResolver.resolveReachableHost(proxy.host, proxy.port)
-            SignalSocksHolder.set(Proxy(Proxy.Type.SOCKS, InetSocketAddress(host, proxy.port)))
-            Timber.i("Signal SOCKS enabled %s:%d", host, proxy.port)
-        } else {
-            SignalSocksHolder.clear()
-            Timber.d("Signal SOCKS cleared (clearnet)")
-        }
+        val host = SocksEndpointResolver.resolveReachableHost(proxy.host, proxy.port)
+        SignalSocksHolder.set(Proxy(Proxy.Type.SOCKS, InetSocketAddress(host, proxy.port)))
+        Timber.i("Signal SOCKS enabled %s:%d", host, proxy.port)
         session?.applyNetworkProxyFromSocksHolder()
     }
 
@@ -2166,6 +2167,14 @@ class SignalProtocol @Inject constructor(
                 )
             }
         }
+
+    override suspend fun wipeLocalData(accountId: String) {
+        withContext(signalDispatcher) {
+            runCatching { File(context.filesDir, "signal_media_$accountId").deleteRecursively() }
+            runCatching { File(context.filesDir, "signal_link_sync_$accountId.bak").delete() }
+            runCatching { context.deleteSharedPreferences("signal_gv2_$accountId") }
+        }
+    }
 
     override suspend fun disconnect(accountId: String?) {
         withContext(signalDispatcher) {

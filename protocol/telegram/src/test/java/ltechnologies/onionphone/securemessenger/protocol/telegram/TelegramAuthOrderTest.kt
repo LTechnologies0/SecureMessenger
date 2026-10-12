@@ -10,15 +10,15 @@ import org.junit.Test
 class TelegramAuthOrderTest {
 
     @Test
-    fun configureProxy_beforeSetParameters() = runBlocking {
+    fun configureProxy_afterSetParameters() = runBlocking {
         val callOrder = mutableListOf<String>()
         val mockClient = recordingClient(callOrder)
 
         val facade = TdLibFacade(mockClient)
+        facade.setParameters("/tmp/tdlib", 12345, "test-hash", ByteArray(32))
         assertTrue(facade.configureProxy("127.0.0.1", 9050, null, null))
-        facade.setParameters("/tmp/tdlib", 12345, "test-hash")
 
-        assertEquals(listOf("AddProxy", "SetTdlibParameters"), callOrder)
+        assertEquals(listOf("SetTdlibParameters", "AddProxy"), callOrder)
     }
 
     @Test

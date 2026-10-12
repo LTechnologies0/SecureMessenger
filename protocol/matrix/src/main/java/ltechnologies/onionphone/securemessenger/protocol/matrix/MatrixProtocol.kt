@@ -424,7 +424,11 @@ class MatrixProtocol @Inject constructor(
         val resolvedDeviceId = deviceId?.takeIf { it.isNotBlank() }
             ?: credentialStore.get(accountId, DEVICE_ID_KEY)
         // Do not publish the session until Trixnity E2EE is live (fail-closed).
-        val engine = TrixnityMatrixEngine(repository, context.filesDir)
+        val engine = TrixnityMatrixEngine(
+            repository,
+            context.filesDir,
+            credentialStore.getOrCreateMatrixH2Password(accountId),
+        )
         var trixnityLogin = engine.loginWithAccessToken(
             accountId,
             apiBaseUrl,
@@ -438,7 +442,11 @@ class MatrixProtocol @Inject constructor(
             Timber.w(trixnityLogin.exceptionOrNull(), "Trixnity first login failed; wiping store and retrying")
             engine.close()
             TrixnityMatrixEngine.wipeAccountStore(context.filesDir, accountId)
-            val retryEngine = TrixnityMatrixEngine(repository, context.filesDir)
+            val retryEngine = TrixnityMatrixEngine(
+                repository,
+                context.filesDir,
+                credentialStore.getOrCreateMatrixH2Password(accountId),
+            )
             trixnityLogin = retryEngine.loginWithAccessToken(
                 accountId,
                 apiBaseUrl,
@@ -660,21 +668,34 @@ class MatrixProtocol @Inject constructor(
                 val session = sessions[accId] ?: return@withContext SendResult.Failure("Account not connected")
                 val roomId = (ConversationIds.remoteId(conversationId) ?: conversationId)
                 session.trixnityEngine?.let {
-                    it.sendText(roomId, body.value)
+                    val txnId = it.sendText(roomId, body.value)
+                    val outboxId = txnId.ifBlank { "${conversationId}_${System.currentTimeMillis()}" }
                     val msg = Message(
-                        id = "${conversationId}_${System.currentTimeMillis()}",
+                        id = outboxId,
                         conversationId = conversationId,
                         protocol = ProtocolId.MATRIX,
                         body = body.value,
                         timestamp = System.currentTimeMillis(),
-                        direction = ltechnologies.onionphone.securemessenger.core.model.MessageDirection.OUTGOING,
-                        deliveryState = ltechnologies.onionphone.securemessenger.core.model.DeliveryState.SENT,
+                        direction = MessageDirection.OUTGOING,
+                        deliveryState = DeliveryState.PENDING,
                     )
                     repository.upsertMessage(msg)
                     return@withContext SendResult.Success(msg.id)
                 }
                 SendResult.Failure("E2EE Matrix indisponible — reconnectez le compte")
             } catch (e: Exception) {
+                val failedId = "${conversationId}_${System.currentTimeMillis()}"
+                repository.upsertMessage(
+                    Message(
+                        id = failedId,
+                        conversationId = conversationId,
+                        protocol = ProtocolId.MATRIX,
+                        body = body.value,
+                        timestamp = System.currentTimeMillis(),
+                        direction = MessageDirection.OUTGOING,
+                        deliveryState = DeliveryState.FAILED,
+                    ),
+                )
                 SendResult.Failure(e.message ?: "Send failed")
             }
         }
@@ -940,6 +961,10 @@ class MatrixProtocol @Inject constructor(
                 )
             }
         }
+
+    override suspend fun wipeLocalData(accountId: String) {
+        TrixnityMatrixEngine.wipeAccountStore(context.filesDir, accountId)
+    }
 
     override suspend fun disconnect(accountId: String?) {
         withContext(Dispatchers.IO) {

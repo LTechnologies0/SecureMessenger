@@ -143,35 +143,22 @@ class SmackClientFacade(
             .setCompressionEnabled(true)
             .setSendPresence(true)
 
-        if (proxy.torRequired) {
-            val socksHost = SocksEndpointResolver.resolveReachableHost(proxy.host, proxy.port)
-            try {
-                java.net.Socket().use { socket ->
-                    socket.connect(java.net.InetSocketAddress(socksHost, proxy.port), 3_000)
-                }
-            } catch (e: Exception) {
-                throw IllegalStateException(
-                    "Tor activé : SOCKS $socksHost:${proxy.port} injoignable — démarrez OnionVPN ou désactivez Tor",
-                    e,
-                )
+        val socksHost = SocksEndpointResolver.resolveReachableHost(proxy.host, proxy.port)
+        try {
+            java.net.Socket().use { socket ->
+                socket.connect(java.net.InetSocketAddress(socksHost, proxy.port), 3_000)
             }
-            // Smack's SOCKS5 client always advertises both no-auth (0x00) and
-            // username/password (0x02) methods. Tor's SocksPort commonly selects 0x02
-            // — using the username/password purely as a stream-isolation token, not real
-            // credentials — regardless of whether the caller supplied any. If we leave
-            // these null, Smack has nothing to send once Tor picks 0x02 and the whole
-            // handshake fails with "fail in SOCKS5 proxy" before ever reaching the
-            // destination CONNECT request. Always supply a value (bare JID doubles as a
-            // free per-account circuit isolation key) so the handshake can complete either way.
-            val proxyInfo = org.jivesoftware.smack.proxy.ProxyInfo(
-                org.jivesoftware.smack.proxy.ProxyInfo.ProxyType.SOCKS5,
-                socksHost,
-                proxy.port,
-                proxy.username ?: bareJid.toString(),
-                proxy.password ?: "x",
+        } catch (e: Exception) {
+            throw IllegalStateException(
+                "Tor requis : SOCKS $socksHost:${proxy.port} injoignable — démarrez OnionVPN",
+                e,
             )
-            builder.setProxyInfo(proxyInfo)
         }
+        builder.setSocketFactory(SocksUnresolvedSocketFactory(socksHost, proxy.port))
+        org.jivesoftware.smack.util.DNSUtil.setDNSResolver(DummyTorDnsResolver())
+        builder.setProxyInfo(
+            smackSocksProxyInfo(socksHost, proxy.port, proxy.username, proxy.password),
+        )
 
         disconnect()
 
@@ -432,9 +419,6 @@ class SmackClientFacade(
             manager.discoverUploadService()
         }
         val mime = contentType?.takeIf { it.isNotBlank() } ?: "application/octet-stream"
-        if (mime == "application/octet-stream") {
-            return@withContext manager.uploadFile(file)
-        }
         val slot = manager.requestSlot(file.name, file.length(), mime)
         putHttpUploadSlot(slot, file)
         slot.getGetUrl()
@@ -517,7 +501,25 @@ class SmackClientFacade(
             if (status != HttpURLConnection.HTTP_OK) {
                 throw IOException("HTTP download failed: $status ${urlConnection.responseMessage}")
             }
-            val cipherBytes = urlConnection.inputStream.use { it.readBytes() }
+            val declared = urlConnection.contentLengthLong
+            if (declared > MAX_AUTO_FETCH_BYTES) {
+                throw IOException("HTTP download exceeds $MAX_AUTO_FETCH_BYTES bytes")
+            }
+            val cipherBytes = urlConnection.inputStream.use { input ->
+                val buf = java.io.ByteArrayOutputStream()
+                val chunk = ByteArray(16_384)
+                var total = 0L
+                while (true) {
+                    val n = input.read(chunk)
+                    if (n <= 0) break
+                    total += n
+                    if (total > MAX_AUTO_FETCH_BYTES) {
+                        throw IOException("HTTP download exceeds $MAX_AUTO_FETCH_BYTES bytes")
+                    }
+                    buf.write(chunk, 0, n)
+                }
+                buf.toByteArray()
+            }
             val plain = if (parsed.iv != null && parsed.key != null) {
                 decryptAesGcm(cipherBytes, parsed.iv, parsed.key)
             } else {
@@ -625,6 +627,20 @@ class SmackClientFacade(
                 RegexOption.IGNORE_CASE,
             ).find(xml)
             return match?.groupValues?.getOrNull(1)?.trim()
+        }
+
+        const val MAX_AUTO_FETCH_BYTES = 8L * 1024L * 1024L
+
+        fun stableStanzaId(message: SmackMessage): String? {
+            val stanzaIdExt = runCatching {
+                org.jivesoftware.smackx.sid.element.StanzaIdElement.getStanzaId(message)?.id
+            }.getOrNull()
+            val originId = runCatching {
+                org.jivesoftware.smackx.sid.element.OriginIdElement.getOriginId(message)?.id
+            }.getOrNull()
+            return stanzaIdExt?.takeIf { it.isNotBlank() }
+                ?: originId?.takeIf { it.isNotBlank() }
+                ?: message.stanzaId?.takeIf { it.isNotBlank() }
         }
 
         fun isLikelyMucJid(jid: String): Boolean {

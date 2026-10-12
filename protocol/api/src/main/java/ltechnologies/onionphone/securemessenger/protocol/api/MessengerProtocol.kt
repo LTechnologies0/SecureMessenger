@@ -85,7 +85,10 @@ interface MessengerProtocol {
 
     /** Submits [fields] requested by a pending [AuthStep] (e.g. 2FA code, SMS code) and resumes login. */
     suspend fun continueAuthentication(fields: Map<String, String>): ConnectionResult =
-        ConnectionResult.Success
+        ConnectionResult.Failure("Authentication continuation not supported for $id")
+
+    /** Deletes on-disk protocol state for [accountId] (crypto stores, media, TDLib dir). */
+    suspend fun wipeLocalData(accountId: String) = Unit
 
     /** Live list of conversations (rooms/chats/DMs) for the connected account. */
     fun observeConversations(): Flow<List<Conversation>>
@@ -177,6 +180,12 @@ interface MessengerProtocol {
      */
     fun observeTyping(conversationId: String): StateFlow<List<String>> =
         MutableStateFlow<List<String>>(emptyList()).asStateFlow()
+
+    /**
+     * Whether this conversation is actually E2EE with the current peer (not just protocol-wide).
+     * Defaults to [capabilities.endToEndEncryption].
+     */
+    fun isConversationE2ee(conversationId: String): Boolean = capabilities.endToEndEncryption
 
     /** Marks messages in [conversationId] as read up to [messageId] when known. */
     suspend fun markRead(conversationId: String, messageId: String? = null) = Unit

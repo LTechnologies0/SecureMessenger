@@ -8,7 +8,7 @@ import ltechnologies.onionphone.securemessenger.core.proxy.SocksEndpointResolver
 import timber.log.Timber
 
 /**
- * Applies Tor SOCKS5 (or clearnet) properties for Angus Mail IMAP/SMTP/POP3 sessions.
+ * Applies Tor SOCKS5 properties for Angus Mail IMAP/SMTP/POP3 sessions.
  *
  * Under Tor + [ProxyConfig.remoteDns], callers should pass [connectHost] as a DoH-resolved IP
  * ([EmailTorDns.resolveIpv4]) so Angus never resolves the mail hostname on-device. SNI and
@@ -20,7 +20,6 @@ object EmailSocksProperties {
         protocols: List<String>,
         proxy: ProxyConfig,
     ) {
-        if (!proxy.torRequired) return
         val socksHost = SocksEndpointResolver.resolveReachableHost(proxy.host, proxy.port)
         for (protocol in protocols) {
             props["mail.$protocol.socks.host"] = socksHost

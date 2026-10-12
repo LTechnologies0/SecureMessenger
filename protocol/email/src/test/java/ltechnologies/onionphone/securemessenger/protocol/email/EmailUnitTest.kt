@@ -52,14 +52,14 @@ class EmailThreadingTest {
 
 class EmailSocksPropertiesTest {
     @Test
-    fun skipsSocksWhenTorNotRequired() {
+    fun appliesSocksAlways() {
         val props = Properties()
         EmailSocksProperties.applySocks(
             props,
             listOf("imap", "smtp"),
-            ProxyConfig(host = "127.0.0.1", port = 9050, torRequired = false),
+            ProxyConfig(host = "127.0.0.1", port = 9050, torRequired = true),
         )
-        assertFalse(props.containsKey("mail.imap.socks.host"))
+        assertEquals("127.0.0.1", props["mail.imap.socks.host"])
     }
 
     @Test

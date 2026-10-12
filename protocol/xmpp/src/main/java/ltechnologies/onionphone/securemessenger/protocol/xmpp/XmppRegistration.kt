@@ -11,7 +11,6 @@ import ltechnologies.onionphone.securemessenger.core.proxy.SocksEndpointResolver
 import ltechnologies.onionphone.securemessenger.core.model.RegistrationResult
 import org.jivesoftware.smack.ConnectionConfiguration
 import org.jivesoftware.smack.XMPPException
-import org.jivesoftware.smack.proxy.ProxyInfo
 import org.jivesoftware.smack.tcp.XMPPTCPConnection
 import org.jivesoftware.smack.tcp.XMPPTCPConnectionConfiguration
 import org.jivesoftware.smackx.iqregister.AccountManager
@@ -105,29 +104,22 @@ internal class XmppRegistration(private val context: Context) {
             .setHost(server)
             .setPort(5222)
             .setSecurityMode(ConnectionConfiguration.SecurityMode.required)
-        if (proxy.torRequired) {
-            val socksHost = SocksEndpointResolver.resolveReachableHost(proxy.host, proxy.port)
-            try {
-                java.net.Socket().use { socket ->
-                    socket.connect(java.net.InetSocketAddress(socksHost, proxy.port), 3_000)
-                }
-            } catch (e: Exception) {
-                throw IllegalStateException(
-                    "Tor activé : SOCKS $socksHost:${proxy.port} injoignable — démarrez OnionVPN ou désactivez Tor",
-                    e,
-                )
+        val socksHost = SocksEndpointResolver.resolveReachableHost(proxy.host, proxy.port)
+        try {
+            java.net.Socket().use { socket ->
+                socket.connect(java.net.InetSocketAddress(socksHost, proxy.port), 3_000)
             }
-            // See SmackClientFacade.connect() — Smack SOCKS5 needs non-null auth for Tor stream isolation.
-            builder.setProxyInfo(
-                ProxyInfo(
-                    ProxyInfo.ProxyType.SOCKS5,
-                    socksHost,
-                    proxy.port,
-                    proxy.username ?: server,
-                    proxy.password ?: "x",
-                ),
+        } catch (e: Exception) {
+            throw IllegalStateException(
+                "Tor requis : SOCKS $socksHost:${proxy.port} injoignable — démarrez OnionVPN",
+                e,
             )
         }
+        builder.setSocketFactory(SocksUnresolvedSocketFactory(socksHost, proxy.port))
+        org.jivesoftware.smack.util.DNSUtil.setDNSResolver(DummyTorDnsResolver())
+        builder.setProxyInfo(
+            smackSocksProxyInfo(socksHost, proxy.port, proxy.username, proxy.password),
+        )
         val conn = XMPPTCPConnection(builder.build())
         conn.connect()
         return conn

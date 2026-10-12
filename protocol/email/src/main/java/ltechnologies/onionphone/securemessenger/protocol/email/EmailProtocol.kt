@@ -8,9 +8,8 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
+import ltechnologies.onionphone.securemessenger.protocol.api.protocolIoScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -90,8 +89,7 @@ class EmailProtocol @Inject constructor(
      */
     override val capabilities: ProtocolCapabilities
         get() {
-            val anyMedia = sessions.isEmpty() ||
-                sessions.values.any { it.config.storeKind != EmailStoreKind.JMAP }
+            val anyMedia = sessions.values.any { it.config.storeKind != EmailStoreKind.JMAP }
             return baseCapabilities.copy(mediaSend = anyMedia)
         }
 
@@ -104,7 +102,7 @@ class EmailProtocol @Inject constructor(
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     override val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope = protocolIoScope("email")
     private val sessions = ConcurrentHashMap<String, EmailSession>()
     private val imapEngines = ConcurrentHashMap<String, ImapSyncEngine>()
     private val pop3Engines = ConcurrentHashMap<String, Pop3SyncEngine>()
@@ -633,6 +631,12 @@ class EmailProtocol @Inject constructor(
                 BackupExportResult.Failure(e.message ?: "Backup failed")
             }
         }
+
+    override suspend fun wipeLocalData(accountId: String) {
+        withContext(Dispatchers.IO) {
+            runCatching { File(context.filesDir, "email_media/$accountId").deleteRecursively() }
+        }
+    }
 
     override suspend fun disconnect(accountId: String?) = withContext(Dispatchers.IO) {
         val ids = if (accountId != null) listOf(accountId) else sessions.keys.toList()

@@ -1,6 +1,7 @@
 package ltechnologies.onionphone.securemessenger.ui.screens
 
 import android.annotation.SuppressLint
+import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -33,8 +34,8 @@ import ltechnologies.onionphone.securemessenger.core.model.MatrixSsoRedirect
 
 /**
  * Full-screen WebView used for Matrix UIA / SSO stages.
- * When [routeViaTor] is true, traffic is routed through SOCKS via [ProxyController];
- * otherwise the WebView uses clearnet (default).
+ * Always routed through SOCKS ([routeViaTor] is kept for call-site compatibility but defaults true).
+ * Proxy is reapplied when [socksHost]/[socksPort] change. Cookies are cleared on dismiss.
  */
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
@@ -46,19 +47,17 @@ fun RegistrationWebViewDialog(
     onContinue: () -> Unit,
     onDismiss: () -> Unit,
     onLoginToken: ((String) -> Unit)? = null,
-    routeViaTor: Boolean = false,
+    routeViaTor: Boolean = true,
 ) {
-    var proxyReady by remember { mutableStateOf(!routeViaTor) }
+    var proxyReady by remember { mutableStateOf(false) }
     var proxyError by remember { mutableStateOf<String?>(null) }
     val executor = remember { Executor { command -> command.run() } }
 
     DisposableEffect(routeViaTor, socksHost, socksPort) {
-        if (!routeViaTor) {
-            proxyReady = true
-            proxyError = null
-        } else if (!WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
-            proxyError = "Ce téléphone ne supporte pas le proxy WebView — activez Tor sur un appareil compatible, " +
-                "ou désactivez le routage Tor."
+        proxyReady = false
+        proxyError = null
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
+            proxyError = "Ce téléphone ne supporte pas le proxy WebView — Tor est obligatoire."
             proxyReady = false
         } else {
             val proxyConfig = WebViewProxyConfig.Builder()
@@ -69,8 +68,12 @@ fun RegistrationWebViewDialog(
             }
         }
         onDispose {
-            if (routeViaTor && WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
                 runCatching { ProxyController.getInstance().clearProxyOverride(executor) {} }
+            }
+            runCatching {
+                CookieManager.getInstance().removeAllCookies(null)
+                CookieManager.getInstance().flush()
             }
         }
     }
@@ -118,6 +121,11 @@ fun RegistrationWebViewDialog(
                     onRelease = { webView ->
                         webView.stopLoading()
                         webView.webViewClient = object : WebViewClient() {}
+                        runCatching {
+                            CookieManager.getInstance().removeAllCookies(null)
+                            CookieManager.getInstance().flush()
+                        }
+                        webView.clearCache(true)
                         webView.destroy()
                     },
                 )

@@ -118,27 +118,25 @@ class ConnectionManager @Inject constructor(
 
     /**
      * Resolves proxy settings for a connection.
-     * Clearnet (default): always returns the current config — no Tor killswitch.
-     * Tor opt-in: requires a healthy SOCKS endpoint (OnionVPN PAC bridge) for all protocols.
+     * Tor is mandatory: a healthy OnionVPN/custom SOCKS endpoint is required.
+     * Arms [_killswitchActive] when SOCKS is down.
      */
+    @Suppress("UNUSED_PARAMETER")
     private suspend fun resolveProxyOrFail(protocolId: ProtocolId? = null): ProxyConfig? {
         val rawProxy = proxyManager.currentConfig()
-        _killswitchActive.value = false
-
-        if (!rawProxy.torRequired) {
-            return rawProxy
-        }
-
         if (!proxyManager.ensureProxyReady()) {
+            _killswitchActive.value = true
             return null
         }
+        _killswitchActive.value = false
         return rawProxy.copy(
             host = SocksEndpointResolver.resolveReachableHost(rawProxy.host, rawProxy.port),
+            torRequired = true,
         )
     }
 
     private val proxyRequiredMessage =
-        "Tor activé mais proxy indisponible : démarrez OnionVPN, ou désactivez Tor (Paramètres → Proxy)."
+        "Tor requis : proxy SOCKS indisponible — démarrez OnionVPN (Paramètres → Proxy)."
 
     suspend fun connect(credentials: AccountCredentials): ConnectionResult {
         awaitBootstrap()
@@ -244,16 +242,24 @@ class ConnectionManager @Inject constructor(
 
     private suspend fun restorePersistedAccountsLocked() {
             val config = proxyManager.currentConfig()
-            if (config.torRequired) {
-                proxyManager.refreshStatusAndWait()
-            }
+            proxyManager.refreshStatusAndWait()
             if (!appLockManager.isUnlocked) return
-            _killswitchActive.value = false
+            val socksUp = proxyManager.isNetworkAllowed()
+            _killswitchActive.value = !socksUp
 
             val roomAccounts = repository.get().observeAccounts().first()
             val telegram = protocolRegistry.get(ProtocolId.TELEGRAM)
                 as? ltechnologies.onionphone.securemessenger.protocol.telegram.TelegramProtocol
             for (account in roomAccounts) {
+                val pending = runCatching {
+                    protocolRegistry.get(account.protocol)?.pendingAuthStep()
+                }.getOrNull()
+                val pendingForThis = pending != null &&
+                    (pending.accountId == null || pending.accountId == account.id)
+                if (pendingForThis) {
+                    Timber.i("Keeping mid-auth account ${account.id} (${account.protocol})")
+                    continue
+                }
                 if (account.protocol == ProtocolId.TELEGRAM &&
                     account.connectionState != ConnectionState.CONNECTED
                 ) {
@@ -311,7 +317,14 @@ class ConnectionManager @Inject constructor(
                 if (protocolId !in FeatureFlags.enabled) return
 
                 val existing = cleanedRoomAccounts.firstOrNull { it.id == accountId }
-                if (config.torRequired && !proxyManager.isNetworkAllowed()) {
+                val pending = runCatching { protocolRegistry.get(protocolId)?.pendingAuthStep() }.getOrNull()
+                val pendingForThis = pending != null &&
+                    (pending.accountId == null || pending.accountId == accountId)
+                if (pendingForThis) {
+                    Timber.i("Skip restore delete for $accountId — pendingAuthStep")
+                    return
+                }
+                if (!proxyManager.isNetworkAllowed()) {
                     Timber.i("Skip restore for $accountId ($protocolId): Tor required but SOCKS down")
                     return
                 }
@@ -382,9 +395,15 @@ class ConnectionManager @Inject constructor(
         val protocolId = protocolName?.let { runCatching { ProtocolId.valueOf(it) }.getOrNull() }
         // Pass the accountId through so protocols managing multiple simultaneous accounts of the
         // same type (XMPP, Matrix) only tear down this one session, not every connected account.
-        protocolId?.let { protocolRegistry.get(it)?.disconnect(accountId) }
+        protocolId?.let { id ->
+            val protocol = protocolRegistry.get(id)
+            runCatching { protocol?.disconnect(accountId) }
+            runCatching { protocol?.wipeLocalData(accountId) }
+        }
         credentialStore.removeAccount(accountId)
-        repository.get().deleteAccount(accountId)
+        if (appLockManager.isUnlocked) {
+            repository.get().deleteAccount(accountId)
+        }
     }
 
     suspend fun disconnect(protocolId: ProtocolId) {
@@ -392,21 +411,16 @@ class ConnectionManager @Inject constructor(
     }
 
     /**
-     * When Tor routing is opted in and SOCKS stays down, disconnect Tor-bound sessions.
-     * Clearnet mode is left alone — no global killswitch.
+     * When SOCKS stays down, arm the killswitch and disconnect every session.
      */
     private suspend fun disconnectIfStillUnhealthy() {
         kotlinx.coroutines.delay(3_000)
         proxyManager.refreshStatusAndWait()
-        val config = proxyManager.currentConfig()
-        _killswitchActive.value = false
-        if (!config.torRequired) {
-            lastProxyHealthy = true
-            return
-        }
         if (!proxyManager.isNetworkAllowed()) {
+            _killswitchActive.value = true
             disconnectAllSessions()
         } else {
+            _killswitchActive.value = false
             lastProxyHealthy = true
         }
     }
@@ -447,11 +461,10 @@ class ConnectionManager @Inject constructor(
         lastProxyHealthy = healthy
         lastProxyConfig = config
 
-        // Killswitch removed: never block the whole app when SOCKS blips.
-        _killswitchActive.value = false
+        _killswitchActive.value = !healthy
 
         when {
-            !healthy && proxyManager.currentConfig().torRequired -> disconnectIfStillUnhealthy()
+            !healthy -> disconnectIfStillUnhealthy()
             wasHealthy == false && healthy -> restorePersistedAccounts()
             previousConfig != null && isMeaningfulConfigChange(previousConfig, config) -> {
                 Timber.i("Proxy config changed — reconnecting through ${config.host}:${config.port}")
@@ -478,7 +491,9 @@ class ConnectionManager @Inject constructor(
         if (previous.port != current.port ||
             previous.torProvider != current.torProvider ||
             previous.username != current.username ||
-            previous.password != current.password
+            previous.password != current.password ||
+            previous.torRequired != current.torRequired ||
+            previous.remoteDns != current.remoteDns
         ) {
             return true
         }
@@ -504,17 +519,18 @@ class ConnectionManager @Inject constructor(
         val normalized = ProxyConfigNormalizer.normalize(config)
         val previous = proxyManager.currentConfig()
         repository.get().saveProxySettings(normalized)
+        // Blank password clears the stored secret — do not keep the previous value.
         credentialStore.putProxyPassword(normalized.password)
-        val withSecrets = normalized.copy(
-            password = normalized.password ?: credentialStore.getProxyPassword(),
-        )
+        val withSecrets = normalized.copy(password = normalized.password)
         proxyManager.updateConfig(withSecrets)
         proxyManager.refreshStatusAndWait()
         if (previous.host != withSecrets.host ||
             previous.port != withSecrets.port ||
             previous.torProvider != withSecrets.torProvider ||
             previous.username != withSecrets.username ||
-            previous.password != withSecrets.password
+            previous.password != withSecrets.password ||
+            previous.torRequired != withSecrets.torRequired ||
+            previous.remoteDns != withSecrets.remoteDns
         ) {
             onProxyStateChanged(proxyManager.isNetworkAllowed(), proxyManager.currentConfig())
         }

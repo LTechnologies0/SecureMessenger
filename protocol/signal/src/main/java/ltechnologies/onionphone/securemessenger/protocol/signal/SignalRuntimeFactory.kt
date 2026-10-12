@@ -66,6 +66,7 @@ internal data class SignalSessionContext(
         runCatching { pushServiceSocket.cancelInFlightRequests() }
         runCatching { authWebSocket.disconnect() }
         runCatching { unauthWebSocket.disconnect() }
+        runCatching { network.setInvalidProxy() }
         runCatching { network.clearProxy() }
         runCatching { messageSenderExecutor.shutdownNow() }
     }
@@ -264,8 +265,8 @@ internal object SignalRuntimeFactory {
                 runCatching { network.setInvalidProxy() }
             }
         } else {
-            runCatching { network.clearProxy() }
-            Timber.d("Signal Network clearnet (no SOCKS)")
+            runCatching { network.setInvalidProxy() }
+            Timber.w("Signal Network SOCKS missing — invalid proxy (no clearnet)")
         }
     }
 }

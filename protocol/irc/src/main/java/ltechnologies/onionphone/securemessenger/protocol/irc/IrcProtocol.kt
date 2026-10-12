@@ -161,14 +161,24 @@ class IrcProtocol @Inject constructor(
                     }
                     .then()
 
-                if (proxy.torRequired) {
-                    val socksHost = SocksEndpointResolver.resolveReachableHost(proxy.host, proxy.port)
-                    builder.proxy()
-                        .proxyHost(socksHost)
-                        .proxyPort(proxy.port)
-                        .proxyType(ProxyType.SOCKS_5)
-                        .then()
+                val socksHost = SocksEndpointResolver.resolveReachableHost(proxy.host, proxy.port)
+                builder.proxy()
+                    .proxyHost(socksHost)
+                    .proxyPort(proxy.port)
+                    .proxyType(ProxyType.SOCKS_5)
+                    .then()
+                // Fail-closed: Kitteh must not resolve IRC host via local DNS under Tor.
+                val resolverMethod = builder.javaClass.methods.firstOrNull {
+                    it.name == "resolver" && it.parameterCount == 1
+                } ?: error("Kitteh resolver hook missing — refuse local DNS")
+                val paramType = resolverMethod.parameterTypes[0]
+                val throwingResolver = java.lang.reflect.Proxy.newProxyInstance(
+                    paramType.classLoader ?: builder.javaClass.classLoader,
+                    arrayOf(paramType),
+                ) { _, _, _ ->
+                    throw java.net.UnknownHostException("Tor required: DNS via SOCKS only")
                 }
+                resolverMethod.invoke(builder, throwingResolver)
 
                 val client = builder.build()
                 client.eventManager.registerEventListener(listener)
@@ -433,6 +443,8 @@ class IrcProtocol @Inject constructor(
                 BackupExportResult.Failure(it.message ?: "Export échoué")
             }
         }
+
+    override suspend fun wipeLocalData(accountId: String) = Unit
 
     override suspend fun disconnect(accountId: String?) {
         withContext(Dispatchers.IO) {

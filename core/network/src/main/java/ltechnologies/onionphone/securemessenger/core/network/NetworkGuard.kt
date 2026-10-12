@@ -18,19 +18,18 @@ import ltechnologies.onionphone.securemessenger.core.proxy.SocksEndpointResolver
 import okhttp3.OkHttpClient
 
 /**
- * Optional Tor gate. Clearnet is allowed when Tor is not required.
- * Protocols that opt into Tor still route through SOCKS when the proxy is healthy.
+ * Mandatory Tor gate. Clearnet is never allowed — SOCKS must be healthy.
  */
 @Singleton
 class NetworkGuard @Inject constructor(
     private val proxyManager: ProxyManager,
 ) {
-    /** Throws [NetworkBlockedException] only when Tor is required and SOCKS is down. */
+    /** Throws [NetworkBlockedException] when OnionVPN/custom SOCKS is down. */
     fun assertNetworkAllowed() {
         if (!proxyManager.isNetworkAllowed()) {
             throw NetworkBlockedException(
                 proxyManager.status.value.lastError
-                    ?: "Tor activé mais proxy SOCKS indisponible — désactivez Tor ou démarrez OnionVPN",
+                    ?: "Tor requis : proxy SOCKS OnionVPN indisponible — démarrez OnionVPN",
             )
         }
     }
@@ -45,8 +44,7 @@ class NetworkGuard @Inject constructor(
 class NetworkBlockedException(message: String) : IllegalStateException(message)
 
 /**
- * Builds Ktor/OkHttp clients. Uses Tor SOCKS only when Tor routing is enabled and healthy;
- * otherwise connects directly (clearnet).
+ * Builds Ktor/OkHttp clients that always use Tor SOCKS. No clearnet builder path.
  */
 @Singleton
 class ProxiedHttpClientFactory @Inject constructor(
@@ -77,16 +75,14 @@ class ProxiedHttpClientFactory @Inject constructor(
     fun okhttpClient(): OkHttpClient {
         networkGuard.assertNetworkAllowed()
         val config = proxyManager.currentConfig()
-        val builder = OkHttpClient.Builder()
-        if (config.torRequired && proxyManager.status.value.proxyHealthy) {
-            val socksHost = SocksEndpointResolver.resolveReachableHost(config.host, config.port)
-            builder.proxy(
+        val socksHost = SocksEndpointResolver.resolveReachableHost(config.host, config.port)
+        return OkHttpClient.Builder()
+            .proxy(
                 Proxy(
                     Proxy.Type.SOCKS,
                     InetSocketAddress(socksHost, config.port),
                 ),
             )
-        }
-        return builder.build()
+            .build()
     }
 }

@@ -54,6 +54,7 @@ dependencies {
     implementation(project(":protocol:api"))
     implementation(project(":core:proxy"))
     implementation(project(":core:network"))
+    implementation(project(":core:security"))
     implementation(project(":data"))
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.android)

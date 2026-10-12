@@ -148,21 +148,17 @@ class OmemoHelper(
 
     companion object {
         /**
-         * Conversations-style: without an OMEMO stack, plaintext is allowed.
-         * While OMEMO is initializing, block (do not race cleartext).
-         * When ready, unknown disco is block; known OMEMO encrypts; known cleartext peers may plain.
+         * Honest E2EE: refuse send without OMEMO. No plaintext fallback.
          */
         internal fun decideSend(
             helperPresent: Boolean,
             helperReady: Boolean,
             peerSupports: Boolean?,
         ): OmemoSendDecision {
-            if (!helperPresent) return OmemoSendDecision.PLAINTEXT
-            if (!helperReady) return OmemoSendDecision.BLOCK
+            if (!helperPresent || !helperReady) return OmemoSendDecision.BLOCK
             return when (peerSupports) {
                 true -> OmemoSendDecision.ENCRYPT
-                false -> OmemoSendDecision.PLAINTEXT
-                null -> OmemoSendDecision.BLOCK
+                false, null -> OmemoSendDecision.BLOCK
             }
         }
     }

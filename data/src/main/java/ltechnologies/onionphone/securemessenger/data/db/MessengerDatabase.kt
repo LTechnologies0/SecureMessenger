@@ -125,10 +125,10 @@ interface MessageDao {
         SELECT * FROM (
             SELECT * FROM messages
             WHERE conversationId = :conversationId
-            ORDER BY timestamp DESC
+            ORDER BY timestamp DESC, id DESC
             LIMIT :limit
         )
-        ORDER BY timestamp ASC
+        ORDER BY timestamp ASC, id ASC
         """,
     )
     fun observeRecentForConversation(
@@ -149,7 +149,7 @@ interface MessageDao {
         """
         SELECT id FROM messages
         WHERE conversationId = :conversationId
-        ORDER BY timestamp DESC
+        ORDER BY timestamp DESC, id DESC
         LIMIT 1
         """,
     )
@@ -159,7 +159,7 @@ interface MessageDao {
         """
         SELECT * FROM messages
         WHERE conversationId = :conversationId
-        ORDER BY timestamp ASC
+        ORDER BY timestamp ASC, id ASC
         LIMIT :limit OFFSET :offset
         """,
     )

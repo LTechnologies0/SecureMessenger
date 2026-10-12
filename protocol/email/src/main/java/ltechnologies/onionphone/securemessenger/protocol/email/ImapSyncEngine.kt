@@ -33,10 +33,14 @@ class ImapSyncEngine(
             var backoffMs = 2_000L
             while (isActive) {
                 try {
-                    folderMutex.withLock {
-                        syncFolderLocked(session)
-                        idleOnceLocked(session)
+                    if (!session.reconnectStore()) {
+                        delay(backoffMs)
+                        backoffMs = min(backoffMs * 2, 60_000L)
+                        continue
                     }
+                    folderMutex.withLock { syncFolderLocked(session) }
+                    // Release mutex during IDLE so markSeen can proceed.
+                    idleOnceUnlocked(session)
                     backoffMs = 2_000L
                 } catch (e: Exception) {
                     Timber.w(e, "IMAP sync/IDLE interrupted")
@@ -98,23 +102,23 @@ class ImapSyncEngine(
         }
     }
 
-    private suspend fun idleOnceLocked(session: EmailSession) {
+    private suspend fun idleOnceUnlocked(session: EmailSession) {
+        if (!session.reconnectStore()) return
         val store = session.store ?: return
         val folder = store.getFolder(session.config.folder)
         folder.open(Folder.READ_ONLY)
         try {
             val idleFolder = folder as? org.eclipse.angus.mail.imap.IMAPFolder
             if (idleFolder == null) {
-                delay(60_000)
+                delay(15_000)
                 return
             }
-            // IDLE blocks until server pushes or timeout; Angus respects timeout property.
-            idleFolder.idle(true)
+            // Short one-shot IDLE (mutex released).
+            idleFolder.idle(false)
         } finally {
             runCatching { folder.close(false) }
         }
-        // Pull new UIDs only after IDLE folder is closed (single SELECT).
-        syncFolderLocked(session)
+        folderMutex.withLock { syncFolderLocked(session) }
     }
 
     private suspend fun persistMail(session: EmailSession, mail: MimeMessage) {

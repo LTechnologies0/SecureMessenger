@@ -1,8 +1,11 @@
 package ltechnologies.onionphone.securemessenger.ui
 
+import android.content.Context
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -45,6 +48,7 @@ import ltechnologies.onionphone.securemessenger.service.ConnectionManager
 
 @HiltViewModel
 class MainViewModel @Inject constructor(
+    @ApplicationContext private val appContext: Context,
     private val repository: MessengerRepository,
     private val backupExporter: LocalBackupExporter,
     private val connectionManager: ConnectionManager,
@@ -154,6 +158,42 @@ class MainViewModel @Inject constructor(
             // Always stream via LocalBackupExporter — protocol exporters formerly
             // materialized the full account JSON in heap.
             onResult(backupExporter.export(accountId, resolvedProtocol, destinationPath))
+        }
+    }
+
+    fun exportEncryptedBackup(
+        accountId: String,
+        protocol: ProtocolId,
+        destination: Uri,
+        passphrase: String,
+        onResult: (BackupExportResult) -> Unit,
+    ) {
+        viewModelScope.launch {
+            if (passphrase.length < 8) {
+                onResult(BackupExportResult.Failure("Passphrase trop courte (8 caractères min.)"))
+                return@launch
+            }
+            val chars = passphrase.toCharArray()
+            try {
+                val stream = appContext.contentResolver.openOutputStream(destination)
+                    ?: run {
+                        onResult(BackupExportResult.Failure("Impossible d'ouvrir le fichier SAF"))
+                        return@launch
+                    }
+                stream.use { out ->
+                    onResult(
+                        backupExporter.exportEncrypted(
+                            accountId = accountId,
+                            protocol = protocol,
+                            output = out,
+                            passphrase = chars,
+                            destinationLabel = destination.toString(),
+                        ),
+                    )
+                }
+            } finally {
+                chars.fill('\u0000')
+            }
         }
     }
 

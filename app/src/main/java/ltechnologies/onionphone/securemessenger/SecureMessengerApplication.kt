@@ -4,7 +4,12 @@ import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.os.Build
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import dagger.hilt.android.HiltAndroidApp
+import javax.inject.Inject
+import ltechnologies.onionphone.securemessenger.core.security.AppLockManager
 import ltechnologies.onionphone.securemessenger.core.security.LogRedactor
 import ltechnologies.onionphone.securemessenger.protocol.signal.SignalLogging
 import ltechnologies.onionphone.securemessenger.service.MessengerForegroundService
@@ -12,6 +17,8 @@ import timber.log.Timber
 
 @HiltAndroidApp
 class SecureMessengerApplication : Application() {
+    @Inject lateinit var appLockManager: AppLockManager
+
     override fun onCreate() {
         super.onCreate()
         System.loadLibrary("sqlcipher")
@@ -26,6 +33,17 @@ class SecureMessengerApplication : Application() {
                 },
             )
         }
+        ProcessLifecycleOwner.get().lifecycle.addObserver(
+            object : DefaultLifecycleObserver {
+                override fun onStop(owner: LifecycleOwner) {
+                    appLockManager.scheduleLockAfterInactivity()
+                }
+
+                override fun onStart(owner: LifecycleOwner) {
+                    appLockManager.cancelScheduledLock()
+                }
+            },
+        )
     }
 
     private fun createNotificationChannel() {

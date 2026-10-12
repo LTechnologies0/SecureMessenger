@@ -135,13 +135,18 @@ class TdLibFacade(private val client: TdLibClient) {
         )
     }
 
-    fun setParameters(databaseDirectory: String, apiId: Int, apiHash: String) {
+    fun setParameters(
+        databaseDirectory: String,
+        apiId: Int,
+        apiHash: String,
+        databaseEncryptionKey: ByteArray,
+    ) {
         client.send(
             TdApi.SetTdlibParameters().apply {
                 useTestDc = false
                 this.databaseDirectory = databaseDirectory
                 filesDirectory = databaseDirectory
-                databaseEncryptionKey = ByteArray(0)
+                this.databaseEncryptionKey = databaseEncryptionKey
                 useFileDatabase = true
                 useChatInfoDatabase = true
                 useMessageDatabase = true

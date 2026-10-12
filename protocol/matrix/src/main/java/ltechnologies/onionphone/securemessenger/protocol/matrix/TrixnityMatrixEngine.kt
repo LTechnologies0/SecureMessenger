@@ -4,11 +4,10 @@ import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.http.ContentType
 import io.ktor.http.Url
 import java.io.File
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import ltechnologies.onionphone.securemessenger.protocol.api.protocolIoScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -77,8 +76,9 @@ import kotlin.time.Duration.Companion.seconds
 class TrixnityMatrixEngine(
     private val repository: MessengerRepository,
     private val filesDir: File,
+    private val h2Password: String,
 ) {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope = protocolIoScope("matrix-trixnity")
     private var client: MatrixClient? = null
     private var observeJob: Job? = null
 
@@ -282,8 +282,10 @@ class TrixnityMatrixEngine(
     private suspend fun createPersistentRepositoriesModule(cryptoDir: File): Module {
         val dbFile = cryptoDir.resolve("trixnity").absolutePath
         val database = Database.connect(
-            url = "jdbc:h2:$dbFile;DB_CLOSE_DELAY=-1;MODE=PostgreSQL",
+            url = "jdbc:h2:$dbFile;CIPHER=AES;DB_CLOSE_DELAY=-1;MODE=PostgreSQL",
             driver = "org.h2.Driver",
+            user = "sm",
+            password = "$h2Password $h2Password",
         )
         return createExposedRepositoriesModule(database)
     }
@@ -310,7 +312,7 @@ class TrixnityMatrixEngine(
                                 lastMessageAt = room.lastRelevantEventTimestamp?.toEpochMilliseconds() ?: 0L,
                             )
                         }
-                        if (conversations.isNotEmpty()) repository.upsertConversations(conversations)
+                        conversations.forEach { repository.mergeConversationMetadata(it) }
                     }
                 } catch (e: Exception) {
                     Timber.w(e, "Trixnity room observe failed")
@@ -319,7 +321,7 @@ class TrixnityMatrixEngine(
             launch {
                 try {
                     roomService.getTimelineEventsFromNowOn().collect { event ->
-                        persistTimelineEvent(accountId, matrixClient, event, downloadMedia = true)
+                        persistTimelineEvent(accountId, matrixClient, event, downloadMedia = false)
                     }
                 } catch (e: Exception) {
                     Timber.w(e, "Trixnity timeline observe failed")
@@ -576,7 +578,7 @@ class TrixnityMatrixEngine(
         val message = toMessage(accountId, matrixClient, event, downloadMedia) ?: return
         repository.upsertMessage(message)
         val parsed = parseRoomMessage(event.eventId.full, event.content?.getOrNull()) ?: return
-        repository.upsertConversation(
+        repository.mergeIncomingConversation(
             Conversation(
                 id = message.conversationId,
                 protocol = ProtocolId.MATRIX,
@@ -586,6 +588,7 @@ class TrixnityMatrixEngine(
                 lastMessagePreview = parsed.preview.take(100),
                 lastMessageAt = event.originTimestamp,
             ),
+            incoming = message.direction == MessageDirection.INCOMING,
         )
     }
 
@@ -811,10 +814,10 @@ class TrixnityMatrixEngine(
         val payloadJson: String? = null,
     )
 
-    suspend fun sendText(roomId: String, body: String) {
-        val matrixClient = client ?: return
+    suspend fun sendText(roomId: String, body: String): String {
+        val matrixClient = client ?: error("Not connected")
         val roomService = matrixClient.di.get<RoomService>()
-        roomService.sendMessage(RoomId(roomId)) {
+        return roomService.sendMessage(RoomId(roomId)) {
             text(body)
         }
     }

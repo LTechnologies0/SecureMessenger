@@ -1,7 +1,7 @@
 # SecureMessenger
 
 <p align="center">
-  <strong>Messagerie Android multi-protocole — Matrix, XMPP, Telegram, Signal, Email et IRC dans une seule app, Tor optionnel via OnionVPN.</strong>
+  <strong>Messagerie Android multi-protocole — Matrix, XMPP, Telegram, Signal, Email et IRC dans une seule app, Tor obligatoire via OnionVPN.</strong>
 </p>
 
 <p align="center">
@@ -21,8 +21,8 @@
 
 **SecureMessenger** is an open-source Android messenger that unifies **Matrix**, **XMPP**, **Telegram**, **Signal**, **Email**, and **IRC** in one Material 3 inbox — contacts, history, rich media (voice, location, polls, GIFs where the protocol supports them), typing, read receipts, profile edit, and local JSON backup. Part of the [OnionPhone](https://onionphone.org) app family.
 
-> Tor routing is **optional** (off by default). When enabled, traffic uses the [OnionVPN](https://github.com/LTechnologies0/OnionVPN) PAC bridge
-> (`http://127.0.0.1:18201/onionvpn.pac` → SOCKS5 `127.0.0.1:18202`). Orbot / InviZible are not used.
+> Tor routing is **mandatory**. All traffic uses the [OnionVPN](https://github.com/LTechnologies0/OnionVPN) PAC bridge
+> (`http://127.0.0.1:18201/onionvpn.pac` → SOCKS5 `127.0.0.1:18202`) or a custom loopback SOCKS. Clearnet is refused. Orbot / InviZible are not used.
 
 **Keywords / topics:** `android` · `kotlin` · `jetpack-compose` · `material-design` · `messenger` · `matrix` · `xmpp` · `telegram` · `signal` · `email` · `irc` · `tdlib` · `tor` · `privacy` · `onionphone`
 
@@ -52,7 +52,7 @@
 | **Typing & read receipts** | Outbound + inbound typing (Matrix/XMPP/Telegram); read markers / receipts where supported |
 | **Signal link (QR)** | Register by SMS or link an existing account as a secondary device |
 | **Account registration** | Matrix (UIA / WebView) and XMPP (XEP-0077) account creation |
-| **Optional Tor** | OnionVPN PAC SOCKS for all protocols when Tor is enabled; custom SOCKS optional |
+| **Tor only** | OnionVPN PAC SOCKS for all protocols; custom SOCKS optional; no clearnet |
 | **Local backup** | Per-account JSON export of conversations/messages |
 | **Encrypted at rest** | SQLCipher DB + Keystore-backed credentials; system app lock |
 | **Material 3 UI** | Jetpack Compose, expressive motion, capability chips per protocol |
@@ -68,9 +68,9 @@ flowchart LR
     CM --> Signal[protocol:signal]
     CM --> Email[protocol:email]
     CM --> IRC[protocol:irc]
-    Matrix & XMPP & TG & Signal & Email & IRC -->|Tor opt-in| Proxy[core:proxy — SOCKS5]
-    Matrix & XMPP & TG & Signal & Email & IRC -->|default| Clearnet((Clearnet))
-    Proxy -->|Tor enabled + healthy| Tor((Tor network))
+    Matrix & XMPP & TG & Signal & Email & IRC --> Proxy[core:proxy — SOCKS5 obligatoire]
+    Proxy -->|SOCKS healthy| Tor((Tor network))
+    Proxy -->|SOCKS down| Kill[Kill switch — sessions coupées]
 ```
 
 ---
@@ -102,7 +102,7 @@ First-party Gradle modules (app, core, data, protocol adapters) — see [docs/AR
 | Async | Kotlin Coroutines + Flow |
 | Networking | Ktor/OkHttp (Matrix), Smack (XMPP), TDLib (Telegram), libsignal (Signal), Angus Mail / JMAP (Email), Kitteh (IRC) |
 | Storage security | AndroidX Security Crypto (Keystore-backed encrypted storage) |
-| Proxy | Optional SOCKS5 → Tor when enabled |
+| Proxy | Mandatory SOCKS5 → Tor (OnionVPN PAC or custom) |
 
 ---
 

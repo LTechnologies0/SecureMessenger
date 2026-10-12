@@ -34,8 +34,10 @@ class SmtpSender {
                 attachments = attachments,
             )
             if (!transport.isConnected) {
+                val host = session.smtpConnectHost
+                    ?: return SendResult.Failure("SMTP host unresolved via Tor")
                 transport.connect(
-                    session.config.smtpHost,
+                    host,
                     session.config.smtpPort,
                     session.config.email,
                     session.config.password,

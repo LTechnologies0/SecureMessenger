@@ -2,6 +2,7 @@ package ltechnologies.onionphone.securemessenger.data
 
 import java.io.BufferedWriter
 import java.io.File
+import java.io.OutputStream
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.Dispatchers
@@ -74,6 +75,32 @@ class LocalBackupExporter @Inject constructor(
             )
         } catch (e: Exception) {
             BackupExportResult.Failure(e.message ?: "Export échoué")
+        }
+    }
+
+    /** Writes an AES-GCM envelope (passphrase) to [output] — used for SAF export. */
+    suspend fun exportEncrypted(
+        accountId: String,
+        protocol: ProtocolId,
+        output: OutputStream,
+        passphrase: CharArray,
+        destinationLabel: String,
+    ): BackupExportResult = withContext(Dispatchers.IO) {
+        val tmp = File.createTempFile("sm-backup-", ".json")
+        try {
+            val plain = export(accountId, protocol, tmp.absolutePath)
+            if (plain is BackupExportResult.Failure) return@withContext plain
+            EncryptedBackup.encryptTo(tmp.readBytes(), passphrase, output)
+            val success = plain as BackupExportResult.Success
+            BackupExportResult.Success(
+                uriOrPath = destinationLabel,
+                messageCount = success.messageCount,
+                conversationCount = success.conversationCount,
+            )
+        } catch (e: Exception) {
+            BackupExportResult.Failure(e.message ?: "Export chiffré échoué")
+        } finally {
+            tmp.delete()
         }
     }
 
