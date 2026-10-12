@@ -16,6 +16,14 @@ class IrcTargetsTest {
     @Test
     fun parseChannels() {
         assertEquals(listOf("#foo", "#bar", "#baz"), IrcTargets.parseChannels("#foo, bar;baz"))
+        assertEquals(listOf("#libera"), IrcTargets.parseChannels("#LIBERA"))
+    }
+
+    @Test
+    fun foldNickAndChannel() {
+        assertEquals("alice", IrcTargets.foldNick("Alice"))
+        assertTrue(IrcTargets.sameNick("Alice", "alice"))
+        assertEquals("#libera", IrcTargets.foldChannel("#LIBERA"))
     }
 
     @Test

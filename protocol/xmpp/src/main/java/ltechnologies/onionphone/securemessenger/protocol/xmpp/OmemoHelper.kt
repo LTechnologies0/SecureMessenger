@@ -1,9 +1,12 @@
 package ltechnologies.onionphone.securemessenger.protocol.xmpp
 
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlinx.coroutines.suspendCancellableCoroutine
 import org.jivesoftware.smack.XMPPConnection
 import org.jivesoftware.smack.packet.Message as SmackMessage
+import org.jivesoftware.smackx.carbons.packet.CarbonExtension
+import org.jivesoftware.smackx.forward.packet.Forwarded
 import org.jivesoftware.smackx.omemo.OmemoManager
 import org.jivesoftware.smackx.omemo.element.OmemoElement
 import org.jivesoftware.smackx.omemo.exceptions.UndecidedOmemoIdentityException
@@ -13,6 +16,12 @@ import org.jivesoftware.smackx.omemo.trust.OmemoTrustCallback
 import org.jivesoftware.smackx.omemo.trust.TrustState
 import org.jxmpp.jid.impl.JidCreate
 import timber.log.Timber
+
+enum class OmemoInitState {
+    UNINITIALIZED,
+    READY,
+    FAILED,
+}
 
 /**
  * TOFU trust for OMEMO — first-seen fingerprint trusted; later fingerprint changes stay undecided.
@@ -53,19 +62,31 @@ class OmemoHelper(
         }
     }
 
+    private val trustCallbackInstalled = AtomicBoolean(false)
+
     @Volatile
-    var ready: Boolean = false
+    var state: OmemoInitState = OmemoInitState.UNINITIALIZED
         private set
 
+    val ready: Boolean
+        get() = state == OmemoInitState.READY
+
+    private fun ensureTrustCallbackOnce() {
+        if (trustCallbackInstalled.compareAndSet(false, true)) {
+            omemoManager.setTrustCallback(trustCallback)
+        }
+    }
+
     fun initializeAsync(onReady: () -> Unit = {}) {
-        omemoManager.setTrustCallback(trustCallback)
+        ensureTrustCallbackOnce()
         omemoManager.initializeAsync(object : OmemoManager.InitializationFinishedCallback {
             override fun initializationFinished(manager: OmemoManager?) {
-                ready = true
+                state = OmemoInitState.READY
                 onReady()
             }
 
             override fun initializationFailed(exception: Exception?) {
+                state = OmemoInitState.FAILED
                 Timber.w(exception, "OMEMO init failed")
             }
         })
@@ -73,18 +94,19 @@ class OmemoHelper(
 
     /** Block until OMEMO device list is published before encrypting. */
     suspend fun initialize(): Boolean = suspendCancellableCoroutine { cont ->
-        if (ready) {
+        if (state == OmemoInitState.READY) {
             cont.resume(true)
             return@suspendCancellableCoroutine
         }
-        omemoManager.setTrustCallback(trustCallback)
+        ensureTrustCallbackOnce()
         omemoManager.initializeAsync(object : OmemoManager.InitializationFinishedCallback {
             override fun initializationFinished(manager: OmemoManager?) {
-                ready = true
+                state = OmemoInitState.READY
                 if (cont.isActive) cont.resume(true)
             }
 
             override fun initializationFailed(exception: Exception?) {
+                state = OmemoInitState.FAILED
                 Timber.w(exception, "OMEMO init failed")
                 if (cont.isActive) cont.resume(false)
             }
@@ -160,6 +182,35 @@ class OmemoHelper(
                 true -> OmemoSendDecision.ENCRYPT
                 false, null -> OmemoSendDecision.BLOCK
             }
+        }
+
+        /**
+         * Shared unwrap for live stanzas and MAM. OMEMO ciphertext is only decrypted when
+         * [decryptOmemo] is true (helper READY); otherwise returns null for OMEMO payloads.
+         */
+        fun unwrapChatBody(
+            helper: OmemoHelper?,
+            remoteJid: String,
+            smackMsg: SmackMessage,
+            decryptOmemo: Boolean,
+        ): String? {
+            if (helper?.hasOmemoPayload(smackMsg) == true) {
+                if (!decryptOmemo) return null
+                return helper.tryDecrypt(remoteJid, smackMsg)
+            }
+            val carbonDir = CarbonExtension.from(smackMsg)?.direction
+            if (carbonDir != null) {
+                val forwarded = smackMsg.getExtension(Forwarded::class.java)
+                val wrapped = forwarded?.forwardedStanza as? SmackMessage
+                if (wrapped != null) {
+                    if (helper?.hasOmemoPayload(wrapped) == true) {
+                        if (!decryptOmemo) return null
+                        return helper.tryDecrypt(remoteJid, wrapped)
+                    }
+                    wrapped.body?.let { return it }
+                }
+            }
+            return smackMsg.body
         }
     }
 

@@ -194,23 +194,26 @@ class EmailProtocol @Inject constructor(
                     ),
                 )
 
-                when (config.storeKind) {
-                    EmailStoreKind.IMAP -> {
-                        val engine = ImapSyncEngine(context, repository, credentialStore)
-                        imapEngines[account.accountId] = engine
-                        engine.start(scope, session)
-                    }
-                    EmailStoreKind.POP3 -> {
-                        val engine = Pop3SyncEngine(context, repository)
-                        pop3Engines[account.accountId] = engine
-                        engine.start(scope, session)
-                    }
-                    EmailStoreKind.JMAP -> {
-                        scope.launch { syncJmap(session) }
+                refreshConnectionState()
+
+                val connectedAccountId = account.accountId
+                val connectedKind = config.storeKind
+                scope.launch {
+                    when (connectedKind) {
+                        EmailStoreKind.IMAP -> {
+                            val engine = ImapSyncEngine(context, repository, credentialStore)
+                            imapEngines[connectedAccountId] = engine
+                            engine.start(scope, session)
+                        }
+                        EmailStoreKind.POP3 -> {
+                            val engine = Pop3SyncEngine(context, repository)
+                            pop3Engines[connectedAccountId] = engine
+                            engine.start(scope, session)
+                        }
+                        EmailStoreKind.JMAP -> syncJmap(session)
                     }
                 }
 
-                refreshConnectionState()
                 ConnectionResult.Success
             } catch (e: Exception) {
                 Timber.w(e, "Email connect failed")
@@ -695,6 +698,17 @@ class EmailProtocol @Inject constructor(
             val parsedMessageId = EmailThreading.normalizeMessageId(messageId)
             val outgoing = EmailAddress.extract(from)
                 .equals(session.config.email, ignoreCase = true)
+            val peer = if (outgoing) {
+                email.to?.firstOrNull()?.email
+                    ?.takeIf { EmailAddress.isValid(it) }
+                    ?.let { EmailAddress.normalize(it) }
+                    ?: session.config.email
+            } else {
+                EmailAddress.extract(from)
+                    .takeIf { EmailAddress.isValid(it) }
+                    ?.let { EmailAddress.normalize(it) }
+                    ?: session.config.email
+            }
             val msgId = "${session.accountId}:msg:$parsedMessageId"
             val alreadyPersisted = repository.getMessage(msgId) != null
             repository.upsertMessage(
@@ -712,6 +726,7 @@ class EmailProtocol @Inject constructor(
                         .put("messageId", parsedMessageId)
                         .put("subject", subject)
                         .put("rootMessageId", root)
+                        .put("to", peer)
                         .toString(),
                 ),
             )
@@ -722,7 +737,7 @@ class EmailProtocol @Inject constructor(
                     id = conversationId,
                     protocol = ProtocolId.EMAIL,
                     accountId = session.accountId,
-                    remoteId = root,
+                    remoteId = peer,
                     title = subject,
                     lastMessagePreview = body.take(160),
                     lastMessageAt = timestamp,

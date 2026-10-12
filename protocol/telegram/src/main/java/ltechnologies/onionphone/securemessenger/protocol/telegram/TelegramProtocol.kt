@@ -97,6 +97,12 @@ class TelegramProtocol @Inject constructor(
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     override val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
 
+    /** Per-account pending auth — sibling SMS/2FA steps never overwrite each other. */
+    private val _pendingAuthByAccount = MutableStateFlow<Map<String, AuthStep>>(emptyMap())
+    fun observePendingAuthByAccount(): StateFlow<Map<String, AuthStep>> =
+        _pendingAuthByAccount.asStateFlow()
+
+    /** Preferred in-flight step (UI convenience); prefer [observePendingAuthByAccount] for multi-login. */
     private val _pendingAuthStep = MutableStateFlow<AuthStep?>(null)
     fun observePendingAuthStep(): StateFlow<AuthStep?> = _pendingAuthStep.asStateFlow()
 
@@ -459,8 +465,8 @@ class TelegramProtocol @Inject constructor(
                 _lastAuthError.value = null
                 val proxy = session.pendingProxy
                 updateScope.launch {
-                    val key = runCatching { credentialStore.getOrCreateTdlibKey(accId) }
-                        .getOrElse { ByteArray(32).also { java.security.SecureRandom().nextBytes(it) } }
+                    // Keystore-backed via EncryptedSharedPreferences (MasterKey) — never ephemeral.
+                    val key = credentialStore.getOrCreateTdlibKey(accId)
                     withContext(session.dispatcher) {
                         session.facade.setParameters(
                             session.pendingDbDir,
@@ -570,22 +576,31 @@ class TelegramProtocol @Inject constructor(
 
     private fun emitPendingAuthStep(session: TelegramSession) {
         authenticatingAccountId = session.accountId
-        updateScope.launch { _pendingAuthStep.value = buildAuthStep(session) }
+        updateScope.launch {
+            val step = buildAuthStep(session) ?: return@launch
+            _pendingAuthByAccount.value = _pendingAuthByAccount.value + (session.accountId to step)
+            _pendingAuthStep.value = step
+        }
     }
 
     /** Keep another in-flight Telegram login visible when one account finishes or closes. */
     private fun republishPendingAuthStep() {
-        val preferred = authenticatingAccountId?.let { sessions[it] }
-            ?.takeIf { it.awaitingAuth != AuthStepKind.NONE }
-        val next = preferred
-            ?: sessions.values.firstOrNull { it.awaitingAuth != AuthStepKind.NONE }
+        val rebuilt = sessions.values
+            .mapNotNull { session ->
+                if (session.awaitingAuth == AuthStepKind.NONE) null
+                else buildAuthStep(session)?.let { session.accountId to it }
+            }
+            .toMap()
+        _pendingAuthByAccount.value = rebuilt
+        val preferred = authenticatingAccountId?.let { rebuilt[it] }
+        val next = preferred ?: rebuilt.values.firstOrNull()
         if (next == null) {
             _pendingAuthStep.value = null
             authenticatingAccountId = null
             return
         }
         authenticatingAccountId = next.accountId
-        _pendingAuthStep.value = buildAuthStep(next)
+        _pendingAuthStep.value = next
     }
 
     private fun buildAuthStep(session: TelegramSession): AuthStep? = when (session.awaitingAuth) {
@@ -1547,9 +1562,25 @@ class TelegramProtocol @Inject constructor(
                     authenticatingAccountId = null
                     republishPendingAuthStep()
                 }
-                // Do NOT flip Room to DISCONNECTED here — ConnectionManager restore treats
-                // non-CONNECTED Telegram as "incomplete login" and wipes the account. Soft
-                // disconnect (app lock / Tor) must leave the row so unlock can reconnect TDLib.
+                // Soft-disconnect: Room must not stay CONNECTED without a live session.
+                // ConnectionManager wipe rules keep provisioned secrets / mid-auth rows.
+                val hasSecrets = credentialStore.getAllForAccount(id)
+                    .filterKeys { !it.startsWith("__") }
+                    .isNotEmpty()
+                val roomState = if (hasSecrets) {
+                    ConnectionState.CONNECTING
+                } else {
+                    ConnectionState.DISCONNECTED
+                }
+                val existing = repository.observeAccounts().first().firstOrNull { it.id == id }
+                repository.upsertAccount(
+                    ltechnologies.onionphone.securemessenger.core.model.Account(
+                        id = id,
+                        protocol = ProtocolId.TELEGRAM,
+                        displayName = existing?.displayName ?: id,
+                        connectionState = roomState,
+                    ),
+                )
             }
             if (accountId == null) {
                 typingFlows.clear()

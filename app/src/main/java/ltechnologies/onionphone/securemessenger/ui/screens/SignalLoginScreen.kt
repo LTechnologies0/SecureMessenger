@@ -2,6 +2,7 @@ package ltechnologies.onionphone.securemessenger.ui.screens
 
 import android.content.Intent
 import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -181,6 +182,9 @@ fun SignalLoginScreen(
     fun abortInFlightSignalLogin() {
         val id = accountId
         if (id != null) {
+            if (viewModel.isSignalLinkAndSyncInProgress(id)) {
+                return
+            }
             val protocol = viewModel.signalProtocol()
             if (protocol?.isAccountConnected(id) != true) {
                 viewModel.cancelSignalLogin(id)
@@ -191,6 +195,15 @@ fun SignalLoginScreen(
         }
     }
 
+    val linkTransferBlocking = step == SignalLoginStep.LINK_QR && (
+        isSignalLinkTransferring(statusMessage) ||
+            (accountId?.let { viewModel.isSignalLinkAndSyncInProgress(it) } == true)
+        )
+
+    BackHandler(enabled = linkTransferBlocking) {
+        // Block system back while link-and-sync transfer is running.
+    }
+
     DisposableEffect(Unit) {
         onDispose {
             abortInFlightSignalLogin()
@@ -198,6 +211,7 @@ fun SignalLoginScreen(
     }
 
     fun handleClose() {
+        if (linkTransferBlocking) return
         abortInFlightSignalLogin()
         onClose()
     }
@@ -212,7 +226,10 @@ fun SignalLoginScreen(
         TopAppBar(
             title = { Text("Signal") },
             navigationIcon = {
-                IconButton(onClick = { handleClose() }) {
+                IconButton(
+                    onClick = { handleClose() },
+                    enabled = !linkTransferBlocking,
+                ) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Retour")
                 }
             },
@@ -354,6 +371,7 @@ fun SignalLoginScreen(
                         linkUrl = null
                         statusMessage = null
                     },
+                    enabled = !linkTransferBlocking,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text("Retour")

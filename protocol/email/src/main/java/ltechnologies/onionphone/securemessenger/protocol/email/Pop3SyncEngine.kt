@@ -66,12 +66,13 @@ class Pop3SyncEngine(
                 repository.upsertMessage(message)
                 val existing = repository.getConversation(conversationId)
                 val bumpUnread = !alreadyPersisted && message.direction == MessageDirection.INCOMING
+                val peer = MimeMapper.peerAddress(parsed, session.config.email)
                 repository.upsertConversation(
                     Conversation(
                         id = conversationId,
                         protocol = ProtocolId.EMAIL,
                         accountId = session.accountId,
-                        remoteId = parsed.rootMessageId,
+                        remoteId = peer,
                         title = parsed.subject,
                         lastMessagePreview = parsed.body.take(160),
                         lastMessageAt = parsed.timestamp,

@@ -6,6 +6,7 @@ import jakarta.mail.Transport
 import java.util.Properties
 import ltechnologies.onionphone.securemessenger.core.model.ProxyConfig
 import ltechnologies.onionphone.securemessenger.core.network.ProxiedHttpClientFactory
+import timber.log.Timber
 
 class EmailSession(
     val accountId: String,
@@ -19,22 +20,54 @@ class EmailSession(
     val storePort: Int = 0,
     val smtpConnectHost: String? = null,
 ) {
+    /** Set after a successful Angus [Store.connect]; Angus [Store.isConnected] is not reliable. */
+    @Volatile
+    var storeAuthenticated: Boolean = false
+        private set
+
+    @Volatile
+    var smtpAuthenticated: Boolean = false
+        private set
+
     fun isConnected(): Boolean = when (config.storeKind) {
         EmailStoreKind.JMAP -> jmapClient?.isConnected() == true
-        EmailStoreKind.IMAP, EmailStoreKind.POP3 -> store?.isConnected == true
+        EmailStoreKind.IMAP, EmailStoreKind.POP3 -> storeAuthenticated
+    }
+
+    fun invalidateStoreAuth() {
+        storeAuthenticated = false
     }
 
     fun reconnectStore(): Boolean {
         val store = this.store ?: return false
-        if (store.isConnected) return true
+        if (storeAuthenticated) return true
         val host = storeConnectHost ?: return false
         return runCatching {
             store.connect(host, storePort, config.email, config.password)
+            storeAuthenticated = true
             true
-        }.getOrDefault(false)
+        }.getOrElse {
+            storeAuthenticated = false
+            false
+        }
+    }
+
+    fun reconnectSmtp(): Boolean {
+        val transport = this.transport ?: return false
+        val host = smtpConnectHost ?: return false
+        return runCatching {
+            transport.connect(host, config.smtpPort, config.email, config.password)
+            smtpAuthenticated = true
+            true
+        }.getOrElse {
+            smtpAuthenticated = false
+            false
+        }
     }
 
     fun close() {
+        storeAuthenticated = false
+        smtpAuthenticated = false
         runCatching { store?.close() }
         runCatching { transport?.close() }
         jmapClient?.close()
@@ -112,8 +145,14 @@ class EmailSession(
             store.connect(storeConnectHost, storePort, config.email, config.password)
 
             val transport = session.getTransport(smtpProtocol)
-            // Reuse the Tor-resolved IP — never pass the original hostname (local DNS leak).
-            transport.connect(smtpConnectHost, config.smtpPort, config.email, config.password)
+            var smtpOk = false
+            runCatching {
+                // Reuse the Tor-resolved IP — never pass the original hostname (local DNS leak).
+                transport.connect(smtpConnectHost, config.smtpPort, config.email, config.password)
+                smtpOk = true
+            }.onFailure { e ->
+                Timber.w(e, "SMTP connect failed (inbox still available)")
+            }
 
             return EmailSession(
                 accountId = accountId,
@@ -125,7 +164,10 @@ class EmailSession(
                 storeConnectHost = storeConnectHost,
                 storePort = storePort,
                 smtpConnectHost = smtpConnectHost,
-            )
+            ).also { opened ->
+                opened.storeAuthenticated = true
+                opened.smtpAuthenticated = smtpOk
+            }
         }
     }
 }

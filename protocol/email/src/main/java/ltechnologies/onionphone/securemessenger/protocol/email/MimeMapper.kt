@@ -80,6 +80,20 @@ object MimeMapper {
         )
     }
 
+    /** Counterparty email for threading UI / reply resolution (not Message-ID root). */
+    fun peerAddress(parsed: ParsedMail, ownEmail: String): String {
+        val fromAddr = EmailAddress.extract(parsed.from)
+        return if (fromAddr.equals(ownEmail, ignoreCase = true)) {
+            parsed.to.firstOrNull()
+                ?.let { EmailAddress.extract(it) }
+                ?.takeIf { EmailAddress.isValid(it) }
+                ?.let { EmailAddress.normalize(it) }
+                ?: EmailAddress.normalize(fromAddr)
+        } else {
+            EmailAddress.normalize(fromAddr)
+        }
+    }
+
     fun toDomainMessage(
         accountId: String,
         conversationId: String,
@@ -88,6 +102,7 @@ object MimeMapper {
     ): Message {
         val fromAddr = EmailAddress.extract(parsed.from)
         val outgoing = fromAddr.equals(ownEmail, ignoreCase = true)
+        val peer = peerAddress(parsed, ownEmail)
         val kind = when {
             parsed.attachments.any { it.mimeType.startsWith("image/") } -> MessageKind.IMAGE
             parsed.attachments.isNotEmpty() -> MessageKind.FILE
@@ -108,7 +123,8 @@ object MimeMapper {
                 append('{')
                 append("\"messageId\":\"").append(jsonEscape(parsed.messageId)).append("\",")
                 append("\"subject\":\"").append(jsonEscape(parsed.subject)).append("\",")
-                append("\"rootMessageId\":\"").append(jsonEscape(parsed.rootMessageId)).append('"')
+                append("\"rootMessageId\":\"").append(jsonEscape(parsed.rootMessageId)).append("\",")
+                append("\"to\":\"").append(jsonEscape(peer)).append('"')
                 append('}')
             },
         )

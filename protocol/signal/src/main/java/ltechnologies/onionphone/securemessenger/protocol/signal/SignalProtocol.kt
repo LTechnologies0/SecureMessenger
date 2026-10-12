@@ -75,39 +75,53 @@ class SignalProtocol @Inject constructor(
 
     override val id: ProtocolId = ProtocolId.SIGNAL
 
+    private val baseSignalCapabilities = ProtocolCapabilities(
+        directMessages = true,
+        groupChats = true,
+        mediaSend = true,
+        mediaReceive = true,
+        typingIndicators = true,
+        readReceipts = true,
+        endToEndEncryption = true,
+        requiresPhoneAuth = true,
+        contacts = true,
+        profileEdit = true,
+        voiceNotes = true,
+        stickers = false, // No composer sticker picker yet.
+        // No dedicated GIF/animation path — would fall through as plain media.
+        gifs = false,
+        locationShare = true,
+        polls = true,
+        contactShare = true,
+        ephemeralMessages = true,
+        messageHistory = false,
+        backupExport = true,
+        // A/V media needs RingRTC; do not advertise call/story composers.
+        voiceCalls = false,
+        videoCalls = false,
+        stories = false,
+    )
+
     override val capabilities: ProtocolCapabilities
-        get() {
-            val imported = accountId?.let {
-                credentialStore.get(it, SignalCredentialKeys.LINK_SYNC_IMPORTED) == "1"
-            } == true
-            return ProtocolCapabilities(
-                directMessages = true,
-                groupChats = true,
-                mediaSend = true,
-                mediaReceive = true,
-                typingIndicators = true,
-                readReceipts = true,
-                endToEndEncryption = true,
-                requiresPhoneAuth = true,
-                contacts = true,
-                profileEdit = true,
-                voiceNotes = true,
-                stickers = false, // No composer sticker picker yet.
-                // No dedicated GIF/animation path — would fall through as plain media.
-                gifs = false,
-                locationShare = true,
-                polls = true,
-                contactShare = true,
-                ephemeralMessages = true,
-                // History via imported link-and-sync archive (no server history API).
-                messageHistory = imported,
-                backupExport = true,
-                // A/V media needs RingRTC; do not advertise call/story composers.
-                voiceCalls = false,
-                videoCalls = false,
-                stories = false,
-            )
+        get() = capabilitiesFor(accountId)
+
+    override fun capabilitiesFor(accountId: String?): ProtocolCapabilities {
+        val accId = accountId ?: this.accountId ?: return baseSignalCapabilities
+        val imported = credentialStore.get(accId, SignalCredentialKeys.LINK_SYNC_IMPORTED) == "1"
+        return baseSignalCapabilities.copy(messageHistory = imported)
+    }
+
+    /** True while a provisioned secondary awaits link-and-sync archive import. */
+    fun isLinkAndSyncInProgress(forAccountId: String): Boolean {
+        if (credentialStore.get(forAccountId, SignalCredentialKeys.SESSION_READY) != "true") {
+            return false
         }
+        if (credentialStore.get(forAccountId, SignalCredentialKeys.EPHEMERAL_BACKUP_KEY) == null) {
+            return false
+        }
+        return credentialStore.get(forAccountId, SignalCredentialKeys.LINK_SYNC_IMPORTED) != "1" &&
+            credentialStore.get(forAccountId, SignalCredentialKeys.LINK_SYNC_SKIPPED) != "1"
+    }
 
     private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val signalDispatcher = Dispatchers.IO.limitedParallelism(1)
@@ -167,14 +181,15 @@ class SignalProtocol @Inject constructor(
                     state == ConnectionState.CONNECTING ||
                     state == ConnectionState.CONNECTED
                 if (liveId != null && liveId != account.accountId && occupied) {
-                    return@withContext ConnectionResult.Failure(
-                        "Un compte Signal est déjà en cours — déconnectez-le avant d'en ajouter un autre",
-                    )
+                    val reason =
+                        "Un compte Signal est déjà en cours — déconnectez-le avant d'en ajouter un autre"
+                    markOccupyFailure(account.accountId, reason)
+                    return@withContext ConnectionResult.Failure(reason)
                 }
-                // Orphan / same-account replace only when not occupied by a different live login.
-                if (session != null && liveId != account.accountId) {
-                    session?.shutdown()
-                    session = null
+                if (liveId == account.accountId && (session != null || syncEngine != null)) {
+                    shutdownLiveSessionLocked()
+                } else if (session != null && liveId != account.accountId) {
+                    shutdownLiveSessionLocked()
                 }
                 _connectionState.value = ConnectionState.CONNECTING
                 accountId = account.accountId
@@ -417,13 +432,14 @@ class SignalProtocol @Inject constructor(
         }
     }
 
-    fun cancelDeviceLink() {
-        ioScope.launch(signalDispatcher) {
+    suspend fun cancelDeviceLink() {
+        withContext(signalDispatcher) {
             val wasLink = _pendingAuthStep.value?.kind == AuthStepKind.SIGNAL_DEVICE_LINK
             cancelDeviceLinkLocked()
             // Do not flip CONNECTING→DISCONNECTED when a phone/PIN registration is in flight.
             if (wasLink && _connectionState.value != ConnectionState.CONNECTED) {
                 _connectionState.value = ConnectionState.DISCONNECTED
+                accountId = null
             }
         }
     }
@@ -754,9 +770,40 @@ class SignalProtocol @Inject constructor(
     /** Routes Signal OkHttp/WebSocket (including [PushServiceSocket] registration) through Tor SOCKS. */
     private fun applySignalSocks(proxy: ProxyConfig) {
         val host = SocksEndpointResolver.resolveReachableHost(proxy.host, proxy.port)
-        SignalSocksHolder.set(Proxy(Proxy.Type.SOCKS, InetSocketAddress(host, proxy.port)))
+        SignalSocksHolder.set(
+            Proxy(Proxy.Type.SOCKS, InetSocketAddress(host, proxy.port)),
+            proxy.username,
+            proxy.password,
+        )
         Timber.i("Signal SOCKS enabled %s:%d", host, proxy.port)
         session?.applyNetworkProxyFromSocksHolder()
+    }
+
+    private suspend fun shutdownLiveSessionLocked() {
+        syncEngine?.stop()
+        syncEngine = null
+        session?.shutdown()
+        session = null
+        groupHelper = null
+    }
+
+    private suspend fun markOccupyFailure(targetAccountId: String, reason: String) {
+        val provisioned =
+            credentialStore.get(targetAccountId, SignalCredentialKeys.SESSION_READY) == "true" &&
+                !credentialStore.get(targetAccountId, SignalCredentialKeys.ACI).isNullOrBlank()
+        val roomState = if (provisioned) ConnectionState.ERROR else ConnectionState.DISCONNECTED
+        val existing = repository.observeAccounts().first().firstOrNull { it.id == targetAccountId }
+        repository.upsertAccount(
+            ltechnologies.onionphone.securemessenger.core.model.Account(
+                id = targetAccountId,
+                protocol = ProtocolId.SIGNAL,
+                displayName = existing?.displayName
+                    ?: credentialStore.getDisplayName(targetAccountId)
+                    ?: targetAccountId,
+                connectionState = roomState,
+            ),
+        )
+        Timber.w("Signal occupy failure for %s: %s", targetAccountId, reason)
     }
 
     override fun isAccountConnected(accountId: String): Boolean =
@@ -2178,25 +2225,50 @@ class SignalProtocol @Inject constructor(
 
     override suspend fun disconnect(accountId: String?) {
         withContext(signalDispatcher) {
-            if (accountId == null || accountId == this@SignalProtocol.accountId) {
-                syncEngine?.stop()
-                syncEngine = null
-                session?.shutdown()
-                session = null
-                groupHelper = null
-                registrationFlow = null
-                cancelDeviceLinkLocked()
-                pendingE164 = null
-                pendingPassword = null
-                pendingSessionId = null
-                pendingPreKeys = null
-                _pendingAuthStep.value = null
-                this@SignalProtocol.accountId = null
-                proxyConfig = null
-                SignalSocksHolder.clear()
-                _connectionState.value = ConnectionState.DISCONNECTED
-                SignalForegroundService.stop(context)
+            disconnectLocked(accountId)
+        }
+    }
+
+    private suspend fun disconnectLocked(accountId: String?) {
+        val closingId = this@SignalProtocol.accountId
+        if (accountId != null && accountId != closingId) return
+        syncEngine?.stop()
+        syncEngine = null
+        session?.shutdown()
+        session = null
+        groupHelper = null
+        registrationFlow = null
+        cancelDeviceLinkLocked()
+        pendingE164 = null
+        pendingPassword = null
+        pendingSessionId = null
+        pendingPreKeys = null
+        _pendingAuthStep.value = null
+        this@SignalProtocol.accountId = null
+        proxyConfig = null
+        SignalSocksHolder.clear()
+        _connectionState.value = ConnectionState.DISCONNECTED
+        SignalForegroundService.stop(context)
+        // Soft-disconnect: Room must not stay CONNECTED without a live session.
+        val id = closingId ?: accountId
+        if (id != null) {
+            val provisioned =
+                credentialStore.get(id, SignalCredentialKeys.SESSION_READY) == "true" &&
+                    !credentialStore.get(id, SignalCredentialKeys.ACI).isNullOrBlank()
+            val roomState = if (provisioned) {
+                ConnectionState.CONNECTING
+            } else {
+                ConnectionState.DISCONNECTED
             }
+            val existing = repository.observeAccounts().first().firstOrNull { it.id == id }
+            repository.upsertAccount(
+                ltechnologies.onionphone.securemessenger.core.model.Account(
+                    id = id,
+                    protocol = ProtocolId.SIGNAL,
+                    displayName = existing?.displayName ?: id,
+                    connectionState = roomState,
+                ),
+            )
         }
     }
 
@@ -2205,11 +2277,11 @@ class SignalProtocol @Inject constructor(
      * [forAccountId] matches (or is null) — canceling a failed second-login attempt
      * must not disconnect an already-connected Signal account.
      */
-    fun cancelRegistration(forAccountId: String? = null) {
-        ioScope.launch {
-            val live = accountId ?: return@launch
-            if (forAccountId != null && forAccountId != live) return@launch
-            disconnect(live)
+    suspend fun cancelRegistration(forAccountId: String? = null) {
+        withContext(signalDispatcher) {
+            val live = accountId ?: return@withContext
+            if (forAccountId != null && forAccountId != live) return@withContext
+            disconnectLocked(live)
         }
     }
 }

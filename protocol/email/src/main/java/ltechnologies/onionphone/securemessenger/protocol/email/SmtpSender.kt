@@ -33,15 +33,8 @@ class SmtpSender {
                 references = references,
                 attachments = attachments,
             )
-            if (!transport.isConnected) {
-                val host = session.smtpConnectHost
-                    ?: return SendResult.Failure("SMTP host unresolved via Tor")
-                transport.connect(
-                    host,
-                    session.config.smtpPort,
-                    session.config.email,
-                    session.config.password,
-                )
+            if (!session.smtpAuthenticated && !session.reconnectSmtp()) {
+                return SendResult.Failure("SMTP non connecté (réessayez ou vérifiez le serveur sortant)")
             }
             transport.sendMessage(mime, mime.allRecipients)
             val messageId = mime.messageID?.let { EmailThreading.normalizeMessageId(it) }

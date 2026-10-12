@@ -86,8 +86,13 @@ class TdLibFacade(private val client: TdLibClient) {
         client.send(TdApi.DisableProxy())
     }
 
-    suspend fun configureProxy(host: String, port: Int, username: String?, password: String?): Boolean =
-        suspendCancellableCoroutine { cont ->
+    /**
+     * Clears every TDLib proxy then adds [host]:[port] SOCKS5 and enables it.
+     * Stale proxies from a previous Tor bridge must not linger alongside the new one.
+     */
+    suspend fun configureProxy(host: String, port: Int, username: String?, password: String?): Boolean {
+        clearAllProxies()
+        return suspendCancellableCoroutine { cont ->
             client.send(
                 TdApi.AddProxy().apply {
                     proxy = TdApi.Proxy(
@@ -116,6 +121,27 @@ class TdLibFacade(private val client: TdLibClient) {
                 }
             }
         }
+    }
+
+    private suspend fun clearAllProxies() {
+        val listed = suspendCancellableCoroutine<Array<TdApi.AddedProxy>> { cont ->
+            client.send(TdApi.GetProxies()) { result ->
+                when (result) {
+                    is TdApi.AddedProxies -> {
+                        if (cont.isActive) cont.resume(result.proxies ?: emptyArray())
+                    }
+                    else -> if (cont.isActive) cont.resume(emptyArray())
+                }
+            }
+        }
+        for (proxy in listed) {
+            suspendCancellableCoroutine<Unit> { cont ->
+                client.send(TdApi.RemoveProxy(proxy.id)) {
+                    if (cont.isActive) cont.resume(Unit)
+                }
+            }
+        }
+    }
 
     @Deprecated(
         "Use suspend configureProxy() and await the result before TDLib auth steps",

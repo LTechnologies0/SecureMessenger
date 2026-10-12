@@ -257,8 +257,10 @@ internal object SignalRuntimeFactory {
                 runCatching { network.clearProxy() }
                 return
             }
+            val socksUser = SignalSocksHolder.getUsername().orEmpty()
+            val socksPass = SignalSocksHolder.getPassword().orEmpty()
             runCatching {
-                network.setProxy("socks5", host, port, "", "")
+                network.setProxy("socks5", host, port, socksUser, socksPass)
                 Timber.i("Signal Network SOCKS5 %s:%d", host, port)
             }.onFailure {
                 Timber.e(it, "Failed to set Signal Network SOCKS5")

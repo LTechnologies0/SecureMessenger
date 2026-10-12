@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.0.13
+
+### Connection / Tor restore (Phase 0)
+- **ConnectionManager**: restore on `null → healthy` SOCKS (unlock while Tor was down); pending auth requires matching `accountId`; post-Success Room stays `CONNECTED` when session live; register → Failure if post-register connect fails.
+- **Telegram / Signal Room honesty**: soft-disconnect writes `DISCONNECTED`/`CONNECTING` (not fake `CONNECTED`); wipe keeps provisioned secrets.
+- **FGS**: killswitch/restore uses `isNetworkAllowed()`; **UnifiedMessengerClient** aligns Tor rewrite with `resolveProxyOrFail`.
+- **Shell**: prefer last / first `CONNECTED` account; unread badge per rail account.
+
+### Email (Phase 2)
+- Local `storeAuthenticated` (Angus `Store.isConnected` NOOP removed); IDLE/poll after CONNECTED; SMTP via DoH IP; OkHttp DoH SOCKS remoteDns; peer address for replies; JMAP method errors → Failure.
+
+### Matrix (Phase 1)
+- Persist register `deviceId`; token paste + whoami; store token mismatch → wipe + soft-login; SSO cancel clears Room; skip `fetchFlows` with token; `sendText` failure when disconnected.
+
+### XMPP (Phase 3)
+- `smack-omemo-signal` + per-account store; OMEMO state machine; MAM/live carbons decrypt when READY; Tor media SOCKS auth; roster merge preserves preview/unread.
+
+### Signal (Phase 4) / IRC (Phase 5)
+- Link-and-sync cancel-safe; suspend cancel + await wipe; same-id reconnect shutdown; occupy → Room ERROR; SOCKS user/pass.
+- IRC: SOCKS5 auth pipeline; Success after SASL 903 / NickServ; auto-join after auth; case-fold; aggregate connection state.
+
+### Telegram polish (Phase 6)
+- Per-account pending-auth map; `AddProxy` clears prior proxies; TDLib DB key only from Keystore-backed credential store.
+
 ## 1.0.9
 
 ### Multi-account aggregation

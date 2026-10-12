@@ -100,6 +100,7 @@ smack-tcp = { group = "org.igniterealtime.smack", name = "smack-tcp", version.re
 smack-extensions = { group = "org.igniterealtime.smack", name = "smack-extensions", version.ref = "smack" }
 smack-im = { group = "org.igniterealtime.smack", name = "smack-im", version.ref = "smack" }
 smack-omemo = { group = "org.igniterealtime.smack", name = "smack-omemo", version.ref = "smack" }
+smack-omemo-signal = { group = "org.igniterealtime.smack", name = "smack-omemo-signal", version.ref = "smack" }
 smack-experimental = { group = "org.igniterealtime.smack", name = "smack-experimental", version.ref = "smack" }
 
 kitteh-irc = { group = "org.kitteh.irc", name = "client-lib", version.ref = "kitteh-irc" }

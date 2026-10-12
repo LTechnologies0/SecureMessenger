@@ -246,12 +246,39 @@ class JmapClient(
                     },
                 )
             }
-            postApi(s.apiUrl, call)
+            val result = postApi(s.apiUrl, call)
+            jmapBatchFailure(result)?.let { reason ->
+                return SendResult.Failure(reason)
+            }
             SendResult.Success("jmap-${System.currentTimeMillis()}")
         } catch (e: Exception) {
             Timber.w(e, "JMAP submit failed")
             SendResult.Failure(e.message ?: "JMAP submit failed")
         }
+    }
+
+    private fun jmapBatchFailure(result: JsonObject): String? {
+        val responses = result["methodResponses"]?.jsonArray ?: return null
+        for (el in responses) {
+            val arr = el.jsonArray
+            val name = arr.getOrNull(0)?.jsonPrimitive?.contentOrNull ?: continue
+            if (name.endsWith("/error", ignoreCase = true)) {
+                val detail = arr.getOrNull(1)?.jsonObject
+                val type = detail?.get("type")?.jsonPrimitive?.contentOrNull
+                val desc = detail?.get("description")?.jsonPrimitive?.contentOrNull
+                return listOfNotNull(type, desc).joinToString(": ").ifBlank { name }
+            }
+            val payload = arr.getOrNull(1)?.jsonObject ?: continue
+            listOf("notCreated", "notUpdated", "notDestroyed").forEach { key ->
+                val rejected = payload[key]?.jsonObject ?: return@forEach
+                if (rejected.isEmpty()) return@forEach
+                val first = rejected.entries.first().value.jsonObject
+                return first["description"]?.jsonPrimitive?.contentOrNull
+                    ?: first["type"]?.jsonPrimitive?.contentOrNull
+                    ?: "$name $key failed"
+            }
+        }
+        return null
     }
 
     private fun resolveRoles(state: JmapSessionState) {

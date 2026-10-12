@@ -162,14 +162,12 @@ class ConnectionManager @Inject constructor(
         val result = protocol.connect(credentials, proxy)
         if (result is ConnectionResult.Success) {
             val pending = protocol.pendingAuthStep()
-            // Only this account's pending step counts — a sibling Matrix SSO / TG SMS
-            // must not keep a fully-ready connect stuck on CONNECTING.
-            val pendingForThis = pending != null &&
-                (pending.accountId == null || pending.accountId == credentials.accountId)
+            // Require explicit accountId match — unscoped pending must not freeze this account.
+            val pendingForThis = pending != null && pending.accountId == credentials.accountId
             val state = when {
                 pendingForThis -> ConnectionState.CONNECTING
-                !protocol.isAccountConnected(credentials.accountId) -> ConnectionState.CONNECTING
-                else -> ConnectionState.CONNECTED
+                protocol.isAccountConnected(credentials.accountId) -> ConnectionState.CONNECTED
+                else -> ConnectionState.CONNECTING
             }
             repository.get().upsertAccount(
                 ltechnologies.onionphone.securemessenger.core.model.Account(
@@ -199,7 +197,12 @@ class ConnectionManager @Inject constructor(
             // Persist secrets/account row and establish the real authenticated session by
             // reusing the normal login path — the registration classes only create the account,
             // they don't keep a live connection around.
-            connect(result.credentials)
+            val connectResult = connect(result.credentials)
+            if (connectResult is ConnectionResult.Failure) {
+                return RegistrationResult.Failure(
+                    "Compte créé mais connexion échouée : ${connectResult.reason}",
+                )
+            }
         }
         return result
     }
@@ -254,8 +257,7 @@ class ConnectionManager @Inject constructor(
                 val pending = runCatching {
                     protocolRegistry.get(account.protocol)?.pendingAuthStep()
                 }.getOrNull()
-                val pendingForThis = pending != null &&
-                    (pending.accountId == null || pending.accountId == account.id)
+                val pendingForThis = pending != null && pending.accountId == account.id
                 if (pendingForThis) {
                     Timber.i("Keeping mid-auth account ${account.id} (${account.protocol})")
                     continue
@@ -263,9 +265,11 @@ class ConnectionManager @Inject constructor(
                 if (account.protocol == ProtocolId.TELEGRAM &&
                     account.connectionState != ConnectionState.CONNECTED
                 ) {
-                    // Live TDLib auth/session — do not wipe mid-SMS or mid-2FA on restore flaps.
-                    if (telegram?.hasLiveSession(account.id) == true) {
-                        Timber.i("Keeping in-flight Telegram login ${account.id}")
+                    // Keep if TDLib session is live OR provisioned secrets exist (soft-disconnect).
+                    if (telegram?.hasLiveSession(account.id) == true ||
+                        hasTelegramProvisionedSecrets(account.id)
+                    ) {
+                        Timber.i("Keeping Telegram account ${account.id} for restore")
                     } else {
                         Timber.i("Removing incomplete Telegram account ${account.id}")
                         credentialStore.removeAccount(account.id)
@@ -318,10 +322,9 @@ class ConnectionManager @Inject constructor(
 
                 val existing = cleanedRoomAccounts.firstOrNull { it.id == accountId }
                 val pending = runCatching { protocolRegistry.get(protocolId)?.pendingAuthStep() }.getOrNull()
-                val pendingForThis = pending != null &&
-                    (pending.accountId == null || pending.accountId == accountId)
+                val pendingForThis = pending != null && pending.accountId == accountId
                 if (pendingForThis) {
-                    Timber.i("Skip restore delete for $accountId — pendingAuthStep")
+                    Timber.i("Skip restore for $accountId — pendingAuthStep")
                     return
                 }
                 if (!proxyManager.isNetworkAllowed()) {
@@ -332,11 +335,12 @@ class ConnectionManager @Inject constructor(
                     val liveTg = (protocolRegistry.get(ProtocolId.TELEGRAM)
                         as? ltechnologies.onionphone.securemessenger.protocol.telegram.TelegramProtocol)
                         ?.hasLiveSession(accountId) == true
-                    if (liveTg) {
+                    if (liveTg || hasTelegramProvisionedSecrets(accountId)) {
+                        // Soft-disconnected or mid-auth with secrets — reconnect below.
+                    } else {
+                        credentialStore.removeAccount(accountId)
                         return
                     }
-                    credentialStore.removeAccount(accountId)
-                    return
                 }
                 if (protocolId == ProtocolId.SIGNAL && existing?.connectionState != ConnectionState.CONNECTED) {
                     if (!isSignalProvisioned(accountId)) {
@@ -384,6 +388,7 @@ class ConnectionManager @Inject constructor(
     }
 
     suspend fun cancelSignalLogin(accountId: String) {
+        awaitBootstrap()
         (protocolRegistry.get(ProtocolId.SIGNAL) as? SignalProtocol)
             ?.cancelRegistration(forAccountId = accountId)
         credentialStore.removeAccount(accountId)
@@ -465,7 +470,8 @@ class ConnectionManager @Inject constructor(
 
         when {
             !healthy -> disconnectIfStillUnhealthy()
-            wasHealthy == false && healthy -> restorePersistedAccounts()
+            // null→true: unlock skipped restore while SOCKS was down; first healthy must restore.
+            (wasHealthy == null || wasHealthy == false) && healthy -> restorePersistedAccounts()
             previousConfig != null && isMeaningfulConfigChange(previousConfig, config) -> {
                 Timber.i("Proxy config changed — reconnecting through ${config.host}:${config.port}")
                 disconnectAll()
@@ -543,5 +549,14 @@ class ConnectionManager @Inject constructor(
     private fun isSignalProvisioned(accountId: String): Boolean {
         val secrets = credentialStore.getAllForAccount(accountId)
         return secrets["sessionReady"] == "true" && !secrets["aci"].isNullOrBlank()
+    }
+
+    /** TDLib directory / phone secrets mean a soft-disconnected account is restorable. */
+    private fun hasTelegramProvisionedSecrets(accountId: String): Boolean {
+        val secrets = credentialStore.getAllForAccount(accountId)
+            .filterKeys { !it.startsWith("__") }
+        if (secrets.isEmpty()) return false
+        // Any non-meta secret (api / phone / db key material) means we should restore, not wipe.
+        return secrets.keys.any { it != "displayName" }
     }
 }

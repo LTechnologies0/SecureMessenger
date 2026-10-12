@@ -2,6 +2,7 @@ package ltechnologies.onionphone.securemessenger.protocol.matrix
 
 import io.ktor.client.call.body
 import io.ktor.client.request.get
+import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
 import io.ktor.http.ContentType
@@ -42,6 +43,40 @@ internal object MatrixLoginFlows {
         @SerialName("user_id") val userId: String,
         @SerialName("device_id") val deviceId: String? = null,
     )
+
+    @Serializable
+    data class WhoamiResponse(
+        @SerialName("user_id") val userId: String,
+        @SerialName("device_id") val deviceId: String? = null,
+    )
+
+    suspend fun whoami(
+        apiBaseUrl: String,
+        accessToken: String,
+        proxy: ProxyConfig,
+    ): Result<WhoamiResponse> {
+        val client = MatrixHttpClientFactory.create(proxy)
+        return try {
+            val response = client.get("${apiBaseUrl.trimEnd('/')}/_matrix/client/v3/account/whoami") {
+                header("Authorization", "Bearer $accessToken")
+            }
+            if (!response.status.isSuccess()) {
+                val err = runCatching { response.body<MatrixHttpError>() }.getOrNull()
+                return Result.failure(
+                    IllegalStateException(
+                        "Matrix whoami HTTP ${response.status.value}" +
+                            (err?.errcode?.let { ": $it" } ?: "") +
+                            (err?.error?.let { " — $it" } ?: ""),
+                    ),
+                )
+            }
+            Result.success(response.body())
+        } catch (e: Exception) {
+            Result.failure(e)
+        } finally {
+            client.close()
+        }
+    }
 
     suspend fun fetchFlows(apiBaseUrl: String, proxy: ProxyConfig): Result<List<String>> {
         val client = MatrixHttpClientFactory.create(proxy)

@@ -1,9 +1,11 @@
 package ltechnologies.onionphone.securemessenger.protocol.xmpp
 
+import java.net.HttpURLConnection
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Proxy
 import java.net.Socket
+import java.net.URL
 import java.util.UUID
 import javax.net.SocketFactory
 import org.jivesoftware.smack.ConnectionConfiguration
@@ -83,3 +85,37 @@ internal fun smackSocksProxyInfo(socksHost: String, socksPort: Int, username: St
         username ?: isolatedSocksUser(),
         password ?: "x",
     )
+
+/**
+ * HTTP(S) through Smack's SOCKS endpoint with explicit user/pass (JDK [Proxy] auth, not [ProxyInfo.toJavaProxy] alone).
+ */
+internal fun openTorHttpConnection(url: URL, proxyInfo: ProxyInfo): HttpURLConnection {
+    val proxy = Proxy(
+        Proxy.Type.SOCKS,
+        InetSocketAddress.createUnresolved(proxyInfo.proxyAddress, proxyInfo.proxyPort),
+    )
+    val user = proxyInfo.proxyUsername
+    val pass = proxyInfo.proxyPassword
+    val priorUser = System.getProperty("java.net.socks.username")
+    val priorPass = System.getProperty("java.net.socks.password")
+    if (!user.isNullOrBlank()) {
+        System.setProperty("java.net.socks.username", user)
+        System.setProperty("java.net.socks.password", pass ?: "")
+    }
+    return try {
+        url.openConnection(proxy) as HttpURLConnection
+    } finally {
+        if (!user.isNullOrBlank()) {
+            if (priorUser != null) {
+                System.setProperty("java.net.socks.username", priorUser)
+            } else {
+                System.clearProperty("java.net.socks.username")
+            }
+            if (priorPass != null) {
+                System.setProperty("java.net.socks.password", priorPass)
+            } else {
+                System.clearProperty("java.net.socks.password")
+            }
+        }
+    }
+}

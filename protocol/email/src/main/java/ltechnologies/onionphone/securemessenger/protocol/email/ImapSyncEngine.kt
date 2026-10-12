@@ -43,6 +43,7 @@ class ImapSyncEngine(
                     idleOnceUnlocked(session)
                     backoffMs = 2_000L
                 } catch (e: Exception) {
+                    session.invalidateStoreAuth()
                     Timber.w(e, "IMAP sync/IDLE interrupted")
                     delay(backoffMs)
                     backoffMs = min(backoffMs * 2, 60_000L)
@@ -136,12 +137,13 @@ class ImapSyncEngine(
         val bumpUnread = !alreadyPersisted &&
             message.direction ==
             ltechnologies.onionphone.securemessenger.core.model.MessageDirection.INCOMING
+        val peer = MimeMapper.peerAddress(parsed, session.config.email)
         repository.upsertConversation(
             Conversation(
                 id = conversationId,
                 protocol = ProtocolId.EMAIL,
                 accountId = session.accountId,
-                remoteId = parsed.rootMessageId,
+                remoteId = peer,
                 title = parsed.subject,
                 lastMessagePreview = parsed.body.take(160),
                 lastMessageAt = parsed.timestamp,

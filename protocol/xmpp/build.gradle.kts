@@ -53,6 +53,11 @@ dependencies {
         exclude(group = "xpp3", module = "xpp3")
         exclude(group = "xpp3", module = "xpp3_min")
     }
+    implementation(libs.smack.omemo.signal) {
+        exclude(group = "xpp3", module = "xpp3")
+        exclude(group = "xpp3", module = "xpp3_min")
+    }
+    implementation(libs.libsignal.android)
     implementation(libs.smack.experimental) {
         exclude(group = "xpp3", module = "xpp3")
         exclude(group = "xpp3", module = "xpp3_min")

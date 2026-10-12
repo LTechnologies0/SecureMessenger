@@ -131,7 +131,13 @@ fun AccountsScreen(
                 onDismiss = {
                     matrixSsoStep = null
                     statusMessage = "SSO Matrix annulé"
-                    viewModel.cancelMatrixSso(pendingConnectAccountId)
+                    val abandonedId = pendingConnectAccountId
+                    pendingConnectAccountId = null
+                    if (abandonedId != null) {
+                        viewModel.disconnectAccount(abandonedId)
+                    } else {
+                        viewModel.cancelMatrixSso()
+                    }
                 },
                 onLoginToken = { loginToken ->
                     matrixSsoStep = null
@@ -256,6 +262,12 @@ fun AccountsScreen(
                         modifier = Modifier.fillMaxWidth(),
                         visualTransformation = PasswordVisualTransformation(),
                     )
+                    OutlinedTextField(
+                        field4,
+                        { field4 = it },
+                        label = { Text("Device ID (optionnel avec access token)") },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
                 }
                 ProtocolId.IRC -> {
                     OutlinedTextField(field1, { field1 = it }, label = { Text("Serveur (ex. irc.libera.chat)") }, modifier = Modifier.fillMaxWidth())
@@ -336,7 +348,10 @@ fun AccountsScreen(
                                 put("userId", field2.trim())
                                 when {
                                     secret.isBlank() -> Unit // SSO path
-                                    secret.startsWith("syt_") -> put("accessToken", secret)
+                                    secret.startsWith("syt_") -> {
+                                        put("accessToken", secret)
+                                        field4.trim().takeIf { it.isNotEmpty() }?.let { put("deviceId", it) }
+                                    }
                                     else -> put("password", field3)
                                 }
                             }

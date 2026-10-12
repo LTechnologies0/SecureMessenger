@@ -46,11 +46,14 @@ import org.kitteh.irc.client.library.event.channel.ChannelNoticeEvent
 import org.kitteh.irc.client.library.event.channel.ChannelPartEvent
 import org.kitteh.irc.client.library.event.channel.ChannelTopicEvent
 import org.kitteh.irc.client.library.event.client.ClientNegotiationCompleteEvent
+import org.kitteh.irc.client.library.event.client.ClientReceiveNumericEvent
 import org.kitteh.irc.client.library.event.connection.ClientConnectionClosedEvent
 import org.kitteh.irc.client.library.event.user.PrivateMessageEvent
 import org.kitteh.irc.client.library.event.user.PrivateNoticeEvent
+import org.kitteh.irc.client.library.event.user.UserNickChangeEvent
 import org.kitteh.irc.client.library.feature.auth.NickServ
 import org.kitteh.irc.client.library.feature.auth.SaslPlain
+import org.kitteh.irc.client.library.feature.filter.NumericFilter
 import org.kitteh.irc.client.library.feature.network.ProxyType
 import timber.log.Timber
 
@@ -96,7 +99,6 @@ class IrcProtocol @Inject constructor(
         withContext(Dispatchers.IO) {
             try {
                 networkGuard.assertNetworkAllowed()
-                _connectionState.value = ConnectionState.CONNECTING
 
                 val host = account.secrets["host"]?.trim().orEmpty()
                 val nick = account.secrets["nick"]?.trim().orEmpty()
@@ -125,12 +127,17 @@ class IrcProtocol @Inject constructor(
                 val sasl = account.secrets["sasl"]?.equals("true", ignoreCase = true) == true ||
                     account.secrets.containsKey("saslPassword")
                 val channels = IrcTargets.parseChannels(account.secrets["channels"])
+                val authGate = when {
+                    authPassword.isNullOrBlank() -> IrcAuthGate.NONE
+                    sasl -> IrcAuthGate.SASL
+                    else -> IrcAuthGate.NICKSERV
+                }
 
                 sessions.remove(account.accountId)?.shutdown()
 
                 val ready = CompletableDeferred<Unit>()
                 val fail = CompletableDeferred<Exception>()
-                val listener = IrcEventListener(account.accountId, ready, fail)
+                val listener = IrcEventListener(account.accountId, authGate, ready, fail)
 
                 val builder = Client.builder()
                     .name("SecureMessenger-${account.accountId.take(8)}")
@@ -167,18 +174,18 @@ class IrcProtocol @Inject constructor(
                     .proxyPort(proxy.port)
                     .proxyType(ProxyType.SOCKS_5)
                     .then()
+
+                val torNetwork = IrcTorNetworkHandler.create(proxy)
+                torNetwork.setResolver(IrcTorBlockingResolver)
+                builder.management()
+                    .networkHandler(torNetwork)
+                    .then()
+
                 // Fail-closed: Kitteh must not resolve IRC host via local DNS under Tor.
                 val resolverMethod = builder.javaClass.methods.firstOrNull {
                     it.name == "resolver" && it.parameterCount == 1
                 } ?: error("Kitteh resolver hook missing — refuse local DNS")
-                val paramType = resolverMethod.parameterTypes[0]
-                val throwingResolver = java.lang.reflect.Proxy.newProxyInstance(
-                    paramType.classLoader ?: builder.javaClass.classLoader,
-                    arrayOf(paramType),
-                ) { _, _, _ ->
-                    throw java.net.UnknownHostException("Tor required: DNS via SOCKS only")
-                }
-                resolverMethod.invoke(builder, throwingResolver)
+                resolverMethod.invoke(builder, IrcTorBlockingResolver)
 
                 val client = builder.build()
                 client.eventManager.registerEventListener(listener)
@@ -199,13 +206,14 @@ class IrcProtocol @Inject constructor(
                 val session = IrcSession(
                     accountId = account.accountId,
                     displayName = account.displayName.ifBlank { nick },
-                    nick = nick,
+                    requestedNick = nick,
                     client = client,
                     listener = listener,
                     autoJoin = channels,
                 )
                 sessions[account.accountId] = session
                 listener.bind(session)
+                refreshConnectionState()
 
                 client.connect()
 
@@ -233,10 +241,8 @@ class IrcProtocol @Inject constructor(
                 }
 
                 session.connected = true
-                channels.forEach { ch ->
-                    runCatching { client.addChannel(ch) }
-                        .onFailure { Timber.w(it, "IRC auto-join failed for %s", ch) }
-                }
+                session.syncEffectiveNick()
+                session.autoJoinChannels()
 
                 repository.upsertAccount(
                     Account(
@@ -246,7 +252,7 @@ class IrcProtocol @Inject constructor(
                         connectionState = ConnectionState.CONNECTED,
                     ),
                 )
-                _connectionState.value = ConnectionState.CONNECTED
+                refreshConnectionState()
                 ConnectionResult.Success
             } catch (e: Exception) {
                 Timber.w(e, "IRC connect failed")
@@ -285,7 +291,7 @@ class IrcProtocol @Inject constructor(
             session.client.channels.forEach { channel ->
                 channel.users.forEach { user ->
                     val nick = user.nick
-                    if (nick.equals(session.nick, ignoreCase = true)) return@forEach
+                    if (session.isSelfNick(nick)) return@forEach
                     contacts += Contact(
                         id = "${accountId}_$nick",
                         protocol = ProtocolId.IRC,
@@ -296,7 +302,7 @@ class IrcProtocol @Inject constructor(
                     )
                 }
             }
-            val distinct = contacts.distinctBy { it.remoteId.lowercase() }
+            val distinct = contacts.distinctBy { IrcTargets.foldNick(it.remoteId) }
             repository.replaceContacts(accountId, distinct)
             Result.success(distinct.size)
         }
@@ -307,7 +313,7 @@ class IrcProtocol @Inject constructor(
             accountId = accountId,
             protocol = ProtocolId.IRC,
             displayName = session.displayName,
-            handle = session.client.nick,
+            handle = session.effectiveNick,
         )
     }
 
@@ -335,8 +341,8 @@ class IrcProtocol @Inject constructor(
 
             val channelish = asGroup || IrcTargets.isChannel(target)
             val remote = when {
-                channelish && !IrcTargets.isChannel(target) -> "#$target"
-                else -> target
+                channelish -> IrcTargets.canonicalChannel(target)
+                else -> IrcTargets.foldNick(target)
             }
 
             if (channelish) {
@@ -374,7 +380,7 @@ class IrcProtocol @Inject constructor(
                 val accId = accountId ?: IrcTargets.accountIdFromConversation(conversationId)
                 val session = sessions[accId]
                     ?: return@withContext SendResult.Failure("Account not connected")
-                val remote = IrcTargets.remoteFromConversation(conversationId)
+                val remote = IrcTargets.canonicalRemote(IrcTargets.remoteFromConversation(conversationId))
                 val text = body.value
                 if (text.isBlank()) return@withContext SendResult.Failure("Empty message")
 
@@ -391,7 +397,7 @@ class IrcProtocol @Inject constructor(
                         timestamp = now,
                         direction = MessageDirection.OUTGOING,
                         deliveryState = DeliveryState.SENT,
-                        senderDisplayName = session.client.nick,
+                        senderDisplayName = session.effectiveNick,
                         kind = MessageKind.TEXT,
                     ),
                 )
@@ -468,11 +474,7 @@ class IrcProtocol @Inject constructor(
                     )
                 }
             }
-            if (sessions.isEmpty()) {
-                _connectionState.value = ConnectionState.DISCONNECTED
-            } else if (sessions.values.any { it.connected }) {
-                _connectionState.value = ConnectionState.CONNECTED
-            }
+            refreshConnectionState()
         }
     }
 
@@ -494,6 +496,12 @@ class IrcProtocol @Inject constructor(
         }
     }
 
+    private enum class IrcAuthGate {
+        NONE,
+        SASL,
+        NICKSERV,
+    }
+
     private suspend fun touchConversation(
         accountId: String,
         remote: String,
@@ -501,7 +509,8 @@ class IrcProtocol @Inject constructor(
         at: Long,
         unreadBump: Boolean = false,
     ) {
-        val convId = IrcTargets.conversationId(accountId, remote)
+        val canonical = IrcTargets.canonicalRemote(remote)
+        val convId = IrcTargets.conversationId(accountId, canonical)
         val existing = repository.listConversationsForAccount(accountId)
             .firstOrNull { it.id == convId }
         repository.upsertConversation(
@@ -509,8 +518,8 @@ class IrcProtocol @Inject constructor(
                 id = convId,
                 protocol = ProtocolId.IRC,
                 accountId = accountId,
-                remoteId = remote,
-                title = existing?.title ?: remote,
+                remoteId = canonical,
+                title = existing?.title ?: canonical,
                 lastMessagePreview = preview.take(160),
                 lastMessageAt = at,
                 unreadCount = if (unreadBump) (existing?.unreadCount ?: 0) + 1 else (existing?.unreadCount ?: 0),
@@ -545,6 +554,7 @@ class IrcProtocol @Inject constructor(
 
     private inner class IrcEventListener(
         private val accountId: String,
+        private val authGate: IrcAuthGate,
         private val ready: CompletableDeferred<Unit>,
         private val fail: CompletableDeferred<Exception>,
     ) {
@@ -555,10 +565,56 @@ class IrcProtocol @Inject constructor(
             session = s
         }
 
+        private fun markReady(source: String) {
+            if (!ready.complete(Unit)) return
+            session?.syncEffectiveNick()
+            Timber.i("IRC ready (%s) for %s", source, accountId)
+        }
+
+        private fun markAuthFailure(reason: String) {
+            if (ready.isCompleted) return
+            fail.complete(IllegalStateException(reason))
+        }
+
         @Handler
         fun onReady(event: ClientNegotiationCompleteEvent) {
-            ready.complete(Unit)
+            session?.syncEffectiveNick()
             Timber.i("IRC negotiated with %s", event.server.name)
+            if (authGate == IrcAuthGate.NONE) {
+                markReady("registration")
+            }
+        }
+
+        @Handler
+        @NumericFilter(903)
+        fun onSaslSuccess(event: ClientReceiveNumericEvent) {
+            if (authGate != IrcAuthGate.SASL) return
+            markReady("SASL 903")
+        }
+
+        @Handler
+        fun onSaslFailure(event: ClientReceiveNumericEvent) {
+            if (authGate != IrcAuthGate.SASL || ready.isCompleted) return
+            when (event.numeric) {
+                904, 905, 906, 907, 908 ->
+                    markAuthFailure("SASL authentication failed (${event.numeric})")
+            }
+        }
+
+        private fun isNickServSuccess(notice: PrivateNoticeEvent): Boolean {
+            val from = notice.actor.nick
+            if (!from.equals("NickServ", ignoreCase = true)) return false
+            return notice.message.startsWith("You are now identified", ignoreCase = true)
+        }
+
+        private fun isNickServFailure(notice: PrivateNoticeEvent): Boolean {
+            val from = notice.actor.nick
+            if (!from.equals("NickServ", ignoreCase = true)) return false
+            val msg = notice.message.lowercase()
+            return msg.contains("invalid password") ||
+                msg.contains("authentication failed") ||
+                msg.contains("isn't registered") ||
+                msg.contains("is not registered")
         }
 
         @Handler
@@ -588,22 +644,33 @@ class IrcProtocol @Inject constructor(
         }
 
         @Handler
+        fun onNickChange(event: UserNickChangeEvent) {
+            val s = session ?: return
+            if (s.isSelfNick(event.oldUser.nick)) {
+                s.effectiveNick = event.newUser.nick
+            }
+        }
+
+        @Handler
         fun onChannelMessage(event: ChannelMessageEvent) {
             val nick = event.actor.nick
-            val myNick = session?.client?.nick
-            if (myNick != null && nick.equals(myNick, ignoreCase = true)) return
+            if (session?.isSelfNick(nick) == true) return
             scope.launch {
-                persistIncoming(accountId, event.channel.messagingName, event.message, nick)
+                persistIncoming(
+                    accountId,
+                    IrcTargets.canonicalChannel(event.channel.messagingName),
+                    event.message,
+                    nick,
+                )
             }
         }
 
         @Handler
         fun onPrivateMessage(event: PrivateMessageEvent) {
             val nick = event.actor.nick
-            val myNick = session?.client?.nick
-            if (myNick != null && nick.equals(myNick, ignoreCase = true)) return
+            if (session?.isSelfNick(nick) == true) return
             scope.launch {
-                persistIncoming(accountId, nick, event.message, nick)
+                persistIncoming(accountId, IrcTargets.foldNick(nick), event.message, nick)
             }
         }
 
@@ -612,7 +679,7 @@ class IrcProtocol @Inject constructor(
             scope.launch {
                 persistIncoming(
                     accountId,
-                    event.channel.messagingName,
+                    IrcTargets.canonicalChannel(event.channel.messagingName),
                     "NOTICE ${event.actor.nick}: ${event.message}",
                     event.actor.nick,
                     MessageKind.SYSTEM,
@@ -623,11 +690,17 @@ class IrcProtocol @Inject constructor(
         @Handler
         fun onPrivateNotice(event: PrivateNoticeEvent) {
             val from = event.actor.nick
+            if (authGate == IrcAuthGate.NICKSERV && !ready.isCompleted) {
+                when {
+                    isNickServSuccess(event) -> markReady("NickServ")
+                    isNickServFailure(event) -> markAuthFailure("NickServ authentication failed")
+                }
+            }
             // NickServ chatter stays as a notice DM rather than flooding system channels.
             scope.launch {
                 persistIncoming(
                     accountId,
-                    from,
+                    IrcTargets.foldNick(from),
                     "NOTICE: ${event.message}",
                     from,
                     MessageKind.SYSTEM,
@@ -638,10 +711,9 @@ class IrcProtocol @Inject constructor(
         @Handler
         fun onJoin(event: ChannelJoinEvent) {
             val nick = event.user.nick
-            val myNick = session?.client?.nick
-            val channel = event.channel.messagingName
+            val channel = IrcTargets.canonicalChannel(event.channel.messagingName)
             scope.launch {
-                if (myNick != null && nick.equals(myNick, ignoreCase = true)) {
+                if (session?.isSelfNick(nick) == true) {
                     repository.upsertConversation(
                         Conversation(
                             id = IrcTargets.conversationId(accountId, channel),
@@ -670,7 +742,7 @@ class IrcProtocol @Inject constructor(
             scope.launch {
                 persistIncoming(
                     accountId,
-                    event.channel.messagingName,
+                    IrcTargets.canonicalChannel(event.channel.messagingName),
                     "* ${event.user.nick} a quitté ${event.channel.messagingName}$reason",
                     event.user.nick,
                     MessageKind.SYSTEM,
@@ -687,7 +759,7 @@ class IrcProtocol @Inject constructor(
             scope.launch {
                 persistIncoming(
                     accountId,
-                    event.channel.messagingName,
+                    IrcTargets.canonicalChannel(event.channel.messagingName),
                     "* ${event.target.nick} a été kické de ${event.channel.messagingName} par $kicker$reason",
                     kicker,
                     MessageKind.SYSTEM,
@@ -702,7 +774,7 @@ class IrcProtocol @Inject constructor(
             scope.launch {
                 persistIncoming(
                     accountId,
-                    event.channel.messagingName,
+                    IrcTargets.canonicalChannel(event.channel.messagingName),
                     "Topic: $topic",
                     event.newTopic.setter.map { it.name }.orElse(null),
                     MessageKind.SYSTEM,
@@ -714,12 +786,29 @@ class IrcProtocol @Inject constructor(
     private class IrcSession(
         val accountId: String,
         val displayName: String,
-        val nick: String,
+        val requestedNick: String,
         val client: Client,
         val listener: IrcEventListener,
         val autoJoin: List<String>,
+        @Volatile var effectiveNick: String = requestedNick,
         @Volatile var connected: Boolean = false,
     ) {
+        fun syncEffectiveNick() {
+            val live = client.nick?.takeIf { it.isNotBlank() }
+            if (live != null) {
+                effectiveNick = live
+            }
+        }
+
+        fun isSelfNick(other: String): Boolean = IrcTargets.sameNick(other, effectiveNick)
+
+        fun autoJoinChannels() {
+            autoJoin.forEach { ch ->
+                runCatching { client.addChannel(ch) }
+                    .onFailure { Timber.w(it, "IRC auto-join failed for %s", ch) }
+            }
+        }
+
         fun shutdown() {
             connected = false
             runCatching { client.eventManager.unregisterEventListener(listener) }

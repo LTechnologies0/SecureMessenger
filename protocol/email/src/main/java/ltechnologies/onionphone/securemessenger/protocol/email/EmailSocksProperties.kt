@@ -80,7 +80,7 @@ object EmailSocksProperties {
         httpFactory: ProxiedHttpClientFactory?,
     ): String {
         if (!proxy.torRequired || !proxy.remoteDns || httpFactory == null) return hostname
-        val ip = EmailTorDns.resolveIpv4(hostname, httpFactory)
+        val ip = EmailTorDns.resolveIpv4(hostname, httpFactory, proxy)
         if (ip == null) {
             Timber.w("Tor DoH failed for %s — refusing local DNS under remoteDns", hostname)
             error(

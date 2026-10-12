@@ -18,15 +18,36 @@ class TelegramAuthOrderTest {
         facade.setParameters("/tmp/tdlib", 12345, "test-hash", ByteArray(32))
         assertTrue(facade.configureProxy("127.0.0.1", 9050, null, null))
 
-        assertEquals(listOf("SetTdlibParameters", "AddProxy"), callOrder)
+        assertEquals(listOf("SetTdlibParameters", "GetProxies", "AddProxy"), callOrder)
     }
 
     @Test
-    fun configureProxy_doesNotDisableProxyOnNominalPath() = runBlocking {
+    fun configureProxy_clearsExistingProxiesBeforeAdd() = runBlocking {
         val requests = mutableListOf<String>()
         val mockClient = object : TdLibClient {
             override fun send(request: TdApi.Function<*>, handler: (TdApi.Object?) -> Unit) {
                 when (request) {
+                    is TdApi.GetProxies -> {
+                        requests.add("GetProxies")
+                        handler(
+                            TdApi.AddedProxies(
+                                arrayOf(
+                                    TdApi.AddedProxy().apply {
+                                        id = 7
+                                        proxy = TdApi.Proxy(
+                                            "127.0.0.1",
+                                            9050,
+                                            TdApi.ProxyTypeSocks5("", ""),
+                                        )
+                                    },
+                                ),
+                            ),
+                        )
+                    }
+                    is TdApi.RemoveProxy -> {
+                        requests.add("RemoveProxy:${request.proxyId}")
+                        handler(TdApi.Ok())
+                    }
                     is TdApi.DisableProxy -> requests.add("DisableProxy")
                     is TdApi.AddProxy -> {
                         requests.add("AddProxy")
@@ -47,9 +68,9 @@ class TelegramAuthOrderTest {
         }
 
         val facade = TdLibFacade(mockClient)
-        assertTrue(facade.configureProxy("127.0.0.1", 9050, null, null))
+        assertTrue(facade.configureProxy("127.0.0.1", 18202, null, null))
         assertFalse(requests.contains("DisableProxy"))
-        assertEquals(listOf("AddProxy"), requests)
+        assertEquals(listOf("GetProxies", "RemoveProxy:7", "AddProxy"), requests)
     }
 
     @Test
@@ -77,6 +98,14 @@ class TelegramAuthOrderTest {
         object : TdLibClient {
             override fun send(request: TdApi.Function<*>, handler: (TdApi.Object?) -> Unit) {
                 when (request) {
+                    is TdApi.GetProxies -> {
+                        callOrder.add("GetProxies")
+                        handler(TdApi.AddedProxies(emptyArray()))
+                    }
+                    is TdApi.RemoveProxy -> {
+                        callOrder.add("RemoveProxy")
+                        handler(TdApi.Ok())
+                    }
                     is TdApi.AddProxy -> {
                         callOrder.add("AddProxy")
                         handler(

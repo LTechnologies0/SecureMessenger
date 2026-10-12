@@ -42,6 +42,7 @@ import org.jivesoftware.smackx.mam.MamManager
 import org.jivesoftware.smackx.muc.MultiUserChat
 import org.jivesoftware.smackx.muc.MultiUserChatManager
 import org.jivesoftware.smackx.omemo.OmemoManager
+import org.jivesoftware.smackx.omemo.listener.OmemoMessageListener
 import org.jivesoftware.smackx.ping.PingManager
 import org.jivesoftware.smackx.receipts.DeliveryReceiptManager
 import org.jivesoftware.smackx.receipts.DeliveryReceiptRequest
@@ -121,14 +122,55 @@ class SmackClientFacade(
     var omemoHelper: OmemoHelper? = null
         private set
 
+    private var omemoLiveListener: OmemoMessageListener? = null
+
+    /**
+     * Delivers decrypted OMEMO chat bodies (including XEP-0280 carbons). Plaintext stanzas use
+     * [ChatManager] listeners instead.
+     */
+    fun setOmemoLiveHandler(
+        handler: (remoteJid: String, body: String, stanza: SmackMessage, outgoing: Boolean) -> Unit,
+    ) {
+        val omemo = omemoManager ?: return
+        omemoLiveListener?.let { omemo.removeOmemoMessageListener(it) }
+        val listener = object : OmemoMessageListener {
+            override fun onOmemoMessageReceived(
+                stanza: org.jivesoftware.smack.packet.Stanza,
+                received: org.jivesoftware.smackx.omemo.OmemoMessage.Received,
+            ) {
+                val body = received.body ?: return
+                val remote = stanza.from?.asBareJid()?.toString() ?: return
+                handler(remote, body, stanza as SmackMessage, false)
+            }
+
+            override fun onOmemoCarbonCopyReceived(
+                direction: CarbonExtension.Direction,
+                carbonCopy: SmackMessage,
+                wrappingMessage: SmackMessage,
+                received: org.jivesoftware.smackx.omemo.OmemoMessage.Received,
+            ) {
+                val body = received.body ?: return
+                val remote = carbonCopy.to?.asBareJid()?.toString()
+                    ?: carbonCopy.from?.asBareJid()?.toString()
+                    ?: return
+                val outgoing = direction == CarbonExtension.Direction.sent
+                handler(remote, body, carbonCopy, outgoing)
+            }
+        }
+        omemo.addOmemoMessageListener(listener)
+        omemoLiveListener = listener
+    }
+
     @Throws(SmackException::class, Exception::class)
     suspend fun connect(
+        accountId: String,
         jid: String,
         password: String,
         server: String?,
         proxy: ProxyConfig,
     ): XMPPTCPConnection = withContext(Dispatchers.IO) {
         XmppInitializer.ensureInitialized(context)
+        val omemoServiceReady = XmppInitializer.ensureOmemoSignalStore(context, accountId)
 
         val bareJid = JidCreate.entityBareFrom(jid.trim())
         val serverHost = server?.takeIf { it.isNotBlank() } ?: bareJid.domain.toString()
@@ -191,17 +233,20 @@ class SmackClientFacade(
         } catch (_: Exception) {
         }
 
-        try {
-            val omemo = OmemoManager.getInstanceFor(conn)
-            omemoHelper = OmemoHelper(omemo, conn)
-            val published = omemoHelper?.initialize() == true
-            if (!published) {
-                // Keep helper (Conversations keeps AxolotlService) — encrypt stays blocked
-                // until device list publish succeeds; plaintext only for peers that advertise none.
-                Timber.w("OMEMO device list not published yet — encrypt blocked until retry")
+        if (omemoServiceReady) {
+            try {
+                val omemo = OmemoManager.getInstanceFor(conn)
+                omemoHelper = OmemoHelper(omemo, conn)
+                val published = omemoHelper?.initialize() == true
+                if (!published) {
+                    Timber.w("OMEMO device list not published — encrypt blocked until retry")
+                }
+            } catch (e: Exception) {
+                Timber.w(e, "OMEMO init failed — helper discarded")
+                omemoHelper = null
             }
-        } catch (e: Exception) {
-            Timber.w(e, "OMEMO init failed — encrypt blocked; helper discarded")
+        } else {
+            Timber.w("OMEMO Signal service setup failed — E2EE disabled for this session")
             omemoHelper = null
         }
 
@@ -430,7 +475,7 @@ class SmackClientFacade(
         val proxyInfo = (conn as? AbstractXMPPConnection)?.configuration?.proxyInfo
         val urlConnection = (
             if (proxyInfo != null) {
-                putUrl.openConnection(proxyInfo.toJavaProxy())
+                openTorHttpConnection(putUrl, proxyInfo)
             } else {
                 putUrl.openConnection()
             }
@@ -468,6 +513,10 @@ class SmackClientFacade(
     fun disconnect() {
         mucMessageListeners.clear()
         joinedMucs.clear()
+        omemoLiveListener?.let { listener ->
+            runCatching { omemoManager?.removeOmemoMessageListener(listener) }
+        }
+        omemoLiveListener = null
         try {
             connection?.disconnect()
         } catch (_: Exception) {
@@ -487,7 +536,7 @@ class SmackClientFacade(
         val proxyInfo = (conn as? AbstractXMPPConnection)?.configuration?.proxyInfo
         val urlConnection = (
             if (proxyInfo != null) {
-                parsed.fetchUrl.openConnection(proxyInfo.toJavaProxy())
+                openTorHttpConnection(parsed.fetchUrl, proxyInfo)
             } else {
                 parsed.fetchUrl.openConnection()
             }

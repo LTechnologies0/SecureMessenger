@@ -307,15 +307,45 @@ class MatrixProtocol @Inject constructor(
                     refreshConnectionState(preferErrorIfEmpty = true)
                 }
 
-                val flows = MatrixLoginFlows.fetchFlows(apiBaseUrl, proxy).getOrElse { err ->
-                    Timber.w(err, "Matrix login flows probe failed")
-                    return@withContext ConnectionResult.Failure(
-                        err.message ?: "Impossible de lire les méthodes de connexion Matrix",
-                    )
+                val tokenPresent = !accessToken.isNullOrBlank()
+                var matrixDeviceId = account.secrets[DEVICE_ID_KEY]
+                    ?: credentialStore.get(account.accountId, DEVICE_ID_KEY)
+                var effectiveUserId = matrixUser
+
+                if (tokenPresent) {
+                    val whoami = MatrixLoginFlows.whoami(apiBaseUrl, accessToken!!, proxy).getOrElse { err ->
+                        Timber.w(err, "Matrix whoami failed")
+                        return@withContext ConnectionResult.Failure(
+                            err.message ?: "Token Matrix invalide (whoami)",
+                        )
+                    }
+                    if (effectiveUserId.isBlank()) {
+                        effectiveUserId = runCatching {
+                            MatrixUrls.normalizeUserId(whoami.userId, server)
+                        }.getOrElse {
+                            return@withContext ConnectionResult.Failure(
+                                it.message ?: "Invalid Matrix user ID",
+                            )
+                        }
+                    }
+                    if (matrixDeviceId.isNullOrBlank()) {
+                        matrixDeviceId = whoami.deviceId
+                    }
+                }
+
+                val flows = if (tokenPresent) {
+                    emptyList()
+                } else {
+                    MatrixLoginFlows.fetchFlows(apiBaseUrl, proxy).getOrElse { err ->
+                        Timber.w(err, "Matrix login flows probe failed")
+                        return@withContext ConnectionResult.Failure(
+                            err.message ?: "Impossible de lire les méthodes de connexion Matrix",
+                        )
+                    }
                 }
 
                 // Password path unavailable (OIDC-only homeservers): park SSO auth step.
-                if ((accessToken == null || accessToken.isBlank()) &&
+                if (!tokenPresent &&
                     (password == null || password.isBlank() || !MatrixLoginFlows.supportsPassword(flows)) &&
                     MatrixLoginFlows.supportsSso(flows)
                 ) {
@@ -324,7 +354,7 @@ class MatrixProtocol @Inject constructor(
                         apiBase = apiBaseUrl,
                         proxy = proxy,
                         displayName = account.displayName,
-                        userHint = matrixUser.takeIf { it.isNotBlank() },
+                        userHint = effectiveUserId.takeIf { it.isNotBlank() },
                         prompt = "Connexion SSO Matrix requise",
                     )?.let {
                         refreshConnectionState(preferErrorIfEmpty = true)
@@ -334,26 +364,31 @@ class MatrixProtocol @Inject constructor(
                     return@withContext ConnectionResult.Success
                 }
 
-                if (matrixUser.isBlank()) {
+                if (effectiveUserId.isBlank()) {
                     return@withContext ConnectionResult.Failure(
                         "Matrix user ID requis (sauf connexion SSO)",
                     )
                 }
 
+                if (tokenPresent && matrixDeviceId.isNullOrBlank()) {
+                    return@withContext ConnectionResult.Failure(
+                        "Matrix device_id requis pour soft-login (collez-le ou laissez whoami le résoudre)",
+                    )
+                }
+
                 val fallback = MatrixHttpFallback(repository)
                 val fb = when {
-                    accessToken != null && accessToken.isNotBlank() -> {
+                    tokenPresent -> {
                         fallback.connectWithToken(
                             account.accountId,
                             apiBaseUrl,
-                            matrixUser,
-                            accessToken,
+                            effectiveUserId,
+                            accessToken!!,
                             proxy,
                             since = syncSince,
                             onSinceUpdated = onSinceUpdated,
                             onAuthExpired = onAuthExpired,
-                            matrixDeviceId = account.secrets[DEVICE_ID_KEY]
-                                ?: credentialStore.get(account.accountId, DEVICE_ID_KEY),
+                            matrixDeviceId = matrixDeviceId,
                         )
                     }
                     password != null -> {
@@ -362,7 +397,7 @@ class MatrixProtocol @Inject constructor(
                         val passwordResult = fallback.connect(
                             account.accountId,
                             apiBaseUrl,
-                            matrixUser,
+                            effectiveUserId,
                             password,
                             proxy,
                             since = syncSince,
@@ -395,13 +430,14 @@ class MatrixProtocol @Inject constructor(
                     accountId = account.accountId,
                     displayName = account.displayName,
                     apiBaseUrl = apiBaseUrl,
-                    matrixUser = fallback.persistedUserId ?: matrixUser,
+                    matrixUser = fallback.persistedUserId ?: effectiveUserId,
                     accessToken = fallback.persistedAccessToken
                         ?: accessToken?.takeIf { it.isNotBlank() }
                         ?: return@withContext ConnectionResult.Failure("Access token manquant"),
                     password = password,
                     proxy = proxy,
                     fallback = fallback,
+                    deviceId = matrixDeviceId ?: fallback.persistedDeviceId,
                 )
             } catch (e: Exception) {
                 Timber.e(e, "Matrix connect failed")
@@ -667,8 +703,14 @@ class MatrixProtocol @Inject constructor(
                     ?: (ConversationIds.accountId(conversationId) ?: conversationId)
                 val session = sessions[accId] ?: return@withContext SendResult.Failure("Account not connected")
                 val roomId = (ConversationIds.remoteId(conversationId) ?: conversationId)
-                session.trixnityEngine?.let {
-                    val txnId = it.sendText(roomId, body.value)
+                session.trixnityEngine?.let { engine ->
+                    val sent = engine.sendText(roomId, body.value)
+                    if (sent.isFailure) {
+                        return@withContext SendResult.Failure(
+                            sent.exceptionOrNull()?.message ?: "Send failed",
+                        )
+                    }
+                    val txnId = sent.getOrThrow()
                     val outboxId = txnId.ifBlank { "${conversationId}_${System.currentTimeMillis()}" }
                     val msg = Message(
                         id = outboxId,

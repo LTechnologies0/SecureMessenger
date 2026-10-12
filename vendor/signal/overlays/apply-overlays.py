@@ -67,6 +67,14 @@ def patch_push_socket() -> None:
         """      java.net.Proxy socksProxy = SignalSocksHolder.get();
       if (socksProxy != null) {
         builder.proxy(socksProxy);
+        String socksUser = SignalSocksHolder.getUsername();
+        if (socksUser != null && !socksUser.isEmpty()) {
+          String socksPass = SignalSocksHolder.getPassword() != null ? SignalSocksHolder.getPassword() : "";
+          builder.proxyAuthenticator((route, response) ->
+              response.request().newBuilder()
+                  .header("Proxy-Authorization", Credentials.basic(socksUser, socksPass))
+                  .build());
+        }
       } else if (proxy.isPresent()) {
         builder.socketFactory(new TlsProxySocketFactory(proxy.get().getHost(), proxy.get().getPort(), dns));
       }""",
@@ -138,6 +146,14 @@ def patch_websocket() -> None:
         """      java.net.Proxy socksProxy = SignalSocksHolder.get();
       if (socksProxy != null) {
         clientBuilder.proxy(socksProxy);
+        String socksUser = SignalSocksHolder.getUsername();
+        if (socksUser != null && !socksUser.isEmpty()) {
+          String socksPass = SignalSocksHolder.getPassword() != null ? SignalSocksHolder.getPassword() : "";
+          clientBuilder.proxyAuthenticator((route, response) ->
+              response.request().newBuilder()
+                  .header("Proxy-Authorization", okhttp3.Credentials.basic(socksUser, socksPass))
+                  .build());
+        }
       } else if (signalProxy.isPresent()) {
         clientBuilder.socketFactory(new TlsProxySocketFactory(signalProxy.get().getHost(), signalProxy.get().getPort(), dns));
       }""",

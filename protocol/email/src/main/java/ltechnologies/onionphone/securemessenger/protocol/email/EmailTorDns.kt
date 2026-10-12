@@ -1,9 +1,11 @@
 package ltechnologies.onionphone.securemessenger.protocol.email
 
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Proxy
 import java.net.Socket
 import javax.net.SocketFactory
+import okhttp3.Dns
 import javax.net.ssl.HostnameVerifier
 import javax.net.ssl.SSLSession
 import javax.net.ssl.SSLSocket
@@ -21,11 +23,32 @@ import timber.log.Timber
  * and set SNI / hostname verification to the original hostname.
  */
 object EmailTorDns {
-    fun resolveIpv4(hostname: String, httpFactory: ProxiedHttpClientFactory): String? {
+    /**
+     * OkHttp [Dns] that never hits system resolvers: literal IPv4 only, else SOCKS remote-DNS
+     * (same idea as [ltechnologies.onionphone.securemessenger.core.proxy.SocksConnectivityChecker]).
+     */
+    val socksRemoteDns: Dns = Dns { hostname ->
+        if (looksLikeIpv4(hostname)) {
+            listOf(InetAddress.getByAddress(hostname, parseIpv4(hostname)))
+        } else {
+            listOf(InetAddress.getByAddress(hostname, byteArrayOf(0, 0, 0, 1)))
+        }
+    }
+
+    fun resolveIpv4(
+        hostname: String,
+        httpFactory: ProxiedHttpClientFactory,
+        proxy: ProxyConfig,
+    ): String? {
         if (hostname.isBlank()) return null
         if (looksLikeIpv4(hostname)) return hostname
         return try {
-            val client = httpFactory.okhttpClient()
+            val base = httpFactory.okhttpClient()
+            val client = if (proxy.torRequired && proxy.remoteDns) {
+                base.newBuilder().dns(socksRemoteDns).build()
+            } else {
+                base
+            }
             val url =
                 "https://cloudflare-dns.com/dns-query?name=" +
                     java.net.URLEncoder.encode(hostname, Charsets.UTF_8.name()) +
@@ -51,6 +74,11 @@ object EmailTorDns {
 
     fun looksLikeIpv4(value: String): Boolean =
         value.matches(Regex("""^\d{1,3}(\.\d{1,3}){3}$"""))
+
+    private fun parseIpv4(value: String): ByteArray {
+        val parts = value.split('.')
+        return ByteArray(4) { i -> parts[i].toInt().coerceIn(0, 255).toByte() }
+    }
 
     fun plainSocksFactory(proxy: ProxyConfig): SocketFactory {
         val socksHost = SocksEndpointResolver.resolveReachableHost(proxy.host, proxy.port)

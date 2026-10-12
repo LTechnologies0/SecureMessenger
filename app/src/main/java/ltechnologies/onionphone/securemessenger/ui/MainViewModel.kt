@@ -329,6 +329,9 @@ class MainViewModel @Inject constructor(
     fun signalProtocol(): ltechnologies.onionphone.securemessenger.protocol.signal.SignalProtocol? =
         connectionManager.protocolFor(ProtocolId.SIGNAL) as? ltechnologies.onionphone.securemessenger.protocol.signal.SignalProtocol
 
+    fun isSignalLinkAndSyncInProgress(accountId: String): Boolean =
+        signalProtocol()?.isLinkAndSyncInProgress(accountId) == true
+
     fun connectSignal(phone: String, onResult: (ConnectionResult, String) -> Unit) {
         val accountId = UUID.randomUUID().toString()
         val credentials = AccountCredentials(
