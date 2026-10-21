@@ -33,12 +33,20 @@ class ImapSyncEngine(
             var backoffMs = 2_000L
             while (isActive) {
                 try {
+                    if (!session.reconnectStore()) {
+                        delay(backoffMs)
+                        backoffMs = min(backoffMs * 2, 60_000L)
+                        continue
+                    }
+                    // Hold folderMutex for sync + IDLE — one Angus Store, one open folder.
                     folderMutex.withLock {
                         syncFolderLocked(session)
+                        syncSentFolderLocked(session)
                         idleOnceLocked(session)
                     }
                     backoffMs = 2_000L
                 } catch (e: Exception) {
+                    session.invalidateStoreAuth()
                     Timber.w(e, "IMAP sync/IDLE interrupted")
                     delay(backoffMs)
                     backoffMs = min(backoffMs * 2, 60_000L)
@@ -53,7 +61,20 @@ class ImapSyncEngine(
     }
 
     suspend fun syncFolder(session: EmailSession) {
-        folderMutex.withLock { syncFolderLocked(session) }
+        folderMutex.withLock {
+            syncFolderLocked(session)
+            syncSentFolderLocked(session)
+        }
+    }
+
+    fun ensureSentFolderDetected(session: EmailSession): String? {
+        val store = session.store ?: return null
+        val existing = session.config.sentFolder
+            ?: credentialStore.get(session.accountId, EmailCredentialKeys.SENT_FOLDER)?.ifBlank { null }
+        if (existing != null) return existing
+        val detected = ImapFolderNames.detectSentFolder(store) ?: return null
+        credentialStore.put(session.accountId, EmailCredentialKeys.SENT_FOLDER, detected)
+        return detected
     }
 
     private suspend fun syncFolderLocked(session: EmailSession) {
@@ -98,22 +119,67 @@ class ImapSyncEngine(
         }
     }
 
+    /** Caller must hold [folderMutex]. Syncs recent Sent mail (read-only, no IDLE on Sent). */
+    private suspend fun syncSentFolderLocked(session: EmailSession) {
+        val sentName = ensureSentFolderDetected(session) ?: return
+        val store = session.store ?: return
+        val folder = store.getFolder(sentName)
+        if (!folder.exists()) {
+            Timber.w("IMAP Sent folder missing: %s", sentName)
+            return
+        }
+        folder.open(Folder.READ_ONLY)
+        try {
+            val uidFolder = folder as? UIDFolder
+            val lastUid = credentialStore.get(session.accountId, EmailCredentialKeys.LAST_IMAP_SENT_UID)
+                ?.toLongOrNull() ?: 0L
+            val messages = if (uidFolder != null && lastUid > 0L) {
+                uidFolder.getMessagesByUID(lastUid + 1, UIDFolder.LASTUID)
+            } else {
+                val count = folder.messageCount
+                if (count <= 0) emptyArray()
+                else {
+                    val start = (count - 49).coerceAtLeast(1)
+                    folder.getMessages(start, count)
+                }
+            }
+            var maxUid = lastUid
+            for (mail in messages) {
+                if (mail == null) continue
+                persistMail(session, mail as? MimeMessage ?: continue)
+                if (uidFolder != null) {
+                    maxUid = maxOf(maxUid, uidFolder.getUID(mail))
+                }
+            }
+            if (uidFolder != null && maxUid > lastUid) {
+                credentialStore.put(
+                    session.accountId,
+                    EmailCredentialKeys.LAST_IMAP_SENT_UID,
+                    maxUid.toString(),
+                )
+            }
+        } finally {
+            runCatching { folder.close(false) }
+        }
+    }
+
+    /** Caller must hold [folderMutex]. */
     private suspend fun idleOnceLocked(session: EmailSession) {
+        if (!session.reconnectStore()) return
         val store = session.store ?: return
         val folder = store.getFolder(session.config.folder)
         folder.open(Folder.READ_ONLY)
         try {
             val idleFolder = folder as? org.eclipse.angus.mail.imap.IMAPFolder
             if (idleFolder == null) {
-                delay(60_000)
+                delay(15_000)
                 return
             }
-            // IDLE blocks until server pushes or timeout; Angus respects timeout property.
+            // IMAPFolder.idle(boolean once): true returns after one notification.
             idleFolder.idle(true)
         } finally {
             runCatching { folder.close(false) }
         }
-        // Pull new UIDs only after IDLE folder is closed (single SELECT).
         syncFolderLocked(session)
     }
 
@@ -132,12 +198,13 @@ class ImapSyncEngine(
         val bumpUnread = !alreadyPersisted &&
             message.direction ==
             ltechnologies.onionphone.securemessenger.core.model.MessageDirection.INCOMING
+        val peer = MimeMapper.peerAddress(parsed, session.config.email)
         repository.upsertConversation(
             Conversation(
                 id = conversationId,
                 protocol = ProtocolId.EMAIL,
                 accountId = session.accountId,
-                remoteId = parsed.rootMessageId,
+                remoteId = peer,
                 title = parsed.subject,
                 lastMessagePreview = parsed.body.take(160),
                 lastMessageAt = parsed.timestamp,

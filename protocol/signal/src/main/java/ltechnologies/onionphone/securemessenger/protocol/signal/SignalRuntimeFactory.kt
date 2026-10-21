@@ -66,6 +66,7 @@ internal data class SignalSessionContext(
         runCatching { pushServiceSocket.cancelInFlightRequests() }
         runCatching { authWebSocket.disconnect() }
         runCatching { unauthWebSocket.disconnect() }
+        runCatching { network.setInvalidProxy() }
         runCatching { network.clearProxy() }
         runCatching { messageSenderExecutor.shutdownNow() }
     }
@@ -204,6 +205,19 @@ internal object SignalRuntimeFactory {
         runCatching { unauthWebSocket.connect() }
             .onFailure { Timber.w(it, "Signal unauth websocket connect failed") }
 
+        if (credentialStore.get(accountId, SignalCredentialKeys.ONE_TIME_PREKEYS_UPLOADED) != "1") {
+            val uploaded = runCatching {
+                SignalPreKeyMaterial.uploadOneTimePreKeys(
+                    keysApi,
+                    protocolStore.aciAccountStore(),
+                    protocolStore.pniAccountStore(),
+                )
+            }.getOrDefault(false)
+            if (uploaded) {
+                credentialStore.put(accountId, SignalCredentialKeys.ONE_TIME_PREKEYS_UPLOADED, "1")
+            }
+        }
+
         return SignalSessionContext(
             e164 = e164,
             aci = aci,
@@ -256,16 +270,18 @@ internal object SignalRuntimeFactory {
                 runCatching { network.clearProxy() }
                 return
             }
+            val socksUser = SignalSocksHolder.getUsername().orEmpty()
+            val socksPass = SignalSocksHolder.getPassword().orEmpty()
             runCatching {
-                network.setProxy("socks5", host, port, "", "")
+                network.setProxy("socks5", host, port, socksUser, socksPass)
                 Timber.i("Signal Network SOCKS5 %s:%d", host, port)
             }.onFailure {
                 Timber.e(it, "Failed to set Signal Network SOCKS5")
                 runCatching { network.setInvalidProxy() }
             }
         } else {
-            runCatching { network.clearProxy() }
-            Timber.d("Signal Network clearnet (no SOCKS)")
+            runCatching { network.setInvalidProxy() }
+            Timber.w("Signal Network SOCKS missing — invalid proxy (no clearnet)")
         }
     }
 }

@@ -32,7 +32,7 @@ Threads are keyed by a stable hash of the root `Message-ID` (from `References` /
 
 ## Tor
 
-When `ProxyConfig.torRequired` is true:
+Tor is mandatory:
 
 - Angus uses `mail.{imap,smtp,pop3,imaps,smtps,pop3s}.socks.host/port` via `EmailSocksProperties` + `SocksEndpointResolver`.
 - JMAP / ISPDB / DNS SRV (DoH) use `ProxiedHttpClientFactory.okhttpClient()`.

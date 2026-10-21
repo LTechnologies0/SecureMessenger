@@ -15,7 +15,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -60,11 +59,11 @@ fun ProxyScreen(
     var password by remember(savedConfig.torProvider) {
         mutableStateOf("")
     }
+    var passwordEdited by remember(savedConfig.torProvider) {
+        mutableStateOf(false)
+    }
     var torProvider by remember(savedConfig.torProvider) {
         mutableStateOf(savedConfig.torProvider)
-    }
-    var torRequired by remember(savedConfig.torRequired) {
-        mutableStateOf(savedConfig.torRequired)
     }
     var testResult by remember { mutableStateOf<String?>(null) }
 
@@ -85,104 +84,82 @@ fun ProxyScreen(
             },
         )
 
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text("Routage Tor (optionnel)")
+        Text("Routage Tor (obligatoire)")
+        Text(
+            "Tout le trafic passe par le pont SOCKS OnionVPN (PAC) ou un SOCKS custom. " +
+                "Aucun chemin clearnet. Si OnionVPN est arrêté, les sessions sont coupées.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        Text("Fournisseur Tor : ${torProvider.label()}")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TorProvider.entries.forEach { provider ->
+                FilterChip(
+                    selected = torProvider == provider,
+                    onClick = { torProvider = provider },
+                    label = { Text(provider.label()) },
+                )
+            }
+        }
+
+        when (torProvider) {
+            TorProvider.ONIONVPN -> {
+                Text("OnionVPN installé : ${proxyStatus.onionVpnInstalled}")
+                Text("PAC : ${proxyStatus.pacUrl}")
+                Text("SOCKS (DNSCrypt→Tor) : ${savedConfig.host}:${savedConfig.port}")
+                Text("Pont opérationnel : ${proxyStatus.onionVpnRunning}")
+                proxyStatus.lastCheckLatencyMs?.let {
+                    Text("Dernier test SOCKS+DNS : ${it}ms")
+                }
                 Text(
-                    "Désactivé par défaut (clearnet). Activé : tous les protocoles " +
-                        "(Signal inclus) passent par le pont SOCKS OnionVPN (PAC).",
+                    "Le client lit ${OnionVpnConstants.PAC_URL} pour découvrir le SOCKS " +
+                        "(pas d’auth côté app — le pont gère IsolateSOCKSAuth).",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            Switch(
-                checked = torRequired,
-                onCheckedChange = { enabled ->
-                    torRequired = enabled
-                    if (enabled && torProvider == TorProvider.CUSTOM &&
-                        host == "127.0.0.1" && (port == "9050" || port.isBlank())
-                    ) {
-                        torProvider = TorProvider.ONIONVPN
-                    }
-                },
-            )
+            TorProvider.CUSTOM -> {
+                Text("Proxy SOCKS5 personnalisé (daemon Tor, etc.)")
+            }
         }
 
-        if (torRequired) {
-            Text("Fournisseur Tor : ${torProvider.label()}")
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TorProvider.entries.forEach { provider ->
-                    FilterChip(
-                        selected = torProvider == provider,
-                        onClick = { torProvider = provider },
-                        label = { Text(provider.label()) },
-                    )
-                }
-            }
+        Text("Proxy opérationnel : ${proxyStatus.proxyHealthy}")
+        proxyStatus.lastError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
 
-            when (torProvider) {
-                TorProvider.ONIONVPN -> {
-                    Text("OnionVPN installé : ${proxyStatus.onionVpnInstalled}")
-                    Text("PAC : ${proxyStatus.pacUrl}")
-                    Text("SOCKS (DNSCrypt→Tor) : ${savedConfig.host}:${savedConfig.port}")
-                    Text("Pont opérationnel : ${proxyStatus.onionVpnRunning}")
-                    proxyStatus.lastCheckLatencyMs?.let {
-                        Text("Dernier test SOCKS+DNS : ${it}ms")
-                    }
-                    Text(
-                        "Le client lit ${OnionVpnConstants.PAC_URL} pour découvrir le SOCKS " +
-                            "(pas d’auth côté app — le pont gère IsolateSOCKSAuth).",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                TorProvider.CUSTOM -> {
-                    Text("Proxy SOCKS5 personnalisé (daemon Tor, etc.)")
-                }
-            }
-
-            Text("Proxy opérationnel : ${proxyStatus.proxyHealthy}")
-            proxyStatus.lastError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-
-            if (torProvider == TorProvider.CUSTOM) {
-                OutlinedTextField(
-                    value = host,
-                    onValueChange = { host = it },
-                    label = { Text("Hôte SOCKS5") },
-                    placeholder = { Text("127.0.0.1") },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                OutlinedTextField(
-                    value = port,
-                    onValueChange = { port = it },
-                    label = { Text("Port SOCKS5") },
-                    placeholder = { Text(DEFAULT_CUSTOM_SOCKS_PORT.toString()) },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                OutlinedTextField(
-                    value = username,
-                    onValueChange = { username = it },
-                    label = { Text("Utilisateur SOCKS (optionnel)") },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                OutlinedTextField(
-                    value = password,
-                    onValueChange = { password = it },
-                    label = { Text("Mot de passe SOCKS (optionnel)") },
-                    visualTransformation = PasswordVisualTransformation(),
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            } else {
-                Text("Point de terminaison : ${savedConfig.host}:${savedConfig.port}")
-            }
-        } else {
-            Text(
-                "Mode clearnet : aucun killswitch Tor. Les protocoles se connectent directement.",
-                style = MaterialTheme.typography.bodyMedium,
+        if (torProvider == TorProvider.CUSTOM) {
+            OutlinedTextField(
+                value = host,
+                onValueChange = { host = it },
+                label = { Text("Hôte SOCKS5") },
+                placeholder = { Text("127.0.0.1") },
+                modifier = Modifier.fillMaxWidth(),
             )
+            OutlinedTextField(
+                value = port,
+                onValueChange = { port = it },
+                label = { Text("Port SOCKS5") },
+                placeholder = { Text(DEFAULT_CUSTOM_SOCKS_PORT.toString()) },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = username,
+                onValueChange = { username = it },
+                label = { Text("Utilisateur SOCKS (optionnel)") },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = password,
+                onValueChange = {
+                    password = it
+                    passwordEdited = true
+                },
+                label = { Text("Mot de passe SOCKS (laisser vide pour effacer)") },
+                visualTransformation = PasswordVisualTransformation(),
+                modifier = Modifier.fillMaxWidth(),
+            )
+        } else {
+            Text("Point de terminaison : ${savedConfig.host}:${savedConfig.port}")
         }
 
         Button(
@@ -193,8 +170,8 @@ fun ProxyScreen(
                     customPort = port.toIntOrNull() ?: DEFAULT_CUSTOM_SOCKS_PORT,
                     resolvedStatus = savedConfig,
                     username = username,
-                    password = password.ifBlank { savedConfig.password },
-                    torRequired = torRequired,
+                    password = if (passwordEdited) password else savedConfig.password,
+                    torRequired = true,
                 )
                 viewModel.updateProxy(config)
             },
@@ -203,46 +180,44 @@ fun ProxyScreen(
             Text("Enregistrer")
         }
 
-        if (torRequired) {
-            Button(
-                onClick = { viewModel.requestTorStart() },
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(
-                    when (torProvider) {
-                        TorProvider.ONIONVPN ->
-                            if (proxyStatus.onionVpnInstalled) "Ouvrir OnionVPN" else "Installer OnionVPN"
-                        TorProvider.CUSTOM -> "Rafraîchir le test proxy"
-                    },
-                )
-            }
-
-            if (torProvider == TorProvider.ONIONVPN && !proxyStatus.onionVpnInstalled) {
-                Button(
-                    onClick = { viewModel.openOnionVpnReleases() },
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text("Télécharger OnionVPN")
-                }
-            }
-
-            Button(
-                onClick = {
-                    viewModel.testProxy { ok ->
-                        testResult = if (ok) {
-                            val ms = proxyStatus.lastCheckLatencyMs
-                            if (ms != null) "Proxy OK (${ms}ms, DNS distant via Tor)" else "Proxy OK"
-                        } else {
-                            proxyStatus.lastError ?: "Proxy SOCKS injoignable"
-                        }
-                    }
+        Button(
+            onClick = { viewModel.requestTorStart() },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text(
+                when (torProvider) {
+                    TorProvider.ONIONVPN ->
+                        if (proxyStatus.onionVpnInstalled) "Ouvrir OnionVPN" else "Installer OnionVPN"
+                    TorProvider.CUSTOM -> "Rafraîchir le test proxy"
                 },
+            )
+        }
+
+        if (torProvider == TorProvider.ONIONVPN && !proxyStatus.onionVpnInstalled) {
+            Button(
+                onClick = { viewModel.openOnionVpnReleases() },
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Tester SOCKS (+ DNS distant)")
+                Text("Télécharger OnionVPN")
             }
-
-            testResult?.let { Text(it) }
         }
+
+        Button(
+            onClick = {
+                viewModel.testProxy { ok ->
+                    testResult = if (ok) {
+                        val ms = proxyStatus.lastCheckLatencyMs
+                        if (ms != null) "Proxy OK (${ms}ms, DNS distant via Tor)" else "Proxy OK"
+                    } else {
+                        proxyStatus.lastError ?: "Proxy SOCKS injoignable"
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Tester SOCKS (+ DNS distant)")
+        }
+
+        testResult?.let { Text(it) }
     }
 }

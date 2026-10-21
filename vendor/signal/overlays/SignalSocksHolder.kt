@@ -10,16 +10,37 @@ object SignalSocksHolder {
     @Volatile
     private var proxy: Proxy? = null
 
+    @Volatile
+    private var username: String? = null
+
+    @Volatile
+    private var password: String? = null
+
     @JvmStatic
     fun set(socks: Proxy?) {
+        set(socks, null, null)
+    }
+
+    @JvmStatic
+    fun set(socks: Proxy?, username: String?, password: String?) {
         proxy = socks
+        this.username = username?.takeIf { it.isNotBlank() }
+        this.password = password?.takeIf { it.isNotBlank() }
     }
 
     @JvmStatic
     fun get(): Proxy? = proxy
 
     @JvmStatic
+    fun getUsername(): String? = username
+
+    @JvmStatic
+    fun getPassword(): String? = password
+
+    @JvmStatic
     fun clear() {
         proxy = null
+        username = null
+        password = null
     }
 }

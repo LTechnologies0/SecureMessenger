@@ -34,6 +34,7 @@ object TdLibMapper {
         val convId = conversationId(accountId, chat.id)
         val preview = chat.lastMessage?.let { messageBody(it) }
         val lastAt = chat.lastMessage?.date?.times(1000L) ?: 0L
+        val (isPinned, isMuted, isArchived) = telegramChatFlags(chat)
         return Conversation(
             id = convId,
             protocol = ProtocolId.TELEGRAM,
@@ -43,7 +44,31 @@ object TdLibMapper {
             lastMessagePreview = preview?.take(100),
             lastMessageAt = lastAt,
             unreadCount = chat.unreadCount,
+            isPinned = isPinned,
+            isMuted = isMuted,
+            isArchived = isArchived,
         )
+    }
+
+    /** TDLib [TdApi.Chat.positions] + [TdApi.Chat.notificationSettings]. */
+    fun telegramChatFlags(chat: TdApi.Chat): Triple<Boolean, Boolean, Boolean> {
+        val positions = chat.positions?.toList().orEmpty()
+        val main = positions.firstOrNull { it.list is TdApi.ChatListMain }
+        val archive = positions.firstOrNull { it.list is TdApi.ChatListArchive }
+        val onMain = (main?.order ?: 0L) > 0L
+        val onArchive = (archive?.order ?: 0L) > 0L
+        val isArchived = !onMain && onArchive
+        val isPinned = main?.isPinned == true
+        val settings = chat.notificationSettings
+        val isMuted = settings != null &&
+            !settings.useDefaultMuteFor &&
+            settings.muteFor != 0
+        return Triple(isPinned, isMuted, isArchived)
+    }
+
+    fun chatVisibleInInbox(chat: TdApi.Chat): Boolean {
+        val (_, _, isArchived) = telegramChatFlags(chat)
+        return !isArchived
     }
 
     fun toContact(accountId: String, user: TdApi.User): Contact {
@@ -188,6 +213,20 @@ object TdLibMapper {
                 suffix = "voice",
                 file = content.voiceNote.voice,
                 mimeType = content.voiceNote.mimeType.ifBlank { "audio/ogg" },
+                fileName = null,
+            ))
+            is TdApi.MessageAudio -> listOf(attachmentFromFile(
+                messageId = messageId,
+                suffix = "audio",
+                file = content.audio.audio,
+                mimeType = content.audio.mimeType.ifBlank { "audio/mpeg" },
+                fileName = content.audio.fileName,
+            ))
+            is TdApi.MessageVideoNote -> listOf(attachmentFromFile(
+                messageId = messageId,
+                suffix = "videonote",
+                file = content.videoNote.video,
+                mimeType = "video/mp4",
                 fileName = null,
             ))
             is TdApi.MessageSticker -> listOf(attachmentFromFile(

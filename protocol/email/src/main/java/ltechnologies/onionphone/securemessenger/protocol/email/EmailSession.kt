@@ -6,6 +6,7 @@ import jakarta.mail.Transport
 import java.util.Properties
 import ltechnologies.onionphone.securemessenger.core.model.ProxyConfig
 import ltechnologies.onionphone.securemessenger.core.network.ProxiedHttpClientFactory
+import timber.log.Timber
 
 class EmailSession(
     val accountId: String,
@@ -15,13 +16,62 @@ class EmailSession(
     val store: Store? = null,
     val transport: Transport? = null,
     val jmapClient: JmapClient? = null,
+    val storeConnectHost: String? = null,
+    val storePort: Int = 0,
+    val smtpConnectHost: String? = null,
 ) {
+    /** Set after a successful Angus [Store.connect]; Angus [Store.isConnected] is not reliable. */
+    @Volatile
+    var storeAuthenticated: Boolean = false
+        private set
+
+    @Volatile
+    var smtpAuthenticated: Boolean = false
+        private set
+
     fun isConnected(): Boolean = when (config.storeKind) {
         EmailStoreKind.JMAP -> jmapClient?.isConnected() == true
-        EmailStoreKind.IMAP, EmailStoreKind.POP3 -> store?.isConnected == true
+        EmailStoreKind.IMAP, EmailStoreKind.POP3 -> storeAuthenticated
+    }
+
+    fun invalidateStoreAuth() {
+        storeAuthenticated = false
+    }
+
+    fun invalidateSmtpAuth() {
+        smtpAuthenticated = false
+    }
+
+    fun reconnectStore(): Boolean {
+        val store = this.store ?: return false
+        if (storeAuthenticated) return true
+        val host = storeConnectHost ?: return false
+        return runCatching {
+            store.connect(host, storePort, config.email, config.password)
+            storeAuthenticated = true
+            true
+        }.getOrElse {
+            storeAuthenticated = false
+            false
+        }
+    }
+
+    fun reconnectSmtp(): Boolean {
+        val transport = this.transport ?: return false
+        val host = smtpConnectHost ?: return false
+        return runCatching {
+            transport.connect(host, config.smtpPort, config.email, config.password)
+            smtpAuthenticated = true
+            true
+        }.getOrElse {
+            smtpAuthenticated = false
+            false
+        }
     }
 
     fun close() {
+        storeAuthenticated = false
+        smtpAuthenticated = false
         runCatching { store?.close() }
         runCatching { transport?.close() }
         jmapClient?.close()
@@ -57,7 +107,7 @@ class EmailSession(
                     storeProtocol = if (storeSecurity == MailSecurity.SSL) "imaps" else "imap"
                     storeConnectHost = EmailSocksProperties.resolveConnectHost(
                         storeServerName, proxy, httpFactory,
-                    )
+                    ) ?: error("Missing IMAP connect host")
                     EmailSocksProperties.applyStoreSecurity(
                         props, storeProtocol, storeSecurity, storeServerName, storePort, storeConnectHost,
                     )
@@ -70,7 +120,7 @@ class EmailSession(
                     storeProtocol = if (storeSecurity == MailSecurity.SSL) "pop3s" else "pop3"
                     storeConnectHost = EmailSocksProperties.resolveConnectHost(
                         storeServerName, proxy, httpFactory,
-                    )
+                    ) ?: error("Missing POP3 connect host")
                     EmailSocksProperties.applyStoreSecurity(
                         props, storeProtocol, storeSecurity, storeServerName, storePort, storeConnectHost,
                     )
@@ -81,12 +131,6 @@ class EmailSession(
 
             val smtpServerName = config.smtpHost ?: error("Missing SMTP host")
             val smtpProtocol = if (config.smtpSecurity == MailSecurity.SSL) "smtps" else "smtp"
-            val smtpConnectHost = EmailSocksProperties.resolveConnectHost(
-                smtpServerName, proxy, httpFactory,
-            )
-            EmailSocksProperties.applyStoreSecurity(
-                props, smtpProtocol, config.smtpSecurity, smtpServerName, config.smtpPort, smtpConnectHost,
-            )
             EmailSocksProperties.applySocks(props, listOf(smtpProtocol, "smtp", "smtps"), proxy)
             props["mail.$smtpProtocol.auth"] = "true"
             props["mail.smtp.auth"] = "true"
@@ -98,8 +142,37 @@ class EmailSession(
             val store = session.getStore(props.getProperty("mail.store.protocol"))
             store.connect(storeConnectHost, storePort, config.email, config.password)
 
+            // Resolve SMTP via DoH after store is up; DoH failure must not block inbox.
+            val smtpConnectHost = EmailSocksProperties.resolveConnectHost(
+                smtpServerName,
+                proxy,
+                httpFactory,
+                strict = false,
+            )
+            if (smtpConnectHost != null) {
+                EmailSocksProperties.applyStoreSecurity(
+                    props,
+                    smtpProtocol,
+                    config.smtpSecurity,
+                    smtpServerName,
+                    config.smtpPort,
+                    smtpConnectHost,
+                )
+            } else {
+                Timber.w("SMTP DoH skipped — outbound mail unavailable until retry")
+            }
+
             val transport = session.getTransport(smtpProtocol)
-            transport.connect(smtpConnectHost, config.smtpPort, config.email, config.password)
+            var smtpOk = false
+            if (smtpConnectHost != null) {
+                runCatching {
+                    // Reuse the Tor-resolved IP — never pass the original hostname (local DNS leak).
+                    transport.connect(smtpConnectHost, config.smtpPort, config.email, config.password)
+                    smtpOk = true
+                }.onFailure { e ->
+                    Timber.w(e, "SMTP connect failed (inbox still available)")
+                }
+            }
 
             return EmailSession(
                 accountId = accountId,
@@ -108,7 +181,13 @@ class EmailSession(
                 angusSession = session,
                 store = store,
                 transport = transport,
-            )
+                storeConnectHost = storeConnectHost,
+                storePort = storePort,
+                smtpConnectHost = smtpConnectHost,
+            ).also { opened ->
+                opened.storeAuthenticated = true
+                opened.smtpAuthenticated = smtpOk
+            }
         }
     }
 }

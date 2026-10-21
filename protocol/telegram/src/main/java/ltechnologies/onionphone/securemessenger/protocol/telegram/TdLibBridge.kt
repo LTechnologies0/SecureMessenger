@@ -70,6 +70,12 @@ class TdLibStubClient : TdLibClient {
     override fun close() = Unit
 }
 
+/** TDLib [TdApi.SendMessage] outcome — message id is required for optimistic UI reconciliation. */
+sealed class TdSendResult {
+    data class Ok(val message: TdApi.Message) : TdSendResult()
+    data class Err(val reason: String) : TdSendResult()
+}
+
 class TdLibFacade(private val client: TdLibClient) {
     private var authState: TdApi.AuthorizationState? = null
 
@@ -86,8 +92,14 @@ class TdLibFacade(private val client: TdLibClient) {
         client.send(TdApi.DisableProxy())
     }
 
-    suspend fun configureProxy(host: String, port: Int, username: String?, password: String?): Boolean =
-        suspendCancellableCoroutine { cont ->
+    /**
+     * Adds [host]:[port] SOCKS5 and enables it, then removes every *other* proxy.
+     * Add-first avoids a clearnet window on live (AuthorizationStateReady) clients
+     * that clear-then-add would open between RemoveProxy and AddProxy.
+     */
+    suspend fun configureProxy(host: String, port: Int, username: String?, password: String?): Boolean {
+        val existing = listProxies() ?: return false
+        val addedId = suspendCancellableCoroutine<Int?> { cont ->
             client.send(
                 TdApi.AddProxy().apply {
                     proxy = TdApi.Proxy(
@@ -102,17 +114,55 @@ class TdLibFacade(private val client: TdLibClient) {
                 when (result) {
                     is TdApi.AddedProxy -> {
                         Timber.i("TDLib SOCKS5 enabled ${result.proxy.server}:${result.proxy.port}")
-                        if (cont.isActive) cont.resume(true)
+                        if (cont.isActive) cont.resume(result.id)
                     }
                     is TdApi.Proxy -> {
                         Timber.i("TDLib SOCKS5 enabled ${result.server}:${result.port}")
-                        if (cont.isActive) cont.resume(true)
+                        // Older TDLib shapes — treat as success without id for cleanup.
+                        if (cont.isActive) cont.resume(-1)
                     }
                     is TdApi.Error -> {
                         Timber.w("AddProxy error ${result.code}: ${result.message} ($host:$port)")
-                        if (cont.isActive) cont.resume(false)
+                        if (cont.isActive) cont.resume(null)
                     }
-                    else -> if (cont.isActive) cont.resume(false)
+                    else -> if (cont.isActive) cont.resume(null)
+                }
+            }
+        } ?: return false
+        for (proxy in existing) {
+            if (addedId >= 0 && proxy.id == addedId) continue
+            val removed = suspendCancellableCoroutine { cont ->
+                client.send(TdApi.RemoveProxy(proxy.id)) { result ->
+                    when (result) {
+                        is TdApi.Ok -> if (cont.isActive) cont.resume(true)
+                        is TdApi.Error -> {
+                            Timber.w("RemoveProxy error ${result.code}: ${result.message}")
+                            if (cont.isActive) cont.resume(false)
+                        }
+                        else -> if (cont.isActive) cont.resume(false)
+                    }
+                }
+            }
+            if (!removed) {
+                Timber.w("Failed to remove stale TDLib proxy id=${proxy.id}")
+            }
+        }
+        return true
+    }
+
+    /** @return null when [TdApi.GetProxies] fails (do not AddProxy blindly). */
+    private suspend fun listProxies(): Array<TdApi.AddedProxy>? =
+        suspendCancellableCoroutine { cont ->
+            client.send(TdApi.GetProxies()) { result ->
+                when (result) {
+                    is TdApi.AddedProxies -> {
+                        if (cont.isActive) cont.resume(result.proxies ?: emptyArray())
+                    }
+                    is TdApi.Error -> {
+                        Timber.w("GetProxies error ${result.code}: ${result.message}")
+                        if (cont.isActive) cont.resume(null)
+                    }
+                    else -> if (cont.isActive) cont.resume(null)
                 }
             }
         }
@@ -135,17 +185,27 @@ class TdLibFacade(private val client: TdLibClient) {
         )
     }
 
-    fun setParameters(databaseDirectory: String, apiId: Int, apiHash: String) {
+    /**
+     * Sends [TdApi.SetTdlibParameters]. Callers must enable SOCKS with [configureProxy] first:
+     * TDLib starts networking when this request is accepted.
+     * [TdApi.SetTdlibParameters.useSecretChats] stays false — secret chats are out of scope.
+     */
+    suspend fun setParameters(
+        databaseDirectory: String,
+        apiId: Int,
+        apiHash: String,
+        databaseEncryptionKey: ByteArray,
+    ): String? = awaitResult {
         client.send(
             TdApi.SetTdlibParameters().apply {
                 useTestDc = false
                 this.databaseDirectory = databaseDirectory
                 filesDirectory = databaseDirectory
-                databaseEncryptionKey = ByteArray(0)
+                this.databaseEncryptionKey = databaseEncryptionKey
                 useFileDatabase = true
                 useChatInfoDatabase = true
                 useMessageDatabase = true
-                useSecretChats = true
+                useSecretChats = false
                 this.apiId = apiId
                 this.apiHash = apiHash
                 systemLanguageCode = "fr"
@@ -153,6 +213,7 @@ class TdLibFacade(private val client: TdLibClient) {
                 systemVersion = "SecureMessenger"
                 applicationVersion = "1.0.5"
             },
+            it,
         )
     }
 
@@ -266,7 +327,7 @@ class TdLibFacade(private val client: TdLibClient) {
         mimeType: String,
         caption: String?,
         selfDestructSeconds: Int? = null,
-    ): String? {
+    ): TdSendResult {
         val formattedCaption = TdApi.FormattedText(caption.orEmpty(), emptyArray())
         val localFile = TdApi.InputFileLocal(localPath)
         val selfDestruct = selfDestructSeconds?.takeIf { it > 0 }?.let {
@@ -304,7 +365,7 @@ class TdLibFacade(private val client: TdLibClient) {
         localPath: String,
         durationMs: Int = 0,
         selfDestructSeconds: Int? = null,
-    ): String? {
+    ): TdSendResult {
         val durationSec = (durationMs / 1000).coerceAtLeast(0)
         val selfDestruct = selfDestructSeconds?.takeIf { it > 0 }?.let {
             TdApi.MessageSelfDestructTypeTimer(it)
@@ -327,7 +388,7 @@ class TdLibFacade(private val client: TdLibClient) {
         localPath: String,
         caption: String? = null,
         selfDestructSeconds: Int? = null,
-    ): String? {
+    ): TdSendResult {
         val selfDestruct = selfDestructSeconds?.takeIf { it > 0 }?.let {
             TdApi.MessageSelfDestructTypeTimer(it)
         }
@@ -471,6 +532,25 @@ class TdLibFacade(private val client: TdLibClient) {
         )
     }
 
+    suspend fun setChatNotificationMute(chatId: Long, muteForSeconds: Int): String? {
+        val chat = getChat(chatId) ?: return "Chat introuvable"
+        val settings = chat.notificationSettings ?: TdApi.ChatNotificationSettings()
+        settings.useDefaultMuteFor = false
+        settings.muteFor = muteForSeconds
+        return awaitResult {
+            client.send(TdApi.SetChatNotificationSettings(chatId, settings), it)
+        }
+    }
+
+    suspend fun toggleChatIsPinned(chatId: Long, isPinned: Boolean): String? = awaitResult {
+        client.send(TdApi.ToggleChatIsPinned(TdApi.ChatListMain(), chatId, isPinned), it)
+    }
+
+    suspend fun setChatArchived(chatId: Long, archived: Boolean): String? = awaitResult {
+        val list: TdApi.ChatList = if (archived) TdApi.ChatListArchive() else TdApi.ChatListMain()
+        client.send(TdApi.AddChatToList(chatId, list), it)
+    }
+
     suspend fun forwardMessages(
         toChatId: Long,
         fromChatId: Long,
@@ -492,7 +572,7 @@ class TdLibFacade(private val client: TdLibClient) {
         )
     }
 
-    suspend fun sendTextMessage(chatId: Long, text: String): String? {
+    suspend fun sendTextMessage(chatId: Long, text: String): TdSendResult {
         val linkPreview = TdApi.LinkPreviewOptions().apply {
             isDisabled = false
             url = ""
@@ -516,7 +596,7 @@ class TdLibFacade(private val client: TdLibClient) {
         longitude: Double,
         horizontalAccuracy: Double = 0.0,
         livePeriodSec: Int? = null,
-    ): String? {
+    ): TdSendResult {
         val location = TdApi.Location(latitude, longitude, horizontalAccuracy)
         val content: TdApi.InputMessageContent = if (livePeriodSec != null && livePeriodSec > 0) {
             TdApi.InputMessageLiveLocation(
@@ -534,7 +614,7 @@ class TdLibFacade(private val client: TdLibClient) {
         lastName: String = "",
         phone: String? = null,
         userId: Long = 0L,
-    ): String? {
+    ): TdSendResult {
         val content = TdApi.InputMessageContact(
             TdApi.Contact(phone.orEmpty(), firstName, lastName, "", userId),
         )
@@ -547,7 +627,7 @@ class TdLibFacade(private val client: TdLibClient) {
         options: List<String>,
         anonymous: Boolean = true,
         multipleAnswers: Boolean = false,
-    ): String? {
+    ): TdSendResult {
         val pollOptions = options.map {
             TdApi.InputPollOption(TdApi.FormattedText(it, emptyArray()), null)
         }.toTypedArray()
@@ -575,7 +655,7 @@ class TdLibFacade(private val client: TdLibClient) {
         chatId: Long,
         localPath: String,
         caption: String? = null,
-    ): String? {
+    ): TdSendResult {
         val content = TdApi.InputMessageAnimation(
             TdApi.InputAnimation(TdApi.InputFileLocal(localPath), null, intArrayOf(), 0, 0, 0),
             TdApi.FormattedText(caption.orEmpty(), emptyArray()),
@@ -589,7 +669,7 @@ class TdLibFacade(private val client: TdLibClient) {
         chatId: Long,
         localPath: String,
         emoji: String = "⭐",
-    ): String? {
+    ): TdSendResult {
         val content = TdApi.InputMessageSticker(
             TdApi.InputSticker(
                 TdApi.InputFileLocal(localPath),
@@ -643,7 +723,7 @@ class TdLibFacade(private val client: TdLibClient) {
     private suspend fun sendMessageContent(
         chatId: Long,
         content: TdApi.InputMessageContent,
-    ): String? = awaitResult {
+    ): TdSendResult = suspendCancellableCoroutine { cont ->
         client.send(
             TdApi.SendMessage().apply {
                 this.chatId = chatId
@@ -653,8 +733,19 @@ class TdLibFacade(private val client: TdLibClient) {
                 replyMarkup = null
                 inputMessageContent = content
             },
-            it,
-        )
+        ) { result ->
+            when (result) {
+                is TdApi.Error -> {
+                    Timber.w("SendMessage error ${result.code}: ${result.message}")
+                    if (cont.isActive) cont.resume(TdSendResult.Err(result.message))
+                }
+                is TdApi.Message -> if (cont.isActive) cont.resume(TdSendResult.Ok(result))
+                null -> if (cont.isActive) cont.resume(TdSendResult.Err("TDLib unavailable"))
+                else -> if (cont.isActive) {
+                    cont.resume(TdSendResult.Err("Unexpected TDLib response: ${result::class.simpleName}"))
+                }
+            }
+        }
     }
 
     /** TDLib Example.java uses LoadChats, not deprecated GetChats. */

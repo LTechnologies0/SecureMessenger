@@ -7,15 +7,15 @@ import org.junit.Test
 class NetworkPolicyTest {
 
     @Test
-    fun blocksOnlyWhenTorRequiredAndProxyUnhealthy() {
+    fun refusesClearnetWhenProxyUnhealthy() {
         assertFalse(evaluateNetworkAllowed(torRequired = true, proxyHealthy = false))
-        assertTrue(evaluateNetworkAllowed(torRequired = false, proxyHealthy = false))
+        // Legacy stored torRequired=false is not a clearnet escape hatch.
+        assertFalse(evaluateNetworkAllowed(torRequired = false, proxyHealthy = false))
     }
 
     @Test
-    fun allowsWhenProxyHealthyOrTorOptional() {
+    fun allowsOnlyWhenProxyHealthy() {
         assertTrue(evaluateNetworkAllowed(torRequired = true, proxyHealthy = true))
         assertTrue(evaluateNetworkAllowed(torRequired = false, proxyHealthy = true))
-        assertTrue(evaluateNetworkAllowed(torRequired = false, proxyHealthy = false))
     }
 }

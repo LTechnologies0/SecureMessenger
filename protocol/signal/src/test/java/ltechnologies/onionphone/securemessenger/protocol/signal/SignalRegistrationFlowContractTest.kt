@@ -2,6 +2,7 @@ package ltechnologies.onionphone.securemessenger.protocol.signal
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
@@ -29,5 +30,13 @@ class SignalRegistrationFlowContractTest {
             SignalRegistrationStep.Failed("x"),
         )
         assertEquals(6, steps.size)
+    }
+
+    @Test
+    fun pinIsStoredLocallyAndNotSentAsRegistrationLock() {
+        val material = SignalPreKeyMaterial.generate()
+        val attributes = material.buildAccountAttributes("password", "987654")
+        assertNull(attributes.registrationLock)
+        assertNull(attributes.recoveryPassword)
     }
 }

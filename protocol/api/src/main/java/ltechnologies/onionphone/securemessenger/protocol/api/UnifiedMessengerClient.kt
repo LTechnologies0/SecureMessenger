@@ -17,6 +17,7 @@ import ltechnologies.onionphone.securemessenger.core.model.ProxyConfig
 import ltechnologies.onionphone.securemessenger.core.model.SanitizedText
 import ltechnologies.onionphone.securemessenger.core.model.SendResult
 import ltechnologies.onionphone.securemessenger.core.proxy.ProxyManager
+import ltechnologies.onionphone.securemessenger.core.proxy.SocksEndpointResolver
 
 /**
  * Single entry point for the UI and foreground service to talk to every enabled messenger SDK.
@@ -37,12 +38,18 @@ class UnifiedMessengerClient @Inject constructor(
     suspend fun connect(account: AccountCredentials): ConnectionResult {
         val impl = registry.get(account.protocol)
             ?: return ConnectionResult.Failure("Protocol not registered")
+        // Align with ConnectionManager.resolveProxyOrFail: Tor mandatory + reachable host rewrite.
         if (!proxyManager.ensureProxyReady()) {
             return ConnectionResult.Failure(
                 "Tor requis : démarrez OnionVPN (Paramètres → Proxy), puis réessayez.",
             )
         }
-        return impl.connect(account, proxyManager.currentConfig())
+        val raw = proxyManager.currentConfig()
+        val proxy = raw.copy(
+            host = SocksEndpointResolver.resolveReachableHost(raw.host, raw.port),
+            torRequired = true,
+        )
+        return impl.connect(account, proxy)
     }
 
     suspend fun continueAuth(protocol: ProtocolId, fields: Map<String, String>): ConnectionResult {
@@ -52,6 +59,11 @@ class UnifiedMessengerClient @Inject constructor(
 
     suspend fun pendingAuth(protocol: ProtocolId): AuthStep? = registry.get(protocol)?.pendingAuthStep()
 
+    /**
+     * Per-protocol flows are scoped to [ProtocolId] inside each [MessengerProtocol] implementation.
+     * For the full inbox, prefer [ltechnologies.onionphone.securemessenger.data.MessengerRepository.observeConversations]
+     * (as [ltechnologies.onionphone.securemessenger.ui.MainViewModel] does).
+     */
     fun observeConversations(protocol: ProtocolId? = null): Flow<List<Conversation>> {
         if (protocol != null) {
             return registry.get(protocol)?.observeConversations()

@@ -25,32 +25,20 @@ object OnionVpnPacClient {
         }.getOrDefault(false)
 
     /**
-     * Fetch PAC and parse the SOCKS5 endpoint. Falls back to `:18202` if PAC is up
-     * but unparsable; fails if PAC is fail-closed or unreachable and health is down.
+     * Fetch PAC and parse the SOCKS5 endpoint. Fail-closed: no fallback to the default
+     * bridge if PAC is down, fail-closed (`PROXY 127.0.0.1:1`), or unparsable.
      */
     fun resolveSocksEndpoint(
         timeoutMs: Int = OnionVpnConstants.CONNECT_TIMEOUT_MS,
     ): Result<OnionVpnSocksEndpoint> =
         runCatching {
             val pac = httpGet(OnionVpnConstants.PAC_URL, timeoutMs)
-            if (pac != null) {
-                if (failClosed.containsMatchIn(pac) && OnionVpnConstants.SOCKS5_IN_PAC.find(pac) == null) {
-                    error("OnionVPN tunnel down (PAC fail-closed)")
-                }
-                parseSocksFromPac(pac)?.let { return@runCatching it }
-                Timber.w(
-                    "PAC fetched but no SOCKS line; using fallback :%d",
-                    OnionVpnConstants.FALLBACK_SOCKS_PORT,
-                )
+                ?: error("OnionVPN PAC unreachable — démarrez OnionVPN")
+            if (failClosed.containsMatchIn(pac) && OnionVpnConstants.SOCKS5_IN_PAC.find(pac) == null) {
+                error("OnionVPN tunnel down (PAC fail-closed)")
             }
-            if (!isBridgeHealthy(timeoutMs)) {
-                error("OnionVPN PAC/health unreachable — démarrez OnionVPN")
-            }
-            OnionVpnSocksEndpoint(
-                host = OnionVpnConstants.DEFAULT_BRIDGE_HOST,
-                port = OnionVpnConstants.FALLBACK_SOCKS_PORT,
-                fromPac = false,
-            )
+            parseSocksFromPac(pac)
+                ?: error("OnionVPN PAC unparsable — no SOCKS5 endpoint (fail-closed)")
         }
 
     fun parseSocksFromPac(body: String): OnionVpnSocksEndpoint? {

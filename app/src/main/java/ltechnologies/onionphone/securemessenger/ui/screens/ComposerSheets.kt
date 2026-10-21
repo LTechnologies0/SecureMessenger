@@ -10,6 +10,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -20,6 +24,7 @@ import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Poll
+import androidx.compose.material.icons.filled.SentimentSatisfied
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -38,8 +43,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
+import coil3.compose.AsyncImage
 import ltechnologies.onionphone.securemessenger.core.model.ProtocolCapabilities
+import ltechnologies.onionphone.securemessenger.protocol.telegram.TelegramSticker
 
 internal enum class ComposerPickKind {
     IMAGE,
@@ -54,6 +62,11 @@ internal enum class ComposerDialog {
     POLL,
     CONTACT,
     EPHEMERAL,
+    STICKER,
+    MESSAGE_ACTIONS,
+    FORWARD,
+    EDIT_MATRIX,
+    SAFETY_NUMBER,
 }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -79,7 +92,7 @@ internal fun ComposerAttachSheet(
                 modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
             )
 
-            if (capabilities.mediaSend || capabilities.gifs || capabilities.voiceNotes) {
+            if (capabilities.mediaSend || capabilities.gifs || capabilities.voiceNotes || capabilities.stickers) {
                 SectionHeader("Médias")
                 FlowRow(
                     modifier = Modifier.padding(horizontal = 8.dp),
@@ -124,6 +137,17 @@ internal fun ComposerAttachSheet(
                             onClick = {
                                 onDismiss()
                                 onPickMedia(ComposerPickKind.VOICE)
+                            },
+                        )
+                    }
+                    if (capabilities.stickers) {
+                        AttachSheetItem(
+                            icon = Icons.Default.SentimentSatisfied,
+                            title = "Sticker",
+                            subtitle = "Packs installés",
+                            onClick = {
+                                onDismiss()
+                                onOpenDialog(ComposerDialog.STICKER)
                             },
                         )
                     }
@@ -183,6 +207,7 @@ internal fun ComposerAttachSheet(
             }
 
             if (!capabilities.mediaSend && !capabilities.gifs && !capabilities.voiceNotes &&
+                !capabilities.stickers &&
                 !capabilities.locationShare && !capabilities.polls && !capabilities.contactShare &&
                 !capabilities.ephemeralMessages
             ) {
@@ -355,6 +380,73 @@ internal fun ContactComposerDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Annuler") } },
     )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun StickerPickerSheet(
+    stickers: List<TelegramSticker>,
+    loading: Boolean,
+    onDismiss: () -> Unit,
+    onPick: (TelegramSticker) -> Unit,
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 24.dp),
+        ) {
+            Text(
+                text = "Stickers",
+                style = MaterialTheme.typography.titleLarge,
+                modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
+            )
+            when {
+                loading -> {
+                    Text(
+                        "Chargement…",
+                        modifier = Modifier.padding(24.dp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                stickers.isEmpty() -> {
+                    Text(
+                        "Aucun sticker — installez des packs dans Telegram officiel.",
+                        modifier = Modifier.padding(24.dp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                else -> {
+                    LazyVerticalGrid(
+                        columns = GridCells.Adaptive(72.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(320.dp)
+                            .padding(horizontal = 12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        items(stickers, key = { it.id }) { sticker ->
+                            val path = sticker.localPath
+                            if (path != null) {
+                                AsyncImage(
+                                    model = path,
+                                    contentDescription = sticker.emoji,
+                                    modifier = Modifier
+                                        .size(72.dp)
+                                        .clickable {
+                                            onPick(sticker)
+                                            onDismiss()
+                                        },
+                                    contentScale = ContentScale.Fit,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable

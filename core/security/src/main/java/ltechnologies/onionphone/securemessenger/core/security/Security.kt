@@ -114,6 +114,8 @@ class EncryptedCredentialStore @Inject constructor(
         const val META_PROTOCOL = "__protocol"
         const val META_DISPLAY_NAME = "__displayName"
         private const val PROXY_PASSWORD_KEY = "__proxy:password"
+        private const val TDLIB_KEY = "__tdlibKey"
+        private const val MATRIX_H2_KEY = "__matrixH2"
     }
 
     /** Stores (or clears, if [password] is null/blank) the global Tor SOCKS5 proxy password. */
@@ -132,6 +134,31 @@ class EncryptedCredentialStore @Inject constructor(
     fun getProxyPassword(): String? {
         appLockManager.assertUnlocked()
         return prefs.getString(PROXY_PASSWORD_KEY, null)
+    }
+
+    /** 32-byte TDLib databaseEncryptionKey, generated once per account. */
+    fun getOrCreateTdlibKey(accountId: String): ByteArray {
+        appLockManager.assertUnlocked()
+        val existing = get(accountId, TDLIB_KEY)
+        if (!existing.isNullOrBlank()) {
+            return android.util.Base64.decode(existing, android.util.Base64.NO_WRAP)
+        }
+        val key = ByteArray(32)
+        java.security.SecureRandom().nextBytes(key)
+        put(accountId, TDLIB_KEY, android.util.Base64.encodeToString(key, android.util.Base64.NO_WRAP))
+        return key
+    }
+
+    /** H2 file password for Matrix Trixnity (`CIPHER=AES`). */
+    fun getOrCreateMatrixH2Password(accountId: String): String {
+        appLockManager.assertUnlocked()
+        val existing = get(accountId, MATRIX_H2_KEY)
+        if (!existing.isNullOrBlank()) return existing
+        val bytes = ByteArray(32)
+        java.security.SecureRandom().nextBytes(bytes)
+        val generated = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+        put(accountId, MATRIX_H2_KEY, generated)
+        return generated
     }
 }
 

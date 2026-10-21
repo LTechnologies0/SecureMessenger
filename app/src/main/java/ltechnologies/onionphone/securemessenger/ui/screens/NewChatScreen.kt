@@ -216,7 +216,7 @@ fun NewChatScreen(
                 singleLine = true,
             )
 
-            if (protocol == ProtocolId.TELEGRAM && !asGroup) {
+            if (protocol == ProtocolId.TELEGRAM && !asGroup && capabilities.contacts) {
                 OutlinedButton(
                     onClick = {
                         val phone = remoteId.trim()

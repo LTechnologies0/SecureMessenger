@@ -12,7 +12,7 @@ import ltechnologies.onionphone.securemessenger.core.model.ProxyConfig
 import ltechnologies.onionphone.securemessenger.core.proxy.SocksEndpointResolver
 import okhttp3.OkHttpClient
 
-/** Builds a Ktor HTTP client for Matrix CS API; SOCKS only when [ProxyConfig.torRequired]. */
+/** Builds a Ktor HTTP client for Matrix CS API; always Tor SOCKS (no clearnet). */
 internal object MatrixHttpClientFactory {
     fun create(proxy: ProxyConfig): HttpClient {
         val okhttp = buildOkHttp(proxy)
@@ -27,13 +27,11 @@ internal object MatrixHttpClientFactory {
     }
 
     fun buildOkHttp(proxy: ProxyConfig): OkHttpClient {
-        val builder = OkHttpClient.Builder()
-        if (proxy.torRequired) {
-            val socksHost = SocksEndpointResolver.resolveReachableHost(proxy.host, proxy.port)
-            requireSocksReachable(socksHost, proxy.port)
-            builder.proxy(Proxy(Proxy.Type.SOCKS, InetSocketAddress(socksHost, proxy.port)))
-        }
-        return builder.build()
+        val socksHost = SocksEndpointResolver.resolveReachableHost(proxy.host, proxy.port)
+        requireSocksReachable(socksHost, proxy.port)
+        return OkHttpClient.Builder()
+            .proxy(Proxy(Proxy.Type.SOCKS, InetSocketAddress(socksHost, proxy.port)))
+            .build()
     }
 
     private fun requireSocksReachable(host: String, port: Int) {

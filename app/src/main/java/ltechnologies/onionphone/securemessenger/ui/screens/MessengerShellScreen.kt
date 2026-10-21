@@ -50,6 +50,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import ltechnologies.onionphone.securemessenger.core.model.Account
+import ltechnologies.onionphone.securemessenger.core.model.ConnectionState
 import ltechnologies.onionphone.securemessenger.core.model.ProtocolId
 import ltechnologies.onionphone.securemessenger.ui.MainViewModel
 import ltechnologies.onionphone.securemessenger.ui.components.accountRailLabel
@@ -66,6 +67,17 @@ private fun rememberAccountProtocolIndices(accounts: List<Account>): Map<String,
         counts[account.protocol] = index + 1
         account.id to index
     }
+}
+
+/** Prefer last selected if still present; else first CONNECTED; else first account. */
+private fun pickDefaultAccountId(
+    accounts: List<Account>,
+    preferredId: String?,
+): String? {
+    if (accounts.isEmpty()) return null
+    if (preferredId != null && accounts.any { it.id == preferredId }) return preferredId
+    return accounts.firstOrNull { it.connectionState == ConnectionState.CONNECTED }?.id
+        ?: accounts.first().id
 }
 
 private enum class ShellOverlay {
@@ -97,20 +109,21 @@ fun MessengerShellScreen(
     var addProtocol by rememberSaveable { mutableStateOf(ProtocolId.XMPP.name) }
 
     LaunchedEffect(accounts) {
-        if (selectedAccountId == null && accounts.isNotEmpty()) {
-            selectedAccountId = accounts.first().id
-        }
-        if (selectedAccountId != null && accounts.none { it.id == selectedAccountId }) {
-            selectedAccountId = accounts.firstOrNull()?.id
-            openConversationId = null
+        val next = pickDefaultAccountId(accounts, selectedAccountId)
+        if (next != selectedAccountId) {
+            if (selectedAccountId != null && accounts.none { it.id == selectedAccountId }) {
+                openConversationId = null
+            }
+            selectedAccountId = next
+        } else if (selectedAccountId == null && next != null) {
+            selectedAccountId = next
         }
     }
 
     val selectedAccount = accounts.firstOrNull { it.id == selectedAccountId }
     val protocolIndices = rememberAccountProtocolIndices(accounts)
-    val unreadForSelected = conversations
-        .filter { it.accountId == selectedAccountId }
-        .sumOf { it.unreadCount }
+    val unreadByAccount = conversations.groupingBy { it.accountId }
+        .fold(0) { acc, conv -> acc + conv.unreadCount }
 
     when (overlay) {
         ShellOverlay.ADD_ACCOUNT_PICKER -> {
@@ -258,7 +271,7 @@ fun MessengerShellScreen(
             protocolIndices = protocolIndices,
             contactsSelected = false,
             settingsSelected = false,
-            unreadCount = unreadForSelected,
+            unreadByAccount = unreadByAccount,
             onSelectAccount = {
                 selectedAccountId = it
                 openConversationId = null
@@ -304,7 +317,7 @@ private fun AccountNavigationRail(
     protocolIndices: Map<String, Int>,
     contactsSelected: Boolean,
     settingsSelected: Boolean,
-    unreadCount: Int,
+    unreadByAccount: Map<String, Int>,
     onSelectAccount: (String) -> Unit,
     onAddAccount: () -> Unit,
     onOpenContacts: () -> Unit,
@@ -317,14 +330,15 @@ private fun AccountNavigationRail(
             val label = accountRailLabel(account, protocolIndices[account.id] ?: 0)
             val accent = protocolAccentColor(account.protocol)
             val selected = account.id == selectedAccountId
+            val accountUnread = unreadByAccount[account.id] ?: 0
             NavigationRailItem(
                 selected = selected,
                 onClick = { onSelectAccount(account.id) },
                 icon = {
                     BadgedBox(
                         badge = {
-                            if (selected && unreadCount > 0) {
-                                Badge { Text(unreadCount.coerceAtMost(99).toString()) }
+                            if (accountUnread > 0) {
+                                Badge { Text(accountUnread.coerceAtMost(99).toString()) }
                             }
                         },
                     ) {
@@ -503,6 +517,7 @@ private fun MainContentPane(
             modifier = Modifier.padding(padding),
             viewModel = viewModel,
             accountId = selectedAccount.id,
+            inboxProtocol = selectedAccount.protocol,
             onConversationClick = onConversationClick,
             onNewChat = onNewChat,
             embedded = true,

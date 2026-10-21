@@ -12,6 +12,7 @@ import ltechnologies.onionphone.securemessenger.core.model.Conversation
 import ltechnologies.onionphone.securemessenger.core.model.Message
 import ltechnologies.onionphone.securemessenger.core.model.ProxyConfig
 import ltechnologies.onionphone.securemessenger.core.model.TorProvider
+import ltechnologies.onionphone.securemessenger.core.security.AppLockManager
 import ltechnologies.onionphone.securemessenger.data.db.MessageDao
 import ltechnologies.onionphone.securemessenger.data.db.ProxySettingsEntity
 import ltechnologies.onionphone.securemessenger.data.db.toDomain
@@ -20,6 +21,7 @@ import ltechnologies.onionphone.securemessenger.data.db.toEntity
 @Singleton
 class MessengerRepository @Inject constructor(
     private val database: EncryptedMessengerDatabase,
+    private val appLockManager: AppLockManager,
 ) {
     /** Opens SQLCipher only when the Flow is collected (after app unlock). */
     fun observeAccounts(): Flow<List<Account>> = flow {
@@ -88,23 +90,67 @@ class MessengerRepository @Inject constructor(
     }
 
     suspend fun upsertAccount(account: Account) {
+        if (!appLockManager.isUnlocked) return
         database.get().accountDao().upsert(account.toEntity())
     }
 
     suspend fun upsertConversation(conversation: Conversation) {
+        if (!appLockManager.isUnlocked) return
         database.get().conversationDao().upsert(conversation.toEntity())
     }
 
     suspend fun upsertConversations(conversations: List<Conversation>) {
+        if (!appLockManager.isUnlocked) return
         database.get().conversationDao().upsertAll(conversations.map { it.toEntity() })
     }
 
+    /** Keep existing title/unread when Trixnity room list has empty preview. */
+    suspend fun mergeConversationMetadata(conversation: Conversation) {
+        if (!appLockManager.isUnlocked) return
+        val existing = getConversation(conversation.id)
+        val title = conversation.title.takeUnless { it.isBlank() || it == conversation.remoteId }
+            ?: existing?.title
+            ?: conversation.title
+        upsertConversation(
+            conversation.copy(
+                title = title,
+                lastMessagePreview = conversation.lastMessagePreview ?: existing?.lastMessagePreview,
+                lastMessageAt = maxOf(conversation.lastMessageAt, existing?.lastMessageAt ?: 0L),
+                unreadCount = existing?.unreadCount ?: conversation.unreadCount,
+            ),
+        )
+    }
+
+    /**
+     * Merges title (keep existing non-id title), preview, and unread on incoming messages.
+     */
+    suspend fun mergeIncomingConversation(conversation: Conversation, incoming: Boolean) {
+        if (!appLockManager.isUnlocked) return
+        val existing = getConversation(conversation.id)
+        val title = existing?.title?.takeIf { it.isNotBlank() && it != conversation.remoteId }
+            ?: conversation.title
+        val unread = if (incoming) {
+            (existing?.unreadCount ?: 0) + 1
+        } else {
+            existing?.unreadCount ?: 0
+        }
+        upsertConversation(
+            conversation.copy(
+                title = title,
+                lastMessagePreview = conversation.lastMessagePreview ?: existing?.lastMessagePreview,
+                lastMessageAt = maxOf(conversation.lastMessageAt, existing?.lastMessageAt ?: 0L),
+                unreadCount = unread,
+            ),
+        )
+    }
+
     suspend fun upsertMessage(message: Message) {
+        if (!appLockManager.isUnlocked) return
         database.get().messageDao().upsert(message.toEntity())
     }
 
     suspend fun upsertMessages(messages: List<Message>) {
-        if (messages.isEmpty()) return
+        if (!appLockManager.isUnlocked || messages.isEmpty()) return
         database.get().messageDao().upsertAll(messages.map { it.toEntity() })
     }
 

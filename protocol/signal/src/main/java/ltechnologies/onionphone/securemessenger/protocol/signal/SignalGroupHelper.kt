@@ -217,7 +217,7 @@ internal class SignalGroupHelper(
 
     private data class SenderKeyParts(
         val endorsements: GroupSendEndorsements,
-        val unidentifiedAccess: List<UnidentifiedAccess>,
+        val unidentifiedAccess: List<UnidentifiedAccess?>,
     )
 
     private fun groupsV2AuthString(
@@ -293,9 +293,8 @@ internal class SignalGroupHelper(
                 sealedSenderCertificate = senderCertificate,
                 groupSecretParams = secretParams,
             )
-            val accessKey = ByteArray(16)
-            val ua = recipients.map {
-                UnidentifiedAccess(accessKey, certBytes, /* isUnrestrictedForStory = */ true)
+            val ua = recipients.map { recipient ->
+                unidentifiedAccessForMember(recipient.serviceId.toString(), certBytes)
             }
             SenderKeyParts(endorsements, ua)
         } catch (e: Exception) {
@@ -309,12 +308,29 @@ internal class SignalGroupHelper(
         val groupContext: SignalServiceGroupV2,
         val distributionId: DistributionId,
         val groupSendEndorsements: GroupSendEndorsements?,
-        val unidentifiedAccess: List<UnidentifiedAccess>,
+        val unidentifiedAccess: List<UnidentifiedAccess?>,
     ) {
         val canUseSenderKeys: Boolean
             get() = groupSendEndorsements != null &&
                 unidentifiedAccess.size == recipients.size &&
                 recipients.isNotEmpty()
+    }
+
+    /**
+     * Identified sealed-sender access from a stored profile key.
+     * Missing profile key returns null so GroupSendUtil can fall back to the endorsement token.
+     * Never a zero access key, and never unrestricted-for-story.
+     */
+    internal fun unidentifiedAccessForMember(aci: String, senderCertificate: ByteArray): UnidentifiedAccess? {
+        val encoded = credentialStore.get(accountId, SignalCredentialKeys.peerProfileKey(aci)) ?: return null
+        val profileKey = SignalFeatureHelpers.decodeProfileKey(encoded) ?: return null
+        return try {
+            val accessKey = UnidentifiedAccess.deriveAccessKeyFrom(profileKey)
+            UnidentifiedAccess(accessKey, senderCertificate, /* isUnrestrictedForStory = */ false)
+        } catch (e: Exception) {
+            Timber.w(e, "Unidentified access key unavailable for %s", aci)
+            null
+        }
     }
 
     companion object {

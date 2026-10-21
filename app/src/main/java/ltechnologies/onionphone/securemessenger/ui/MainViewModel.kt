@@ -1,8 +1,11 @@
 package ltechnologies.onionphone.securemessenger.ui
 
+import android.content.Context
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -45,6 +48,7 @@ import ltechnologies.onionphone.securemessenger.service.ConnectionManager
 
 @HiltViewModel
 class MainViewModel @Inject constructor(
+    @ApplicationContext private val appContext: Context,
     private val repository: MessengerRepository,
     private val backupExporter: LocalBackupExporter,
     private val connectionManager: ConnectionManager,
@@ -157,6 +161,42 @@ class MainViewModel @Inject constructor(
         }
     }
 
+    fun exportEncryptedBackup(
+        accountId: String,
+        protocol: ProtocolId,
+        destination: Uri,
+        passphrase: String,
+        onResult: (BackupExportResult) -> Unit,
+    ) {
+        viewModelScope.launch {
+            if (passphrase.length < 8) {
+                onResult(BackupExportResult.Failure("Passphrase trop courte (8 caractères min.)"))
+                return@launch
+            }
+            val chars = passphrase.toCharArray()
+            try {
+                val stream = appContext.contentResolver.openOutputStream(destination)
+                    ?: run {
+                        onResult(BackupExportResult.Failure("Impossible d'ouvrir le fichier SAF"))
+                        return@launch
+                    }
+                stream.use { out ->
+                    onResult(
+                        backupExporter.exportEncrypted(
+                            accountId = accountId,
+                            protocol = protocol,
+                            output = out,
+                            passphrase = chars,
+                            destinationLabel = destination.toString(),
+                        ),
+                    )
+                }
+            } finally {
+                chars.fill('\u0000')
+            }
+        }
+    }
+
     fun setTyping(conversationId: String, protocol: ProtocolId, typing: Boolean) {
         viewModelScope.launch {
             connectionManager.protocolFor(protocol)?.setTyping(conversationId, typing)
@@ -183,6 +223,10 @@ class MainViewModel @Inject constructor(
     fun telegramProtocol(): TelegramProtocol? =
         connectionManager.protocolFor(ProtocolId.TELEGRAM) as? TelegramProtocol
 
+    fun matrixProtocol(): ltechnologies.onionphone.securemessenger.protocol.matrix.MatrixProtocol? =
+        connectionManager.protocolFor(ProtocolId.MATRIX)
+            as? ltechnologies.onionphone.securemessenger.protocol.matrix.MatrixProtocol
+
     fun votePoll(
         conversationId: String,
         messageId: String,
@@ -197,13 +241,98 @@ class MainViewModel @Inject constructor(
 
     fun addReaction(
         conversationId: String,
+        protocol: ProtocolId,
         messageId: String,
         emoji: String,
         onResult: (Boolean) -> Unit = {},
     ) {
         viewModelScope.launch {
-            val ok = telegramProtocol()?.addReaction(conversationId, messageId, emoji)?.isSuccess == true
+            val ok = when (protocol) {
+                ProtocolId.TELEGRAM ->
+                    telegramProtocol()?.addReaction(conversationId, messageId, emoji)?.isSuccess == true
+                ProtocolId.MATRIX ->
+                    matrixProtocol()?.addReaction(conversationId, messageId, emoji)?.isSuccess == true
+                else -> false
+            }
             onResult(ok)
+        }
+    }
+
+    fun editMatrixMessage(
+        conversationId: String,
+        messageId: String,
+        newBody: String,
+        onResult: (Boolean) -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            val ok = matrixProtocol()?.editMessage(conversationId, messageId, newBody)?.isSuccess == true
+            onResult(ok)
+        }
+    }
+
+    fun redactMatrixMessage(
+        conversationId: String,
+        messageId: String,
+        onResult: (Boolean) -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            val ok = matrixProtocol()?.redactMessage(conversationId, messageId)?.isSuccess == true
+            onResult(ok)
+        }
+    }
+
+    fun setTelegramChatMuted(
+        conversationId: String,
+        muteForSeconds: Int,
+        onResult: (Boolean) -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            val ok = telegramProtocol()?.setChatMuted(conversationId, muteForSeconds)?.isSuccess == true
+            onResult(ok)
+        }
+    }
+
+    fun setTelegramChatPinned(
+        conversationId: String,
+        pinned: Boolean,
+        onResult: (Boolean) -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            val ok = telegramProtocol()?.setChatPinned(conversationId, pinned)?.isSuccess == true
+            onResult(ok)
+        }
+    }
+
+    fun setTelegramChatArchived(
+        conversationId: String,
+        archived: Boolean,
+        onResult: (Boolean) -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            val ok = telegramProtocol()?.setChatArchived(conversationId, archived)?.isSuccess == true
+            onResult(ok)
+        }
+    }
+
+    fun emailImapSentFolderConfigured(accountId: String?): Boolean {
+        if (accountId == null) return false
+        val protocol = connectionManager.protocolFor(ProtocolId.EMAIL)
+            as? ltechnologies.onionphone.securemessenger.protocol.email.EmailProtocol
+        return protocol?.hasImapSentFolder(accountId) == true
+    }
+
+    fun loadSignalSafetyNumber(
+        conversationId: String,
+        accountId: String?,
+        onResult: (String?, String?) -> Unit,
+    ) {
+        viewModelScope.launch {
+            val result = signalProtocol()?.safetyNumberForConversation(conversationId, accountId)
+            if (result?.isSuccess == true) {
+                onResult(result.getOrNull(), null)
+            } else {
+                onResult(null, result?.exceptionOrNull()?.message ?: "Indisponible")
+            }
         }
     }
 
@@ -289,6 +418,9 @@ class MainViewModel @Inject constructor(
     fun signalProtocol(): ltechnologies.onionphone.securemessenger.protocol.signal.SignalProtocol? =
         connectionManager.protocolFor(ProtocolId.SIGNAL) as? ltechnologies.onionphone.securemessenger.protocol.signal.SignalProtocol
 
+    fun isSignalLinkAndSyncInProgress(accountId: String): Boolean =
+        signalProtocol()?.isLinkAndSyncInProgress(accountId) == true
+
     fun connectSignal(phone: String, onResult: (ConnectionResult, String) -> Unit) {
         val accountId = UUID.randomUUID().toString()
         val credentials = AccountCredentials(
@@ -362,17 +494,23 @@ class MainViewModel @Inject constructor(
         }
     }
 
-    fun sendMessage(conversationId: String, protocol: ProtocolId, body: String, onResult: (Boolean) -> Unit) {
+    fun sendMessage(
+        conversationId: String,
+        protocol: ProtocolId,
+        body: String,
+        onResult: (ok: Boolean, reason: String?, remappedConversationId: String?) -> Unit,
+    ) {
         viewModelScope.launch {
             val sanitized = MessageSanitizer.sanitize(body)
-            val protocolImpl = connectionManager.protocolFor(protocol)
-            if (protocolImpl == null) {
-                onResult(false)
+            val protocolImpl = connectionManager.protocolFor(protocol) ?: run {
+                onResult(false, "Protocole indisponible", null)
                 return@launch
             }
             val accountId = repository.getConversation(conversationId)?.accountId
-            val result = protocolImpl.sendMessage(conversationId, sanitized, accountId)
-            onResult(result is ltechnologies.onionphone.securemessenger.core.model.SendResult.Success)
+            when (val result = protocolImpl.sendMessage(conversationId, sanitized, accountId)) {
+                is SendResult.Success -> onResult(true, null, result.conversationId)
+                is SendResult.Failure -> onResult(false, result.reason, null)
+            }
         }
     }
 
@@ -381,17 +519,19 @@ class MainViewModel @Inject constructor(
         protocol: ProtocolId,
         attachment: Attachment,
         caption: String?,
-        onResult: (Boolean) -> Unit,
+        onResult: (ok: Boolean, reason: String?, remappedConversationId: String?) -> Unit,
     ) {
         viewModelScope.launch {
             val protocolImpl = connectionManager.protocolFor(protocol) ?: run {
-                onResult(false)
+                onResult(false, "Protocole indisponible", null)
                 return@launch
             }
             val sanitizedCaption = caption?.let { MessageSanitizer.sanitize(it) }
             val accountId = repository.getConversation(conversationId)?.accountId
-            val result = protocolImpl.sendMedia(conversationId, attachment, sanitizedCaption, accountId)
-            onResult(result is ltechnologies.onionphone.securemessenger.core.model.SendResult.Success)
+            when (val result = protocolImpl.sendMedia(conversationId, attachment, sanitizedCaption, accountId)) {
+                is SendResult.Success -> onResult(true, null, result.conversationId)
+                is SendResult.Failure -> onResult(false, result.reason, null)
+            }
         }
     }
 
@@ -551,6 +691,9 @@ class MainViewModel @Inject constructor(
                 directMessages = false,
                 backupExport = false,
             )
+
+    fun isConversationE2ee(conversationId: String, protocol: ProtocolId): Boolean =
+        connectionManager.protocolFor(protocol)?.isConversationE2ee(conversationId) == true
 
     fun canRegister(protocol: ProtocolId): Boolean =
         connectionManager.protocolFor(protocol)?.canRegister == true

@@ -80,6 +80,20 @@ object MimeMapper {
         )
     }
 
+    /** Counterparty email for threading UI / reply resolution (not Message-ID root). */
+    fun peerAddress(parsed: ParsedMail, ownEmail: String): String {
+        val fromAddr = EmailAddress.extract(parsed.from)
+        return if (fromAddr.equals(ownEmail, ignoreCase = true)) {
+            parsed.to.firstOrNull()
+                ?.let { EmailAddress.extract(it) }
+                ?.takeIf { EmailAddress.isValid(it) }
+                ?.let { EmailAddress.normalize(it) }
+                ?: EmailAddress.normalize(fromAddr)
+        } else {
+            EmailAddress.normalize(fromAddr)
+        }
+    }
+
     fun toDomainMessage(
         accountId: String,
         conversationId: String,
@@ -88,6 +102,7 @@ object MimeMapper {
     ): Message {
         val fromAddr = EmailAddress.extract(parsed.from)
         val outgoing = fromAddr.equals(ownEmail, ignoreCase = true)
+        val peer = peerAddress(parsed, ownEmail)
         val kind = when {
             parsed.attachments.any { it.mimeType.startsWith("image/") } -> MessageKind.IMAGE
             parsed.attachments.isNotEmpty() -> MessageKind.FILE
@@ -108,7 +123,8 @@ object MimeMapper {
                 append('{')
                 append("\"messageId\":\"").append(jsonEscape(parsed.messageId)).append("\",")
                 append("\"subject\":\"").append(jsonEscape(parsed.subject)).append("\",")
-                append("\"rootMessageId\":\"").append(jsonEscape(parsed.rootMessageId)).append('"')
+                append("\"rootMessageId\":\"").append(jsonEscape(parsed.rootMessageId)).append("\",")
+                append("\"to\":\"").append(jsonEscape(peer)).append('"')
                 append('}')
             },
         )
@@ -120,6 +136,7 @@ object MimeMapper {
         to: List<String>,
         subject: String,
         body: String,
+        cc: List<String> = emptyList(),
         inReplyTo: String? = null,
         references: String? = null,
         attachments: List<Attachment> = emptyList(),
@@ -130,6 +147,12 @@ object MimeMapper {
             MailMessage.RecipientType.TO,
             to.map { InternetAddress(it) }.toTypedArray(),
         )
+        if (cc.isNotEmpty()) {
+            message.setRecipients(
+                MailMessage.RecipientType.CC,
+                cc.map { InternetAddress(it) }.toTypedArray(),
+            )
+        }
         message.subject = subject
         message.sentDate = java.util.Date()
         if (!inReplyTo.isNullOrBlank()) {

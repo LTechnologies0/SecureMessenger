@@ -4,11 +4,10 @@ import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.http.ContentType
 import io.ktor.http.Url
 import java.io.File
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import ltechnologies.onionphone.securemessenger.protocol.api.protocolIoScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -43,8 +42,11 @@ import net.folivo.trixnity.client.room.RoomService
 import net.folivo.trixnity.client.room.message.audio
 import net.folivo.trixnity.client.room.message.file
 import net.folivo.trixnity.client.room.message.image
+import net.folivo.trixnity.client.room.message.react
+import net.folivo.trixnity.client.room.message.replace
 import net.folivo.trixnity.client.room.message.text
 import net.folivo.trixnity.client.room.message.video
+import net.folivo.trixnity.client.store.AccountStore
 import net.folivo.trixnity.client.store.TimelineEvent
 import net.folivo.trixnity.client.store.eventId
 import net.folivo.trixnity.client.store.originTimestamp
@@ -77,8 +79,9 @@ import kotlin.time.Duration.Companion.seconds
 class TrixnityMatrixEngine(
     private val repository: MessengerRepository,
     private val filesDir: File,
+    private val h2Password: String,
 ) {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope = protocolIoScope("matrix-trixnity")
     private var client: MatrixClient? = null
     private var observeJob: Job? = null
 
@@ -138,8 +141,8 @@ class TrixnityMatrixEngine(
     ): Result<MatrixClient> = withContext(Dispatchers.IO) {
         try {
             val paths = accountPaths(accountId)
-            // Prefer restoring Olm/Megolm state from the persistent Exposed store.
-            restoreFromStore(accountId, proxy).getOrNull()?.let { restored ->
+            // Prefer restoring Olm/Megolm state from the persistent Exposed store when the token matches.
+            restoreFromStore(accountId, proxy, expectedAccessToken = accessToken).getOrNull()?.let { restored ->
                 return@withContext Result.success(restored)
             }
             val baseUrl = Url(MatrixUrls.normalizeHomeserver(apiBaseUrl))
@@ -227,7 +230,11 @@ class TrixnityMatrixEngine(
      * Restores a MatrixClient from the per-account H2 crypto store when Olm account data exists.
      * Returns failure/null when the store is empty (first login) so callers can fall through to login.
      */
-    suspend fun restoreFromStore(accountId: String, proxy: ProxyConfig): Result<MatrixClient?> =
+    suspend fun restoreFromStore(
+        accountId: String,
+        proxy: ProxyConfig,
+        expectedAccessToken: String? = null,
+    ): Result<MatrixClient?> =
         withContext(Dispatchers.IO) {
             runCatching {
                 val paths = accountPaths(accountId)
@@ -249,12 +256,24 @@ class TrixnityMatrixEngine(
                     httpClientEngine = OkHttp.create { preconfigured = proxyEngine }
                     storeTimelineEventContentUnencrypted = false
                 }.getOrThrow()
-                if (restored != null) {
-                    client = restored
-                    restored.startSync()
-                    startObserving(accountId, restored)
-                    Timber.i("Matrix Trixnity restored from store for $accountId")
+                if (restored == null) {
+                    return@runCatching null
                 }
+                if (expectedAccessToken != null) {
+                    val storedToken = restored.di.get<AccountStore>().getAccount()?.accessToken
+                    if (storedToken == null || storedToken != expectedAccessToken) {
+                        Timber.w(
+                            "Matrix store access token mismatch for $accountId — wiping and re-soft-login",
+                        )
+                        runCatching { restored.close() }
+                        wipeAccountStore(filesDir, accountId)
+                        return@runCatching null
+                    }
+                }
+                client = restored
+                restored.startSync()
+                startObserving(accountId, restored)
+                Timber.i("Matrix Trixnity restored from store for $accountId")
                 restored
             }.onFailure { e ->
                 Timber.w(e, "Matrix fromStore failed for $accountId")
@@ -282,8 +301,10 @@ class TrixnityMatrixEngine(
     private suspend fun createPersistentRepositoriesModule(cryptoDir: File): Module {
         val dbFile = cryptoDir.resolve("trixnity").absolutePath
         val database = Database.connect(
-            url = "jdbc:h2:$dbFile;DB_CLOSE_DELAY=-1;MODE=PostgreSQL",
+            url = "jdbc:h2:$dbFile;CIPHER=AES;DB_CLOSE_DELAY=-1;MODE=PostgreSQL",
             driver = "org.h2.Driver",
+            user = "sm",
+            password = "$h2Password $h2Password",
         )
         return createExposedRepositoriesModule(database)
     }
@@ -310,7 +331,7 @@ class TrixnityMatrixEngine(
                                 lastMessageAt = room.lastRelevantEventTimestamp?.toEpochMilliseconds() ?: 0L,
                             )
                         }
-                        if (conversations.isNotEmpty()) repository.upsertConversations(conversations)
+                        conversations.forEach { repository.mergeConversationMetadata(it) }
                     }
                 } catch (e: Exception) {
                     Timber.w(e, "Trixnity room observe failed")
@@ -319,7 +340,7 @@ class TrixnityMatrixEngine(
             launch {
                 try {
                     roomService.getTimelineEventsFromNowOn().collect { event ->
-                        persistTimelineEvent(accountId, matrixClient, event, downloadMedia = true)
+                        persistTimelineEvent(accountId, matrixClient, event, downloadMedia = false)
                     }
                 } catch (e: Exception) {
                     Timber.w(e, "Trixnity timeline observe failed")
@@ -576,7 +597,7 @@ class TrixnityMatrixEngine(
         val message = toMessage(accountId, matrixClient, event, downloadMedia) ?: return
         repository.upsertMessage(message)
         val parsed = parseRoomMessage(event.eventId.full, event.content?.getOrNull()) ?: return
-        repository.upsertConversation(
+        repository.mergeIncomingConversation(
             Conversation(
                 id = message.conversationId,
                 protocol = ProtocolId.MATRIX,
@@ -586,6 +607,7 @@ class TrixnityMatrixEngine(
                 lastMessagePreview = parsed.preview.take(100),
                 lastMessageAt = event.originTimestamp,
             ),
+            incoming = message.direction == MessageDirection.INCOMING,
         )
     }
 
@@ -811,13 +833,59 @@ class TrixnityMatrixEngine(
         val payloadJson: String? = null,
     )
 
-    suspend fun sendText(roomId: String, body: String) {
-        val matrixClient = client ?: return
+    suspend fun sendText(roomId: String, body: String): Result<String> = withContext(Dispatchers.IO) {
+        val matrixClient = client
+            ?: return@withContext Result.failure(IllegalStateException("Not connected"))
         val roomService = matrixClient.di.get<RoomService>()
-        roomService.sendMessage(RoomId(roomId)) {
-            text(body)
+        runCatching {
+            roomService.sendMessage(RoomId(roomId)) {
+                text(body)
+            }
         }
     }
+
+    suspend fun sendReaction(roomId: String, eventId: String, emoji: String): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            val matrixClient = client
+                ?: return@withContext Result.failure(IllegalStateException("Not connected"))
+            val roomService = matrixClient.di.get<RoomService>()
+            runCatching {
+                roomService.sendMessage(RoomId(roomId)) {
+                    react(EventId(eventId), emoji)
+                }
+                Unit
+            }
+        }
+
+    suspend fun editMessage(roomId: String, eventId: String, newBody: String): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            val matrixClient = client
+                ?: return@withContext Result.failure(IllegalStateException("Not connected"))
+            val roomService = matrixClient.di.get<RoomService>()
+            runCatching {
+                roomService.sendMessage(RoomId(roomId)) {
+                    replace(EventId(eventId))
+                    text(newBody)
+                }
+                Unit
+            }
+        }
+
+    suspend fun redactMessage(roomId: String, eventId: String, reason: String? = null): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            val matrixClient = client
+                ?: return@withContext Result.failure(IllegalStateException("Not connected"))
+            runCatching {
+                matrixClient.api.room.redactEvent(
+                    roomId = RoomId(roomId),
+                    eventId = EventId(eventId),
+                    reason = reason.orEmpty(),
+                    txnId = "redact-${System.currentTimeMillis()}",
+                    asUserId = matrixClient.userId,
+                ).getOrThrow()
+                Unit
+            }
+        }
 
     suspend fun sendMedia(
         roomId: String,

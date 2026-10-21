@@ -79,11 +79,35 @@ fun SettingsScreen(
     val lockState by appLockManager.state.collectAsState()
     val accounts = viewModel?.accounts?.collectAsState()?.value.orEmpty()
     val proxyStatus = viewModel?.proxyStatus?.collectAsState()?.value
-    val context = LocalContext.current
     var profileAccount by remember { mutableStateOf<Account?>(null) }
     var backupStatus by remember { mutableStateOf<String?>(null) }
     var pendingDeleteAccount by remember { mutableStateOf<Account?>(null) }
+    var pendingBackupAccount by remember { mutableStateOf<Account?>(null) }
+    var backupPassphrase by remember { mutableStateOf("") }
     val snackbarHostState = remember { SnackbarHostState() }
+    val createBackupDoc = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream"),
+    ) { uri ->
+        val account = pendingBackupAccount
+        val pass = backupPassphrase
+        pendingBackupAccount = null
+        backupPassphrase = ""
+        if (uri != null && account != null && viewModel != null) {
+            viewModel.exportEncryptedBackup(
+                accountId = account.id,
+                protocol = account.protocol,
+                destination = uri,
+                passphrase = pass,
+            ) { result ->
+                backupStatus = when (result) {
+                    is BackupExportResult.Success ->
+                        "Export chiffré : ${result.conversationCount} conv. / " +
+                            "${result.messageCount} msg"
+                    is BackupExportResult.Failure -> result.reason
+                }
+            }
+        }
+    }
 
     LaunchedEffect(backupStatus) {
         val msg = backupStatus ?: return@LaunchedEffect
@@ -243,28 +267,11 @@ fun SettingsScreen(
                                 Text("Exporter · ${protocolShortPrefix(account.protocol)}")
                             },
                             supportingContent = {
-                                Text(account.displayName)
+                                Text("${account.displayName} — SAF + passphrase AES-GCM")
                             },
                             trailingContent = {
                                 TextButton(
-                                    onClick = {
-                                        val dest = File(
-                                            context.filesDir,
-                                            "backup_${account.id}_${System.currentTimeMillis()}.json",
-                                        )
-                                        viewModel.exportBackup(
-                                            accountId = account.id,
-                                            destinationPath = dest.absolutePath,
-                                            protocol = account.protocol,
-                                        ) { result ->
-                                            backupStatus = when (result) {
-                                                is BackupExportResult.Success ->
-                                                    "Export : ${result.conversationCount} conv. / " +
-                                                        "${result.messageCount} msg → ${result.uriOrPath}"
-                                                is BackupExportResult.Failure -> result.reason
-                                            }
-                                        }
-                                    },
+                                    onClick = { pendingBackupAccount = account },
                                 ) { Text("Exporter") }
                             },
                         )
@@ -307,7 +314,7 @@ fun SettingsScreen(
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
             ListItem(
                 headlineContent = { Text("SecureMessenger") },
-                supportingContent = { Text("1.0.0-alpha · Tor-only multi-protocole") },
+                supportingContent = { Text("1.0.16 · Tor-only multi-protocole") },
             )
         }
     }
@@ -320,6 +327,52 @@ fun SettingsScreen(
                 onDismiss = { profileAccount = null },
             )
         }
+    }
+
+    pendingBackupAccount?.let { account ->
+        AlertDialog(
+            onDismissRequest = {
+                pendingBackupAccount = null
+                backupPassphrase = ""
+            },
+            title = { Text("Exporter ${account.displayName}") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Choisissez une passphrase (8 caractères min.). Le fichier est chiffré AES-GCM.")
+                    OutlinedTextField(
+                        value = backupPassphrase,
+                        onValueChange = { backupPassphrase = it },
+                        label = { Text("Passphrase") },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        if (backupPassphrase.length >= 8) {
+                            createBackupDoc.launch(
+                                "securemessenger-${account.protocol.name.lowercase()}-${account.id}.smb",
+                            )
+                        } else {
+                            backupStatus = "Passphrase trop courte (8 caractères min.)"
+                        }
+                    },
+                ) {
+                    Text("Choisir le fichier")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        pendingBackupAccount = null
+                        backupPassphrase = ""
+                    },
+                ) {
+                    Text("Annuler")
+                }
+            },
+        )
     }
 
     pendingDeleteAccount?.let { account ->

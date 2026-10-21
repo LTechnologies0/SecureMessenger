@@ -108,6 +108,56 @@ private fun Color.luminance(): Float {
     return 0.299f * r + 0.587f * g + 0.114f * b
 }
 
+fun inboxEmptySubtitle(protocol: ProtocolId?): String = when (protocol) {
+    ProtocolId.TELEGRAM -> "Ouvre un chat avec un @username, un numéro ou un ID Telegram."
+    ProtocolId.SIGNAL -> "Démarre un DM avec un numéro E.164 ou un ACI Signal."
+    ProtocolId.XMPP -> "Discute via JID (ami@domain) ou rejoins une salle MUC."
+    ProtocolId.MATRIX -> "Ouvre une room (!id:serveur) ou un DM (@user:serveur)."
+    ProtocolId.EMAIL -> "Les fils récents apparaissent ici (fenêtre IMAP/JMAP limitée)."
+    ProtocolId.IRC -> "Rejoins un canal (#libera) ou envoie un PRIVMSG à un nick."
+    null -> "Lance un nouveau chat pour démarrer."
+}
+
+fun newChatFabLabel(protocol: ProtocolId?): String = when (protocol) {
+    ProtocolId.EMAIL -> "Nouveau message"
+    ProtocolId.IRC -> "Canal / DM"
+    else -> "Nouveau chat"
+}
+
+fun chatComposerPlaceholder(protocol: ProtocolId): String = when (protocol) {
+    ProtocolId.EMAIL -> "Corps du message"
+    ProtocolId.IRC -> "Message IRC"
+    ProtocolId.SIGNAL -> "Message Signal"
+    ProtocolId.XMPP -> "Message XMPP"
+    ProtocolId.MATRIX -> "Message Matrix"
+    ProtocolId.TELEGRAM -> "Message"
+}
+
+fun conversationKindHint(protocol: ProtocolId, remoteId: String): String? {
+    val r = remoteId.trim()
+    return when (protocol) {
+        ProtocolId.IRC ->
+            if (r.startsWith("#") || r.startsWith("&") || r.startsWith("+")) "Canal IRC" else "Message privé"
+        ProtocolId.XMPP ->
+            if (r.contains("@conference.") || r.contains("@groups.")) "Salle MUC" else "JID direct"
+        ProtocolId.MATRIX ->
+            if (r.startsWith("!")) "Room Matrix" else "Conversation directe"
+        ProtocolId.EMAIL -> "Fil email"
+        ProtocolId.SIGNAL ->
+            if (r.startsWith("gv2:")) "Groupe Signal (GV2)" else "DM Signal"
+        ProtocolId.TELEGRAM -> null
+    }
+}
+
+fun contactsEmptyHint(protocol: ProtocolId): String = when (protocol) {
+    ProtocolId.TELEGRAM -> "Synchronise les contacts Telegram ou cherche par numéro dans Nouveau chat."
+    ProtocolId.SIGNAL -> "Les contacts Signal apparaissent après synchronisation du carnet chiffré."
+    ProtocolId.XMPP -> "Le roster XMPP se remplit depuis le serveur et vos salles."
+    ProtocolId.MATRIX -> "Contacts Matrix locaux et membres de rooms synchronisés."
+    ProtocolId.EMAIL -> "Adresses tirées des fils récents — pas un carnet serveur complet."
+    ProtocolId.IRC -> "Nicks visibles dans vos canaux (LIST / JOIN)."
+}
+
 fun capabilityLabels(caps: ProtocolCapabilities?, canRegister: Boolean = false): List<String> {
     if (caps == null) return emptyList()
     return buildList {

@@ -8,7 +8,7 @@ import ltechnologies.onionphone.securemessenger.core.proxy.SocksEndpointResolver
 import timber.log.Timber
 
 /**
- * Applies Tor SOCKS5 (or clearnet) properties for Angus Mail IMAP/SMTP/POP3 sessions.
+ * Applies Tor SOCKS5 properties for Angus Mail IMAP/SMTP/POP3 sessions.
  *
  * Under Tor + [ProxyConfig.remoteDns], callers should pass [connectHost] as a DoH-resolved IP
  * ([EmailTorDns.resolveIpv4]) so Angus never resolves the mail hostname on-device. SNI and
@@ -20,7 +20,6 @@ object EmailSocksProperties {
         protocols: List<String>,
         proxy: ProxyConfig,
     ) {
-        if (!proxy.torRequired) return
         val socksHost = SocksEndpointResolver.resolveReachableHost(proxy.host, proxy.port)
         for (protocol in protocols) {
             props["mail.$protocol.socks.host"] = socksHost
@@ -74,20 +73,28 @@ object EmailSocksProperties {
         props["mail.$protocol.timeout"] = "60000"
     }
 
-    /** Resolve [hostname] via Tor DoH when required; otherwise return hostname unchanged. */
+    /**
+     * Resolve [hostname] via Tor DoH when [ProxyConfig.torRequired] (always under Tor, regardless
+     * of [ProxyConfig.remoteDns] quirks). When [strict] is false, returns null on DoH failure
+     * instead of throwing (for optional SMTP setup after the store is connected).
+     */
     fun resolveConnectHost(
         hostname: String,
         proxy: ProxyConfig,
         httpFactory: ProxiedHttpClientFactory?,
-    ): String {
-        if (!proxy.torRequired || !proxy.remoteDns || httpFactory == null) return hostname
-        val ip = EmailTorDns.resolveIpv4(hostname, httpFactory)
+        strict: Boolean = true,
+    ): String? {
+        if (!proxy.torRequired || httpFactory == null) return hostname
+        val ip = EmailTorDns.resolveIpv4(hostname, httpFactory, proxy)
         if (ip == null) {
-            Timber.w("Tor DoH failed for %s — refusing local DNS under remoteDns", hostname)
-            error(
-                "Impossible de résoudre $hostname via Tor (DoH). " +
-                    "Vérifiez OnionVPN ou désactivez le DNS distant.",
-            )
+            Timber.w("Tor DoH failed for %s (strict=%s)", hostname, strict)
+            if (strict) {
+                error(
+                    "Impossible de résoudre $hostname via Tor (DoH). " +
+                        "Vérifiez OnionVPN ou désactivez le DNS distant.",
+                )
+            }
+            return null
         }
         Timber.i("Email Tor DoH %s -> %s", hostname, ip)
         return ip

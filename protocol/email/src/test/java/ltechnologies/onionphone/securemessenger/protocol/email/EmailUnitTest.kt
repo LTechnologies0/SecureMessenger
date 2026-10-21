@@ -28,6 +28,21 @@ class EmailAddressTest {
     fun extractsAngleAddress() {
         assertEquals("ami@example.com", EmailAddress.extract("Ami <ami@example.com>"))
     }
+
+    @Test
+    fun sentFolderCandidatesNonEmpty() {
+        assertTrue(ImapFolderNames.SENT_CANDIDATES.isNotEmpty())
+        assertTrue(ImapFolderNames.SENT_CANDIDATES.contains("Sent"))
+    }
+
+    @Test
+    fun parseListSplitsCc() {
+        assertEquals(
+            listOf("a@example.com", "b@example.org"),
+            EmailAddress.parseList("a@example.com, b@example.org"),
+        )
+        assertEquals(emptyList<String>(), EmailAddress.parseList("not-valid"))
+    }
 }
 
 class EmailThreadingTest {
@@ -52,14 +67,14 @@ class EmailThreadingTest {
 
 class EmailSocksPropertiesTest {
     @Test
-    fun skipsSocksWhenTorNotRequired() {
+    fun appliesSocksAlways() {
         val props = Properties()
         EmailSocksProperties.applySocks(
             props,
             listOf("imap", "smtp"),
-            ProxyConfig(host = "127.0.0.1", port = 9050, torRequired = false),
+            ProxyConfig(host = "127.0.0.1", port = 9050, torRequired = true),
         )
-        assertFalse(props.containsKey("mail.imap.socks.host"))
+        assertEquals("127.0.0.1", props["mail.imap.socks.host"])
     }
 
     @Test
@@ -122,5 +137,43 @@ class MailAutoconfigXmlTest {
         assertEquals(MailSecurity.SSL, result.imapSecurity)
         assertEquals("smtp.example.com", result.smtpHost)
         assertEquals(465, result.smtpPort)
+    }
+
+    @Test
+    fun keepsFirstPreferredServer() {
+        val xml = """
+            <?xml version="1.0"?>
+            <clientConfig version="1.1">
+              <emailProvider id="example.com">
+                <incomingServer type="imap">
+                  <hostname>imap-ssl.example.com</hostname>
+                  <port>993</port>
+                  <socketType>SSL</socketType>
+                </incomingServer>
+                <incomingServer type="imap">
+                  <hostname>imap-starttls.example.com</hostname>
+                  <port>143</port>
+                  <socketType>STARTTLS</socketType>
+                </incomingServer>
+                <outgoingServer type="smtp">
+                  <hostname>smtp-ssl.example.com</hostname>
+                  <port>465</port>
+                  <socketType>SSL</socketType>
+                </outgoingServer>
+                <outgoingServer type="smtp">
+                  <hostname>smtp-starttls.example.com</hostname>
+                  <port>587</port>
+                  <socketType>STARTTLS</socketType>
+                </outgoingServer>
+              </emailProvider>
+            </clientConfig>
+        """.trimIndent()
+        val result = IspdbXmlParser.parse(xml, "fixture")
+        assertEquals("imap-ssl.example.com", result!!.imapHost)
+        assertEquals(993, result.imapPort)
+        assertEquals(MailSecurity.SSL, result.imapSecurity)
+        assertEquals("smtp-ssl.example.com", result.smtpHost)
+        assertEquals(465, result.smtpPort)
+        assertEquals(MailSecurity.SSL, result.smtpSecurity)
     }
 }

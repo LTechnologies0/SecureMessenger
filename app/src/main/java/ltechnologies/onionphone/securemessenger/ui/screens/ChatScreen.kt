@@ -2,6 +2,8 @@ package ltechnologies.onionphone.securemessenger.ui.screens
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,6 +30,7 @@ import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -43,6 +46,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -57,6 +61,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
@@ -80,11 +85,19 @@ import ltechnologies.onionphone.securemessenger.core.model.OutgoingContent
 import ltechnologies.onionphone.securemessenger.core.model.ProtocolId
 import ltechnologies.onionphone.securemessenger.core.security.MessageSanitizer
 import ltechnologies.onionphone.securemessenger.ui.MainViewModel
+import ltechnologies.onionphone.securemessenger.core.model.ConversationIds
+import ltechnologies.onionphone.securemessenger.protocol.telegram.TelegramSticker
+import ltechnologies.onionphone.securemessenger.ui.components.chatComposerPlaceholder
+import ltechnologies.onionphone.securemessenger.ui.components.conversationKindHint
 import ltechnologies.onionphone.securemessenger.ui.components.protocolAccentColor
 import ltechnologies.onionphone.securemessenger.ui.components.protocolShortPrefix
 import org.json.JSONObject
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
+@OptIn(
+    ExperimentalMaterial3Api::class,
+    ExperimentalMaterial3ExpressiveApi::class,
+    ExperimentalFoundationApi::class,
+)
 @Composable
 fun ChatScreen(
     modifier: Modifier = Modifier,
@@ -112,6 +125,22 @@ fun ChatScreen(
     // Key composer state by conversation — ChatScreen stays mounted across inbox switches.
     var draft by remember(conversationId) { mutableStateOf("") }
     var emailSubject by remember(conversationId) { mutableStateOf("") }
+    var emailCc by remember(conversationId) { mutableStateOf("") }
+    val emailTo = remember(conversationId) {
+        ConversationIds.remoteId(conversationId).orEmpty()
+    }
+    var conversationE2ee by remember(conversationId, protocol) {
+        mutableStateOf(capabilities.endToEndEncryption)
+    }
+    var stickerLoading by remember { mutableStateOf(false) }
+    var stickerChoices by remember { mutableStateOf<List<TelegramSticker>>(emptyList()) }
+    var actionMessage by remember { mutableStateOf<Message?>(null) }
+    var editDraft by remember { mutableStateOf("") }
+    var safetyNumberText by remember { mutableStateOf<String?>(null) }
+    var safetyNumberError by remember { mutableStateOf<String?>(null) }
+    val allConversations by viewModel.conversations.collectAsState()
+    val signalLinkSync = protocol == ProtocolId.SIGNAL &&
+        accountId?.let { viewModel.isSignalLinkAndSyncInProgress(it) } == true
     var sendError by remember(conversationId) { mutableStateOf<String?>(null) }
     var loadingHistory by remember(conversationId) { mutableStateOf(true) }
     var historyError by remember(conversationId) { mutableStateOf<String?>(null) }
@@ -124,8 +153,18 @@ fun ChatScreen(
     val accent = protocolAccentColor(protocol)
 
     val hasAttachOptions = capabilities.mediaSend || capabilities.gifs || capabilities.voiceNotes ||
+        capabilities.stickers ||
         capabilities.locationShare || capabilities.polls || capabilities.contactShare ||
         capabilities.ephemeralMessages
+
+    LaunchedEffect(conversationId, protocol, capabilities.endToEndEncryption) {
+        conversationE2ee = when (protocol) {
+            ProtocolId.XMPP, ProtocolId.SIGNAL ->
+                viewModel.isConversationE2ee(conversationId, protocol)
+            ProtocolId.MATRIX -> capabilities.endToEndEncryption
+            else -> capabilities.endToEndEncryption
+        }
+    }
 
     LaunchedEffect(conversationId, protocol) {
         loadingHistory = true
@@ -301,18 +340,67 @@ fun ChatScreen(
                                 color = accent,
                                 fontWeight = FontWeight.SemiBold,
                             )
-                            if (capabilities.endToEndEncryption) {
+                            conversationKindHint(protocol, emailTo)?.let { hint ->
+                                Text(
+                                    hint,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            when {
+                                conversationE2ee -> {
+                                    AssistChip(
+                                        onClick = {
+                                            if (protocol == ProtocolId.SIGNAL) {
+                                                safetyNumberText = null
+                                                safetyNumberError = null
+                                                dialog = ComposerDialog.SAFETY_NUMBER
+                                                viewModel.loadSignalSafetyNumber(conversationId, accountId) { num, err ->
+                                                    safetyNumberText = num
+                                                    safetyNumberError = err
+                                                }
+                                            }
+                                        },
+                                        enabled = protocol == ProtocolId.SIGNAL,
+                                        label = { Text("E2EE") },
+                                        leadingIcon = {
+                                            Icon(
+                                                Icons.Default.Lock,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(14.dp),
+                                            )
+                                        },
+                                    )
+                                }
+                                protocol == ProtocolId.XMPP || protocol == ProtocolId.MATRIX ||
+                                    protocol == ProtocolId.SIGNAL -> {
+                                    AssistChip(
+                                        onClick = {},
+                                        enabled = false,
+                                        label = {
+                                            Text(
+                                                when (protocol) {
+                                                    ProtocolId.XMPP -> "OMEMO indisponible"
+                                                    ProtocolId.MATRIX -> "E2EE indisponible"
+                                                    else -> "Session chiffrée en attente"
+                                                },
+                                            )
+                                        },
+                                        leadingIcon = {
+                                            Icon(
+                                                Icons.Default.ErrorOutline,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(14.dp),
+                                            )
+                                        },
+                                    )
+                                }
+                            }
+                            if (signalLinkSync) {
                                 AssistChip(
                                     onClick = {},
                                     enabled = false,
-                                    label = { Text("E2EE") },
-                                    leadingIcon = {
-                                        Icon(
-                                            Icons.Default.Lock,
-                                            contentDescription = null,
-                                            modifier = Modifier.size(14.dp),
-                                        )
-                                    },
+                                    label = { Text("Import appareil…") },
                                 )
                             }
                             if (typingLabel != null) {
@@ -343,12 +431,40 @@ fun ChatScreen(
             ) {
                 if (protocol == ProtocolId.EMAIL) {
                     OutlinedTextField(
+                        value = emailTo,
+                        onValueChange = { },
+                        readOnly = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("À") },
+                        shape = MaterialTheme.shapes.large,
+                        singleLine = true,
+                    )
+                    OutlinedTextField(
+                        value = emailCc,
+                        onValueChange = { emailCc = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Cc") },
+                        placeholder = { Text("copie@example.com, autre@example.org") },
+                        shape = MaterialTheme.shapes.large,
+                        singleLine = true,
+                    )
+                    OutlinedTextField(
                         value = emailSubject,
                         onValueChange = { emailSubject = it },
                         modifier = Modifier.fillMaxWidth(),
                         placeholder = { Text("Objet") },
                         shape = MaterialTheme.shapes.large,
                         singleLine = true,
+                    )
+                    Text(
+                        if (viewModel.emailImapSentFolderConfigured(accountId)) {
+                            "Boîte récente (~100 msgs INBOX + ~50 Sent IMAP synchronisés / 50 JMAP)."
+                        } else {
+                            "Boîte récente (~100 msgs INBOX / 50 JMAP). Sent IMAP non détecté — envois locaux après envoi app."
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 4.dp),
                     )
                 }
                 Row(
@@ -365,7 +481,7 @@ fun ChatScreen(
                         value = draft,
                         onValueChange = { draft = it },
                         modifier = Modifier.weight(1f),
-                        placeholder = { Text("Message") },
+                        placeholder = { Text(chatComposerPlaceholder(protocol)) },
                         shape = MaterialTheme.shapes.large,
                         maxLines = 4,
                     )
@@ -378,6 +494,7 @@ fun ChatScreen(
                                     OutgoingContent.Text(
                                         body = MessageSanitizer.sanitize(draft),
                                         subject = emailSubject.trim().takeIf { it.isNotEmpty() },
+                                        cc = emailCc.trim().takeIf { it.isNotEmpty() },
                                     ),
                                 ) { ok, reason, remapped ->
                                     if (ok) {
@@ -456,6 +573,10 @@ fun ChatScreen(
                                 ) { ok ->
                                     if (!ok) sendError = "Vote échoué"
                                 }
+                            },
+                            onLongPress = {
+                                actionMessage = message
+                                dialog = ComposerDialog.MESSAGE_ACTIONS
                             },
                         )
                     }
@@ -542,6 +663,216 @@ fun ChatScreen(
                 }
             },
         )
+        ComposerDialog.STICKER -> {
+            LaunchedEffect(Unit) {
+                stickerLoading = true
+                viewModel.listTelegramStickers(accountId) { list ->
+                    stickerChoices = list
+                    stickerLoading = false
+                }
+            }
+            StickerPickerSheet(
+                stickers = stickerChoices,
+                loading = stickerLoading,
+                onDismiss = { dialog = ComposerDialog.NONE },
+                onPick = { sticker ->
+                    val path = sticker.localPath ?: return@StickerPickerSheet
+                    viewModel.sendContent(
+                        conversationId,
+                        protocol,
+                        OutgoingContent.Sticker(localPath = path, emoji = sticker.emoji),
+                    ) { ok, reason, remapped ->
+                        dialog = ComposerDialog.NONE
+                        sendAttachmentResult(ok, "Envoi sticker échoué", reason, remapped)
+                    }
+                },
+            )
+        }
+        ComposerDialog.MESSAGE_ACTIONS -> {
+            val msg = actionMessage
+            if (msg != null) {
+                AlertDialog(
+                    onDismissRequest = {
+                        dialog = ComposerDialog.NONE
+                        actionMessage = null
+                    },
+                    title = { Text("Message") },
+                    text = {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            if (protocol == ProtocolId.TELEGRAM || protocol == ProtocolId.MATRIX) {
+                                Text("Réactions rapides")
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    listOf("👍", "❤️", "🔥", "👏").forEach { emoji ->
+                                        TextButton(onClick = {
+                                            viewModel.addReaction(
+                                                conversationId,
+                                                protocol,
+                                                msg.id,
+                                                emoji,
+                                            ) { ok ->
+                                                if (!ok) sendError = "Réaction échouée"
+                                            }
+                                            dialog = ComposerDialog.NONE
+                                            actionMessage = null
+                                        }) { Text(emoji) }
+                                    }
+                                }
+                            }
+                            TextButton(
+                                onClick = {
+                                    draft = buildString {
+                                        if (msg.body.isNotBlank()) {
+                                            append("> ")
+                                            append(msg.body.lines().joinToString("\n> "))
+                                            append("\n\n")
+                                        }
+                                    } + draft
+                                    dialog = ComposerDialog.NONE
+                                    actionMessage = null
+                                },
+                            ) { Text("Répondre (citation)") }
+                            if (protocol == ProtocolId.TELEGRAM) {
+                                TextButton(onClick = {
+                                    dialog = ComposerDialog.FORWARD
+                                }) { Text("Transférer…") }
+                            }
+                            if (protocol == ProtocolId.MATRIX &&
+                                msg.direction == MessageDirection.OUTGOING &&
+                                msg.kind == MessageKind.TEXT
+                            ) {
+                                TextButton(onClick = {
+                                    editDraft = msg.body
+                                    dialog = ComposerDialog.EDIT_MATRIX
+                                }) { Text("Modifier…") }
+                                TextButton(onClick = {
+                                    viewModel.redactMatrixMessage(conversationId, msg.id) { ok ->
+                                        if (!ok) sendError = "Suppression échouée"
+                                    }
+                                    dialog = ComposerDialog.NONE
+                                    actionMessage = null
+                                }) { Text("Supprimer (redaction)") }
+                            }
+                        }
+                    },
+                    confirmButton = {},
+                    dismissButton = {
+                        TextButton(onClick = {
+                            dialog = ComposerDialog.NONE
+                            actionMessage = null
+                        }) { Text("Fermer") }
+                    },
+                )
+            }
+        }
+        ComposerDialog.EDIT_MATRIX -> {
+            val msg = actionMessage
+            AlertDialog(
+                onDismissRequest = {
+                    dialog = ComposerDialog.NONE
+                    actionMessage = null
+                },
+                title = { Text("Modifier le message") },
+                text = {
+                    OutlinedTextField(
+                        value = editDraft,
+                        onValueChange = { editDraft = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        minLines = 2,
+                        maxLines = 6,
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        if (msg != null && editDraft.isNotBlank()) {
+                            viewModel.editMatrixMessage(conversationId, msg.id, editDraft.trim()) { ok ->
+                                if (!ok) sendError = "Modification échouée"
+                            }
+                        }
+                        dialog = ComposerDialog.NONE
+                        actionMessage = null
+                    }) { Text("Enregistrer") }
+                },
+                dismissButton = {
+                    TextButton(onClick = {
+                        dialog = ComposerDialog.NONE
+                        actionMessage = null
+                    }) { Text("Annuler") }
+                },
+            )
+        }
+        ComposerDialog.SAFETY_NUMBER -> {
+            AlertDialog(
+                onDismissRequest = { dialog = ComposerDialog.NONE },
+                title = { Text("Numéro de sécurité Signal") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            "Comparez ces chiffres avec votre contact (hors groupe). " +
+                                "SVR2 et verrouillage d’inscription ne sont pas gérés ici.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        when {
+                            safetyNumberError != null -> Text(
+                                safetyNumberError!!,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                            safetyNumberText != null -> Text(
+                                safetyNumberText!!,
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontFamily = FontFamily.Monospace,
+                            )
+                            else -> CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { dialog = ComposerDialog.NONE }) { Text("Fermer") }
+                },
+            )
+        }
+        ComposerDialog.FORWARD -> {
+            val msg = actionMessage
+            val targets = allConversations.filter {
+                it.accountId == accountId && it.protocol == ProtocolId.TELEGRAM && it.id != conversationId
+            }
+            AlertDialog(
+                onDismissRequest = {
+                    dialog = ComposerDialog.NONE
+                    actionMessage = null
+                },
+                title = { Text("Transférer vers") },
+                text = {
+                    Column {
+                        if (targets.isEmpty()) {
+                            Text("Aucun autre chat Telegram sur ce compte.")
+                        } else {
+                            targets.take(8).forEach { conv ->
+                                TextButton(onClick = {
+                                    if (msg != null) {
+                                        viewModel.forwardTelegramMessages(
+                                            conv.id,
+                                            conversationId,
+                                            listOf(msg.id),
+                                        ) { ok ->
+                                            if (!ok) sendError = "Transfert échoué"
+                                        }
+                                    }
+                                    dialog = ComposerDialog.NONE
+                                    actionMessage = null
+                                }) { Text(conv.title) }
+                            }
+                        }
+                    }
+                },
+                confirmButton = {},
+                dismissButton = {
+                    TextButton(onClick = {
+                        dialog = ComposerDialog.NONE
+                        actionMessage = null
+                    }) { Text("Annuler") }
+                },
+            )
+        }
     }
 }
 
@@ -552,6 +883,7 @@ private fun MessageBubble(
     showReadReceipts: Boolean,
     canVotePoll: Boolean = false,
     onVotePoll: (optionIndex: Int) -> Unit = {},
+    onLongPress: () -> Unit = {},
 ) {
     val outgoing = message.direction == MessageDirection.OUTGOING
     Column(
@@ -579,7 +911,12 @@ private fun MessageBubble(
                 bottomStart = if (outgoing) 16.dp else 4.dp,
                 bottomEnd = if (outgoing) 4.dp else 16.dp,
             ),
-            modifier = Modifier.widthIn(max = 320.dp),
+            modifier = Modifier
+                .widthIn(max = 320.dp)
+                .combinedClickable(
+                    onClick = {},
+                    onLongClick = onLongPress,
+                ),
         ) {
             Column(modifier = Modifier.padding(12.dp)) {
                 KindChip(message.kind, message.expireSeconds)

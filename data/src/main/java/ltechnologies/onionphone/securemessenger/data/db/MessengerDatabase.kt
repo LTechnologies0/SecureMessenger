@@ -34,6 +34,9 @@ data class ConversationEntity(
     val lastMessagePreview: String?,
     val lastMessageAt: Long,
     val unreadCount: Int,
+    val isPinned: Boolean = false,
+    val isMuted: Boolean = false,
+    val isArchived: Boolean = false,
 )
 
 @Entity(
@@ -125,10 +128,10 @@ interface MessageDao {
         SELECT * FROM (
             SELECT * FROM messages
             WHERE conversationId = :conversationId
-            ORDER BY timestamp DESC
+            ORDER BY timestamp DESC, id DESC
             LIMIT :limit
         )
-        ORDER BY timestamp ASC
+        ORDER BY timestamp ASC, id ASC
         """,
     )
     fun observeRecentForConversation(
@@ -149,7 +152,7 @@ interface MessageDao {
         """
         SELECT id FROM messages
         WHERE conversationId = :conversationId
-        ORDER BY timestamp DESC
+        ORDER BY timestamp DESC, id DESC
         LIMIT 1
         """,
     )
@@ -159,7 +162,7 @@ interface MessageDao {
         """
         SELECT * FROM messages
         WHERE conversationId = :conversationId
-        ORDER BY timestamp ASC
+        ORDER BY timestamp ASC, id ASC
         LIMIT :limit OFFSET :offset
         """,
     )
@@ -244,7 +247,7 @@ interface ContactDao {
         ProxySettingsEntity::class,
         ContactEntity::class,
     ],
-    version = 5,
+    version = 6,
     exportSchema = true,
 )
 abstract class MessengerDatabase : RoomDatabase() {
@@ -283,6 +286,9 @@ fun ConversationEntity.toDomain(): ltechnologies.onionphone.securemessenger.core
         lastMessagePreview = lastMessagePreview,
         lastMessageAt = lastMessageAt,
         unreadCount = unreadCount,
+        isPinned = isPinned,
+        isMuted = isMuted,
+        isArchived = isArchived,
     )
 }
 
@@ -334,6 +340,9 @@ fun ltechnologies.onionphone.securemessenger.core.model.Conversation.toEntity() 
     lastMessagePreview = lastMessagePreview,
     lastMessageAt = lastMessageAt,
     unreadCount = unreadCount,
+    isPinned = isPinned,
+    isMuted = isMuted,
+    isArchived = isArchived,
 )
 
 fun ltechnologies.onionphone.securemessenger.core.model.Message.toEntity() = MessageEntity(

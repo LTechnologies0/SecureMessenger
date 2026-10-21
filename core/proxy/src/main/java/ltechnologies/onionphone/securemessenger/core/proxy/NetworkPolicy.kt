@@ -1,11 +1,10 @@
 package ltechnologies.onionphone.securemessenger.core.proxy
 
 /**
- * Network gate used by [ltechnologies.onionphone.securemessenger.core.proxy.ProxyManager].
+ * Network gate used by [ProxyManager] and [ltechnologies.onionphone.securemessenger.core.network.NetworkGuard].
  *
- * Tor routing is optional. When [torRequired] is false, clearnet is always allowed.
- * When true, traffic that opts into Tor still needs a healthy SOCKS endpoint — but there
- * is no global killswitch that tears down other protocols.
+ * Tor is mandatory. Clearnet is never allowed — [proxyHealthy] must be true.
+ * [torRequired] is kept for stored configs; it is not an escape hatch to skip SOCKS.
  */
-fun evaluateNetworkAllowed(torRequired: Boolean, proxyHealthy: Boolean): Boolean =
-    !torRequired || proxyHealthy
+fun evaluateNetworkAllowed(@Suppress("UNUSED_PARAMETER") torRequired: Boolean, proxyHealthy: Boolean): Boolean =
+    proxyHealthy

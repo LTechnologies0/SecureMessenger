@@ -37,7 +37,7 @@ class ProxyManager @Inject constructor(
                 ProxyConfig(
                     host = OnionVpnConstants.DEFAULT_BRIDGE_HOST,
                     port = OnionVpnConstants.DEFAULT_BRIDGE_PORT,
-                    torRequired = false,
+                    torRequired = true,
                     torProvider = TorProvider.ONIONVPN,
                 ),
             ),
@@ -119,7 +119,22 @@ class ProxyManager @Inject constructor(
     private suspend fun runHealthCheck() {
         val config = _status.value.config
         val onionVpnInstalled = onionVpnHelper.isInstalled()
-        val resolved = resolveConfigForProvider(config)
+        val resolved = try {
+            resolveConfigForProvider(config)
+        } catch (e: Exception) {
+            Timber.w(e, "Proxy resolve failed (PAC fail-closed)")
+            _status.update {
+                it.copy(
+                    onionVpnInstalled = onionVpnInstalled,
+                    onionVpnRunning = false,
+                    proxyHealthy = false,
+                    lastCheckLatencyMs = null,
+                    lastError = e.message ?: "OnionVPN PAC fail-closed",
+                    config = ProxyConfigNormalizer.normalize(config.copy(torRequired = true)),
+                )
+            }
+            return
+        }
         val endpointHost = SocksEndpointResolver.resolveReachableHost(resolved.host, resolved.port)
         val endpoint = resolved.copy(host = endpointHost)
         val check = SocksConnectivityChecker.checkSocksWithRemoteDns(
@@ -166,13 +181,9 @@ class ProxyManager @Inject constructor(
 
     private fun resolveConfigForProvider(config: ProxyConfig): ProxyConfig = when (config.torProvider) {
         TorProvider.ONIONVPN -> {
-            val endpoint = OnionVpnPacClient.resolveSocksEndpoint().getOrElse {
-                Timber.d(it, "OnionVPN PAC resolve failed; using fallback")
-                OnionVpnSocksEndpoint(
-                    host = OnionVpnConstants.DEFAULT_BRIDGE_HOST,
-                    port = OnionVpnConstants.DEFAULT_BRIDGE_PORT,
-                    fromPac = false,
-                )
+            val endpoint = OnionVpnPacClient.resolveSocksEndpoint().getOrElse { error ->
+                Timber.w(error, "OnionVPN PAC fail-closed — no default-bridge fallback")
+                throw error
             }
             ProxyConfigNormalizer.normalize(
                 config.copy(
@@ -180,6 +191,7 @@ class ProxyManager @Inject constructor(
                     port = endpoint.port,
                     username = null,
                     password = null,
+                    torRequired = true,
                 ),
             )
         }

@@ -163,12 +163,13 @@ internal class MatrixRegistration {
                 protocol = ProtocolId.MATRIX,
                 accountId = UUID.randomUUID().toString(),
                 displayName = success.userId,
-                secrets = mapOf(
-                    "homeserver" to server,
-                    "userId" to success.userId,
-                    "password" to password,
-                    "accessToken" to (success.accessToken ?: ""),
-                ),
+                secrets = buildMap {
+                    put("homeserver", server)
+                    put("userId", success.userId)
+                    put("password", password)
+                    put("accessToken", success.accessToken ?: "")
+                    success.deviceId?.takeIf { it.isNotBlank() }?.let { put("deviceId", it) }
+                },
             ),
         )
     }

@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import ltechnologies.onionphone.securemessenger.core.model.AccountCredentials
@@ -38,8 +39,10 @@ import ltechnologies.onionphone.securemessenger.core.model.SanitizedText
 import ltechnologies.onionphone.securemessenger.core.model.SendResult
 import ltechnologies.onionphone.securemessenger.core.network.NetworkBlockedException
 import ltechnologies.onionphone.securemessenger.core.network.NetworkGuard
+import ltechnologies.onionphone.securemessenger.core.security.EncryptedCredentialStore
 import ltechnologies.onionphone.securemessenger.data.MessengerRepository
 import ltechnologies.onionphone.securemessenger.protocol.api.MessengerProtocol
+import ltechnologies.onionphone.securemessenger.protocol.api.protocolIoScope
 import org.drinkless.tdlib.TdApi
 import org.json.JSONObject
 import timber.log.Timber
@@ -63,6 +66,7 @@ class TelegramProtocol @Inject constructor(
     @ApplicationContext private val context: Context,
     private val networkGuard: NetworkGuard,
     private val repository: MessengerRepository,
+    private val credentialStore: EncryptedCredentialStore,
     private val apiCredentials: TelegramApiCredentials,
 ) : MessengerProtocol {
 
@@ -80,7 +84,7 @@ class TelegramProtocol @Inject constructor(
         contacts = true,
         profileEdit = true,
         voiceNotes = true,
-        stickers = false, // Composer has no sticker picker yet — don't advertise.
+        stickers = true,
         gifs = true,
         locationShare = true,
         polls = true,
@@ -91,9 +95,38 @@ class TelegramProtocol @Inject constructor(
         backupExport = true,
     )
 
+    override fun capabilitiesFor(accountId: String?): ProtocolCapabilities {
+        if (accountId == null) return capabilities
+        val session = sessions[accountId]
+        if (session == null || !session.authorizationReady) {
+            return capabilities.copy(
+                mediaSend = false,
+                mediaReceive = false,
+                contacts = false,
+                profileEdit = false,
+                typingIndicators = false,
+                readReceipts = false,
+                voiceNotes = false,
+                gifs = false,
+                locationShare = false,
+                polls = false,
+                contactShare = false,
+                stickers = false,
+                messageHistory = false,
+            )
+        }
+        return capabilities
+    }
+
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     override val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
 
+    /** Per-account pending auth — sibling SMS/2FA steps never overwrite each other. */
+    private val _pendingAuthByAccount = MutableStateFlow<Map<String, AuthStep>>(emptyMap())
+    fun observePendingAuthByAccount(): StateFlow<Map<String, AuthStep>> =
+        _pendingAuthByAccount.asStateFlow()
+
+    /** Preferred in-flight step (UI convenience); prefer [observePendingAuthByAccount] for multi-login. */
     private val _pendingAuthStep = MutableStateFlow<AuthStep?>(null)
     fun observePendingAuthStep(): StateFlow<AuthStep?> = _pendingAuthStep.asStateFlow()
 
@@ -103,7 +136,7 @@ class TelegramProtocol @Inject constructor(
     /** conversationId → display names of users currently typing. */
     private val typingFlows = ConcurrentHashMap<String, MutableStateFlow<List<String>>>()
 
-    private val updateScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val updateScope = protocolIoScope("telegram")
 
     /**
      * One [TelegramSession] per connected accountId. Connecting account B must never tear down
@@ -188,26 +221,10 @@ class TelegramProtocol @Inject constructor(
 
                 if (!nativeAvailable) {
                     newSession.close()
+                    _lastAuthError.value = null
                     return@withContext null to ConnectionResult.Failure(
                         "libtdjni.so missing — build per docs/tdlib-build.md",
                     )
-                }
-
-                if (proxy.torRequired) {
-                    val proxyOk = withContext(newSession.dispatcher) {
-                        tdFacade.configureProxy(proxy.host, proxy.port, proxy.username, proxy.password)
-                    }
-                    if (!proxyOk) {
-                        newSession.close()
-                        refreshConnectionState()
-                        return@withContext null to ConnectionResult.Failure(
-                            "Tor activé : démarrez OnionVPN, ou désactivez Tor pour Telegram",
-                        )
-                    }
-                } else {
-                    withContext(newSession.dispatcher) {
-                        tdFacade.disableProxy()
-                    }
                 }
 
                 sessions[account.accountId] = newSession
@@ -246,17 +263,19 @@ class TelegramProtocol @Inject constructor(
      * order == 0 on ChatListMain means the chat left the main list (archive / delete / filter).
      */
     private fun onChatPosition(accId: String, update: TdApi.UpdateChatPosition) {
-        val pos = update.position ?: return
-        if (pos.list !is TdApi.ChatListMain) return
         val convId = TdLibMapper.conversationId(accId, update.chatId)
         updateScope.launch {
-            if (pos.order == 0L) {
+            val session = sessions[accId] ?: return@launch
+            val chat = withContext(session.dispatcher) { session.facade.getChat(update.chatId) }
+                ?: return@launch
+            val positions = chat.positions?.toList().orEmpty()
+            val visible = positions.any {
+                (it.list is TdApi.ChatListMain || it.list is TdApi.ChatListArchive) && it.order > 0L
+            }
+            if (!visible) {
                 runCatching { repository.deleteConversation(convId) }
-                Timber.i("Telegram chat %s left main list — removed conversation", update.chatId)
+                Timber.i("Telegram chat %s left all lists — removed conversation", update.chatId)
             } else {
-                val session = sessions[accId] ?: return@launch
-                val chat = withContext(session.dispatcher) { session.facade.getChat(update.chatId) }
-                    ?: return@launch
                 repository.upsertConversation(TdLibMapper.toConversation(accId, chat))
             }
         }
@@ -431,6 +450,30 @@ class TelegramProtocol @Inject constructor(
         }
     }
 
+    private suspend fun finalizeTdSend(
+        accId: String,
+        chatId: Long,
+        result: TdSendResult,
+        optimisticPlaceholderId: String? = null,
+    ): SendResult =
+        when (result) {
+            is TdSendResult.Err -> {
+                optimisticPlaceholderId?.let { pid ->
+                    repository.getMessage(pid)?.let { m ->
+                        repository.upsertMessage(m.copy(deliveryState = DeliveryState.FAILED))
+                    }
+                }
+                SendResult.Failure(result.reason)
+            }
+            is TdSendResult.Ok -> {
+                optimisticPlaceholderId?.let { repository.deleteMessages(listOf(it)) }
+                val domain = TdLibMapper.toMessage(accId, result.message)
+                    .copy(deliveryState = DeliveryState.PENDING)
+                persistMessage(accId, domain, chatId)
+                SendResult.Success(domain.id)
+            }
+        }
+
     private fun persistMessage(accId: String, message: Message, chatId: Long) {
         updateScope.launch {
             val existing = repository.getConversation(message.conversationId)
@@ -472,33 +515,44 @@ class TelegramProtocol @Inject constructor(
                 _lastAuthError.value = null
                 val proxy = session.pendingProxy
                 updateScope.launch {
-                    if (proxy != null && proxy.torRequired) {
-                        val proxyOk = withContext(session.dispatcher) {
-                            session.facade.configureProxy(
-                                proxy.host,
-                                proxy.port,
-                                proxy.username,
-                                proxy.password,
-                            )
-                        }
-                        if (!proxyOk) {
-                            _lastAuthError.value =
-                                "Tor activé : démarrez OnionVPN, ou désactivez Tor pour Telegram"
-                            disconnect(accId)
-                            refreshConnectionState()
-                            return@launch
-                        }
-                    } else {
-                        withContext(session.dispatcher) {
-                            session.facade.disableProxy()
-                        }
+                    // TDLib opens the network inside SetTdlibParameters. SOCKS must already
+                    // be enabled (GetProxies / AddProxy) or the first packets leave Tor.
+                    if (proxy == null || !proxy.torRequired) {
+                        _lastAuthError.value =
+                            "Tor requis : démarrez OnionVPN pour Telegram"
+                        disconnect(accId)
+                        refreshConnectionState()
+                        return@launch
                     }
-                    withContext(session.dispatcher) {
+                    val proxyOk = withContext(session.dispatcher) {
+                        session.facade.configureProxy(
+                            proxy.host,
+                            proxy.port,
+                            proxy.username,
+                            proxy.password,
+                        )
+                    }
+                    if (!proxyOk) {
+                        _lastAuthError.value =
+                            "Tor requis : démarrez OnionVPN pour Telegram"
+                        disconnect(accId)
+                        refreshConnectionState()
+                        return@launch
+                    }
+                    // Keystore-backed via EncryptedSharedPreferences (MasterKey) — never ephemeral.
+                    val key = credentialStore.getOrCreateTdlibKey(accId)
+                    val paramError = withContext(session.dispatcher) {
                         session.facade.setParameters(
                             session.pendingDbDir,
                             session.pendingApiId,
                             session.pendingApiHash,
+                            key,
                         )
+                    }
+                    if (paramError != null) {
+                        _lastAuthError.value = paramError
+                        disconnect(accId)
+                        refreshConnectionState()
                     }
                 }
             }
@@ -584,22 +638,31 @@ class TelegramProtocol @Inject constructor(
 
     private fun emitPendingAuthStep(session: TelegramSession) {
         authenticatingAccountId = session.accountId
-        updateScope.launch { _pendingAuthStep.value = buildAuthStep(session) }
+        updateScope.launch {
+            val step = buildAuthStep(session) ?: return@launch
+            _pendingAuthByAccount.value = _pendingAuthByAccount.value + (session.accountId to step)
+            _pendingAuthStep.value = step
+        }
     }
 
     /** Keep another in-flight Telegram login visible when one account finishes or closes. */
     private fun republishPendingAuthStep() {
-        val preferred = authenticatingAccountId?.let { sessions[it] }
-            ?.takeIf { it.awaitingAuth != AuthStepKind.NONE }
-        val next = preferred
-            ?: sessions.values.firstOrNull { it.awaitingAuth != AuthStepKind.NONE }
+        val rebuilt = sessions.values
+            .mapNotNull { session ->
+                if (session.awaitingAuth == AuthStepKind.NONE) null
+                else buildAuthStep(session)?.let { session.accountId to it }
+            }
+            .toMap()
+        _pendingAuthByAccount.value = rebuilt
+        val preferred = authenticatingAccountId?.let { rebuilt[it] }
+        val next = preferred ?: rebuilt.values.firstOrNull()
         if (next == null) {
             _pendingAuthStep.value = null
             authenticatingAccountId = null
             return
         }
         authenticatingAccountId = next.accountId
-        _pendingAuthStep.value = buildAuthStep(next)
+        _pendingAuthStep.value = next
     }
 
     private fun buildAuthStep(session: TelegramSession): AuthStep? = when (session.awaitingAuth) {
@@ -768,7 +831,10 @@ class TelegramProtocol @Inject constructor(
         Timber.i("Synced ${chats.size} Telegram chats for $accId")
     }
 
-    override fun observeConversations(): Flow<List<Conversation>> = repository.observeConversations()
+    override fun observeConversations(): Flow<List<Conversation>> =
+        repository.observeConversations().map { list ->
+            list.filter { it.protocol == ProtocolId.TELEGRAM }
+        }
 
     override fun observeMessages(conversationId: String): Flow<List<Message>> =
         repository.observeMessages(conversationId)
@@ -975,12 +1041,31 @@ class TelegramProtocol @Inject constructor(
         if (!session.nativeAvailable) return SendResult.Failure("Telegram not connected")
         val chatId = TdLibMapper.chatIdFromConversation(conversationId)
             ?: return SendResult.Failure("Invalid conversation")
+        val localId = "tg_out_${accId}_${System.currentTimeMillis()}"
+        repository.upsertMessage(
+            Message(
+                id = localId,
+                conversationId = conversationId,
+                protocol = ProtocolId.TELEGRAM,
+                body = body.value,
+                timestamp = System.currentTimeMillis(),
+                direction = ltechnologies.onionphone.securemessenger.core.model.MessageDirection.OUTGOING,
+                deliveryState = DeliveryState.PENDING,
+            ),
+        )
         return withContext(session.dispatcher) {
             try {
                 networkGuard.assertNetworkAllowed()
-                val error = session.facade.sendTextMessage(chatId, body.value)
-                if (error != null) SendResult.Failure(error) else SendResult.Success("pending")
+                finalizeTdSend(
+                    accId,
+                    chatId,
+                    session.facade.sendTextMessage(chatId, body.value),
+                    optimisticPlaceholderId = localId,
+                )
             } catch (e: NetworkBlockedException) {
+                repository.getMessage(localId)?.let { m ->
+                    repository.upsertMessage(m.copy(deliveryState = DeliveryState.FAILED))
+                }
                 SendResult.Failure(e.message ?: "Réseau indisponible")
             }
         }
@@ -1004,13 +1089,16 @@ class TelegramProtocol @Inject constructor(
         return withContext(session.dispatcher) {
             try {
                 networkGuard.assertNetworkAllowed()
-                val error = session.facade.sendMedia(
+                finalizeTdSend(
+                    accId,
                     chatId,
-                    localPath,
-                    attachment.mimeType,
-                    caption?.value,
+                    session.facade.sendMedia(
+                        chatId,
+                        localPath,
+                        attachment.mimeType,
+                        caption?.value,
+                    ),
                 )
-                if (error != null) SendResult.Failure(error) else SendResult.Success("pending")
             } catch (e: NetworkBlockedException) {
                 SendResult.Failure(e.message ?: "Réseau indisponible")
             }
@@ -1080,9 +1168,15 @@ class TelegramProtocol @Inject constructor(
                 if (content.expireSeconds <= 0) {
                     return SendResult.Failure("Durée d'expiration invalide")
                 }
+                // awaitResult: null = OK, non-null = error string. Do NOT Elvis TTL→send
+                // (that sent plain text whenever TTL succeeded). Text has no per-message
+                // selfDestruct in this TDLib; enable chat auto-delete then send once.
                 return sendViaFacade(conversationId, accountId) { facade, chatId ->
-                    facade.setChatMessageAutoDeleteTime(chatId, content.expireSeconds)
-                        ?: facade.sendTextMessage(chatId, content.body.value)
+                    val ttlError = facade.setChatMessageAutoDeleteTime(chatId, content.expireSeconds)
+                    when {
+                        ttlError != null -> TdSendResult.Err(ttlError)
+                        else -> facade.sendTextMessage(chatId, content.body.value)
+                    }
                 }
             }
             is OutgoingContent.CallAction, is OutgoingContent.Story ->
@@ -1093,7 +1187,7 @@ class TelegramProtocol @Inject constructor(
     private suspend fun sendViaFacade(
         conversationId: String,
         accountId: String?,
-        send: suspend (TdLibFacade, Long) -> String?,
+        send: suspend (TdLibFacade, Long) -> TdSendResult,
     ): SendResult {
         val accId = accountId
             ?: TdLibMapper.accountIdFromConversation(conversationId)
@@ -1105,8 +1199,7 @@ class TelegramProtocol @Inject constructor(
         return withContext(session.dispatcher) {
             try {
                 networkGuard.assertNetworkAllowed()
-                val error = send(session.facade, chatId)
-                if (error != null) SendResult.Failure(error) else SendResult.Success("pending")
+                finalizeTdSend(accId, chatId, send(session.facade, chatId))
             } catch (e: NetworkBlockedException) {
                 SendResult.Failure(e.message ?: "Réseau indisponible")
             }
@@ -1296,6 +1389,54 @@ class TelegramProtocol @Inject constructor(
             runCatching {
                 networkGuard.assertNetworkAllowed()
                 session.facade.addMessageReaction(chatId, tdMessageId, emoji)
+                    ?.let { throw IllegalStateException(it) }
+                Unit
+            }
+        }
+    }
+
+    suspend fun setChatMuted(
+        conversationId: String,
+        muteForSeconds: Int,
+    ): Result<Unit> {
+        val session = sessionForConversation(conversationId)
+            ?: return Result.failure(IllegalStateException("Telegram non connecté"))
+        val chatId = TdLibMapper.chatIdFromConversation(conversationId)
+            ?: return Result.failure(IllegalStateException("Conversation invalide"))
+        return withContext(session.dispatcher) {
+            runCatching {
+                networkGuard.assertNetworkAllowed()
+                session.facade.setChatNotificationMute(chatId, muteForSeconds)
+                    ?.let { throw IllegalStateException(it) }
+                Unit
+            }
+        }
+    }
+
+    suspend fun setChatPinned(conversationId: String, pinned: Boolean): Result<Unit> {
+        val session = sessionForConversation(conversationId)
+            ?: return Result.failure(IllegalStateException("Telegram non connecté"))
+        val chatId = TdLibMapper.chatIdFromConversation(conversationId)
+            ?: return Result.failure(IllegalStateException("Conversation invalide"))
+        return withContext(session.dispatcher) {
+            runCatching {
+                networkGuard.assertNetworkAllowed()
+                session.facade.toggleChatIsPinned(chatId, pinned)
+                    ?.let { throw IllegalStateException(it) }
+                Unit
+            }
+        }
+    }
+
+    suspend fun setChatArchived(conversationId: String, archived: Boolean): Result<Unit> {
+        val session = sessionForConversation(conversationId)
+            ?: return Result.failure(IllegalStateException("Telegram non connecté"))
+        val chatId = TdLibMapper.chatIdFromConversation(conversationId)
+            ?: return Result.failure(IllegalStateException("Conversation invalide"))
+        return withContext(session.dispatcher) {
+            runCatching {
+                networkGuard.assertNetworkAllowed()
+                session.facade.setChatArchived(chatId, archived)
                     ?.let { throw IllegalStateException(it) }
                 Unit
             }
@@ -1501,6 +1642,12 @@ class TelegramProtocol @Inject constructor(
         }
     }
 
+    override suspend fun wipeLocalData(accountId: String) {
+        withContext(Dispatchers.IO) {
+            runCatching { File(context.filesDir, "tdlib_$accountId").deleteRecursively() }
+        }
+    }
+
     override suspend fun disconnect(accountId: String?) {
         withContext(Dispatchers.IO) {
             val toClose = if (accountId != null) {
@@ -1517,9 +1664,25 @@ class TelegramProtocol @Inject constructor(
                     authenticatingAccountId = null
                     republishPendingAuthStep()
                 }
-                // Do NOT flip Room to DISCONNECTED here — ConnectionManager restore treats
-                // non-CONNECTED Telegram as "incomplete login" and wipes the account. Soft
-                // disconnect (app lock / Tor) must leave the row so unlock can reconnect TDLib.
+                // Soft-disconnect: Room must not stay CONNECTED without a live session.
+                // ConnectionManager wipe rules keep provisioned secrets / mid-auth rows.
+                val hasSecrets = credentialStore.getAllForAccount(id)
+                    .filterKeys { !it.startsWith("__") }
+                    .isNotEmpty()
+                val roomState = if (hasSecrets) {
+                    ConnectionState.CONNECTING
+                } else {
+                    ConnectionState.DISCONNECTED
+                }
+                val existing = repository.observeAccounts().first().firstOrNull { it.id == id }
+                repository.upsertAccount(
+                    ltechnologies.onionphone.securemessenger.core.model.Account(
+                        id = id,
+                        protocol = ProtocolId.TELEGRAM,
+                        displayName = existing?.displayName ?: id,
+                        connectionState = roomState,
+                    ),
+                )
             }
             if (accountId == null) {
                 typingFlows.clear()
@@ -1535,17 +1698,25 @@ class TelegramProtocol @Inject constructor(
         runCatching { session.close() }
     }
 
-    /** Re-applies optional Tor proxy (or disables it) on every live Telegram session. */
+    /** Re-applies the Tor SOCKS proxy on every live Telegram session. Tor stays mandatory. */
     suspend fun reapplyProxy(config: ProxyConfig) {
-        sessions.values.forEach { session ->
-            withContext(session.dispatcher) {
-                if (config.torRequired) {
-                    session.facade.configureProxy(config.host, config.port, config.username, config.password)
-                } else {
-                    session.facade.disableProxy()
-                }
+        val accountIds = sessions.keys.toList()
+        for (accountId in accountIds) {
+            val session = sessions[accountId] ?: continue
+            if (!config.torRequired) {
+                _lastAuthError.value = "Tor requis : démarrez OnionVPN pour Telegram"
+                disconnect(accountId)
+                continue
+            }
+            val proxyOk = withContext(session.dispatcher) {
+                session.facade.configureProxy(config.host, config.port, config.username, config.password)
+            }
+            if (!proxyOk) {
+                _lastAuthError.value = "Tor requis : démarrez OnionVPN pour Telegram"
+                disconnect(accountId)
             }
         }
+        refreshConnectionState()
     }
 
     companion object {

@@ -73,8 +73,8 @@ data class ProxyConfig(
     val port: Int,
     val username: String? = null,
     val password: String? = null,
-    /** When false (default), protocols use clearnet. Tor SOCKS is opt-in. */
-    val torRequired: Boolean = false,
+    /** Hardcoded true: Tor SOCKS is mandatory. Stored false is forced true on normalize. */
+    val torRequired: Boolean = true,
     val remoteDns: Boolean = true,
     val torProvider: TorProvider = TorProvider.ONIONVPN,
 )
@@ -209,6 +209,8 @@ sealed class OutgoingContent {
         val body: SanitizedText,
         /** Optional email subject (ignored by IM protocols). */
         val subject: String? = null,
+        /** Optional comma-separated Cc recipients (email only). */
+        val cc: String? = null,
     ) : OutgoingContent()
 
     data class Media(
@@ -317,6 +319,12 @@ data class Conversation(
     val lastMessagePreview: String? = null,
     val lastMessageAt: Long = 0L,
     val unreadCount: Int = 0,
+    /** Telegram (TDLib): pinned on main chat list. */
+    val isPinned: Boolean = false,
+    /** Telegram: chat notifications muted (mute_for > 0). */
+    val isMuted: Boolean = false,
+    /** Telegram: chat in archive list, not main. */
+    val isArchived: Boolean = false,
 )
 
 data class Message(

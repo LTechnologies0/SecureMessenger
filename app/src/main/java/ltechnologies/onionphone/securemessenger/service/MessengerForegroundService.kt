@@ -44,11 +44,14 @@ class MessengerForegroundService : LifecycleService() {
         val connections = connectionManager.get()
         lifecycleScope.launch(Dispatchers.IO) {
             proxyManager.get().status
-                .map { status -> status.proxyHealthy to status.config }
+                .map { status ->
+                    // Align killswitch + restore with NetworkPolicy (not raw proxyHealthy alone).
+                    proxyManager.get().isNetworkAllowed() to status.config
+                }
                 .distinctUntilChanged()
-                .collect { (healthy, config) ->
+                .collect { (allowed, config) ->
                     if (!appLockManager.isUnlocked) return@collect
-                    connections.onProxyStateChanged(healthy, config)
+                    connections.onProxyStateChanged(allowed, config)
                 }
         }
     }

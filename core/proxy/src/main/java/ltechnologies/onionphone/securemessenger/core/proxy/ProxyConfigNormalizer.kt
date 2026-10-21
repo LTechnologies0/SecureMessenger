@@ -12,7 +12,8 @@ object ProxyConfigNormalizer {
         return config.copy(
             host = host,
             port = port,
-            remoteDns = if (config.torRequired) true else config.remoteDns,
+            torRequired = true,
+            remoteDns = true,
         )
     }
 
@@ -36,8 +37,8 @@ object ProxyConfigNormalizer {
                 port = OnionVpnConstants.DEFAULT_BRIDGE_PORT,
                 username = null,
                 password = null,
-                torRequired = torRequired,
-                remoteDns = torRequired,
+                torRequired = true,
+                remoteDns = true,
                 torProvider = TorProvider.ONIONVPN,
             ),
         )
@@ -47,8 +48,8 @@ object ProxyConfigNormalizer {
                 port = customPort,
                 username = username?.takeIf { it.isNotBlank() },
                 password = password?.takeIf { it.isNotBlank() },
-                torRequired = torRequired,
-                remoteDns = torRequired,
+                torRequired = true,
+                remoteDns = true,
                 torProvider = TorProvider.CUSTOM,
             ),
         )

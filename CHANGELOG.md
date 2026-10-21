@@ -1,5 +1,76 @@
 # Changelog
 
+## 1.0.16
+
+### UX / feature parity (deferred pass 2)
+- **Telegram** : épingler, couper notifications ([SetChatNotificationSettings](https://core.telegram.org/tdlib/docs/classtd_1_1td__api_1_1_set_chat_notification_settings.html)), archiver/désarchiver ([AddChatToList](https://core.telegram.org/tdlib/docs/classtd_1_1td__api_1_1_add_chat_to_list.html) + listes Main/Archive) ; état pin/mute/archive en Room ; appui long dans l’inbox.
+- **Email IMAP** : sync read-only du dossier Sent (~50 msgs / UID incremental) après INBOX, sans IDLE Sent ; détection noms courants (Sent, Gmail Sent Mail, etc.) ; bannières mises à jour quand Sent est actif.
+
+### Known gaps (unchanged)
+- RingRTC / appels, Signal SVR2 & verrouillage d’inscription, Matrix QR cross-signing, stories Signal, chats secrets Telegram.
+
+## 1.0.15
+
+### UX / feature parity (deferred pass)
+- **Email** : champ Cc actif (SMTP + JMAP) ; honnêteté Sent (sync IMAP Sent absente — envois locaux après envoi app).
+- **Matrix** : réactions, édition et redaction depuis appui long (Trixnity `react` / `replace` / CS redact).
+- **Signal** : numéro de sécurité 1:1 via puce E2EE (libsignal fingerprint) ; SVR2 / verrouillage d’inscription toujours absents.
+
+### Known gaps (unchanged)
+- Appels A/V (RingRTC), stories Signal, sync dossier Sent IMAP, vérification clé Matrix (QR cross-signing).
+- Telegram mute / pin / archive (pas de surface Room/TDLib action côté app).
+
+## 1.0.14
+
+### Known gaps (unchanged)
+- Signal : SVR2 / verrouillage d’inscription non exposés dans l’UI.
+- Appels A/V (RingRTC), stories Signal, dossiers Sent IMAP dédiés, vérification clé Matrix (QR).
+
+### UX / feature parity (Compose)
+- **Telegram**: sticker picker (packs installés TDLib); réactions + transfert + citation depuis appui long; capability `stickers` activée quand autorisé.
+- **Chat**: E2EE/OMEMO par conversation (XMPP/Signal/Matrix); bannières Signal link-and-sync; champs mail À/Objet + honnêteté fenêtre récente.
+- **Inbox / contacts**: empty states et FAB libellés par protocole; bannières Email/IRC sur limites d’historique.
+
+### P2 / UX (post-audit)
+- **Telegram**: outbound messages keyed by TDLib message id (reconcile with `UpdateMessageSendSucceeded`); `SetTdlibParameters` errors surfaced; `capabilitiesFor` hides composer features until authorized.
+- **IRC**: server `CASEMAPPING` from negotiation; per-account `capabilitiesFor` (contacts when connected).
+- **ConnectionManager**: app lock bumps restore epoch so in-flight restore/connect stops before DB close.
+- **UI**: Matrix chat shows when E2EE is unavailable; Telegram phone lookup gated on live contacts capability.
+
+### Audit remédiation (Critical / High)
+- **Telegram**: AddProxy before RemoveProxy (no clearnet window on live clients); ephemeral send fixed (`awaitResult` null=OK); audio / video-note attachments downloadable.
+- **Matrix**: whoami / login `device_id` authoritative over stale store; user_id reconciled with whoami; crypto wipe only on store/crypto signals (not transient Tor errors).
+- **Signal**: `sessionReady` only after register/link Success; provisional wipe on cancel/fail; one-time prekey replenishment + signed rotation; SOCKS auth on CDN/provisioning OkHttp.
+- **Email**: IMAP IDLE serialized with markSeen (one folder per Store); store-first then SMTP DoH; invalidate SMTP auth on send fail; Tor DoH when `torRequired`; sendMessage/sendMedia remap conversationId; JMAP clears session on 401/403.
+- **XMPP**: HTTP media fail-closed without SOCKS; OMEMO listener before login; Room ERROR on reconnect fail; refuse inbound cleartext when peer OMEMO; conversations filtered by protocol.
+- **IRC**: Ready after negotiation + auth; SASL CAP NAK fast-fail; refuse SASL/NickServ without TLS; Netty EventLoop shutdown hook.
+- **ConnectionManager**: `continueRegistration` Failure if connect fails; Room ERROR on connect Failure; wipe restore also deletes Room row; single killswitch debounce job.
+- **UnifiedMessengerClient / protocols**: observeConversations filtered by ProtocolId (no N× Room flatten).
+
+## 1.0.13
+
+### Connection / Tor restore (Phase 0)
+- **ConnectionManager**: restore on `null → healthy` SOCKS (unlock while Tor was down); pending auth requires matching `accountId`; post-Success Room stays `CONNECTED` when session live; register → Failure if post-register connect fails.
+- **Telegram / Signal Room honesty**: soft-disconnect writes `DISCONNECTED`/`CONNECTING` (not fake `CONNECTED`); wipe keeps provisioned secrets.
+- **FGS**: killswitch/restore uses `isNetworkAllowed()`; **UnifiedMessengerClient** aligns Tor rewrite with `resolveProxyOrFail`.
+- **Shell**: prefer last / first `CONNECTED` account; unread badge per rail account.
+
+### Email (Phase 2)
+- Local `storeAuthenticated` (Angus `Store.isConnected` NOOP removed); IDLE/poll after CONNECTED; SMTP via DoH IP; OkHttp DoH SOCKS remoteDns; peer address for replies; JMAP method errors → Failure.
+
+### Matrix (Phase 1)
+- Persist register `deviceId`; token paste + whoami; store token mismatch → wipe + soft-login; SSO cancel clears Room; skip `fetchFlows` with token; `sendText` failure when disconnected.
+
+### XMPP (Phase 3)
+- `smack-omemo-signal` + per-account store; OMEMO state machine; MAM/live carbons decrypt when READY; Tor media SOCKS auth; roster merge preserves preview/unread.
+
+### Signal (Phase 4) / IRC (Phase 5)
+- Link-and-sync cancel-safe; suspend cancel + await wipe; same-id reconnect shutdown; occupy → Room ERROR; SOCKS user/pass.
+- IRC: SOCKS5 auth pipeline; Success after SASL 903 / NickServ; auto-join after auth; case-fold; aggregate connection state.
+
+### Telegram polish (Phase 6)
+- Per-account pending-auth map; `AddProxy` clears prior proxies; TDLib DB key only from Keystore-backed credential store.
+
 ## 1.0.9
 
 ### Multi-account aggregation

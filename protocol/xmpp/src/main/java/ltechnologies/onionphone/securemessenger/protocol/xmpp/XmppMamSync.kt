@@ -1,8 +1,6 @@
 package ltechnologies.onionphone.securemessenger.protocol.xmpp
 
 import org.jivesoftware.smack.packet.Message as SmackMessage
-import org.jivesoftware.smackx.carbons.packet.CarbonExtension
-import org.jivesoftware.smackx.forward.packet.Forwarded
 import org.jivesoftware.smackx.mam.MamManager
 import org.jxmpp.jid.impl.JidCreate
 import ltechnologies.onionphone.securemessenger.core.model.Attachment
@@ -37,7 +35,6 @@ object XmppMamSync {
     ): Boolean {
         val mam = smack.mamManager ?: return false
         if (!mam.isSupported) return false
-        if (smack.omemoHelper != null && smack.omemoHelper?.ready != true) return false
         val with = JidCreate.entityBareFrom(remoteJid)
         val pageSize = maxResults.coerceIn(10, 100)
         val queryArgsBuilder = MamManager.MamQueryArgs.builder()
@@ -186,21 +183,7 @@ object XmppMamSync {
 
     private fun resolveBody(smack: SmackClientFacade, remoteJid: String, smackMsg: SmackMessage): String? {
         val helper = smack.omemoHelper
-        if (helper?.hasOmemoPayload(smackMsg) == true) {
-            // Fail-closed: never surface ciphertext/cleartext body for undecryptable OMEMO.
-            return helper.tryDecrypt(remoteJid, smackMsg)
-        }
-        val carbonDir = CarbonExtension.from(smackMsg)?.direction
-        if (carbonDir != null) {
-            val forwarded = smackMsg.getExtension(Forwarded::class.java)
-            val wrapped = forwarded?.forwardedStanza as? SmackMessage
-            if (wrapped != null) {
-                if (helper?.hasOmemoPayload(wrapped) == true) {
-                    return helper.tryDecrypt(remoteJid, wrapped)
-                }
-                wrapped.body?.let { return it }
-            }
-        }
-        return smackMsg.body
+        val decryptOmemo = helper?.ready == true
+        return OmemoHelper.unwrapChatBody(helper, remoteJid, smackMsg, decryptOmemo)
     }
 }

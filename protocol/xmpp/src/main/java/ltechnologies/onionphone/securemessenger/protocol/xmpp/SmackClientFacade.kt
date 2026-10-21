@@ -14,6 +14,7 @@ import timber.log.Timber
 import org.jivesoftware.smack.AbstractXMPPConnection
 import org.jivesoftware.smack.ConnectionConfiguration
 import org.jivesoftware.smack.MessageListener
+import org.jivesoftware.smack.ReconnectionListener
 import org.jivesoftware.smack.ReconnectionManager
 import org.jivesoftware.smack.SmackException
 import org.jivesoftware.smack.chat2.Chat
@@ -42,6 +43,7 @@ import org.jivesoftware.smackx.mam.MamManager
 import org.jivesoftware.smackx.muc.MultiUserChat
 import org.jivesoftware.smackx.muc.MultiUserChatManager
 import org.jivesoftware.smackx.omemo.OmemoManager
+import org.jivesoftware.smackx.omemo.listener.OmemoMessageListener
 import org.jivesoftware.smackx.ping.PingManager
 import org.jivesoftware.smackx.receipts.DeliveryReceiptManager
 import org.jivesoftware.smackx.receipts.DeliveryReceiptRequest
@@ -121,14 +123,61 @@ class SmackClientFacade(
     var omemoHelper: OmemoHelper? = null
         private set
 
+    private var omemoLiveListener: OmemoMessageListener? = null
+
+    /**
+     * Delivers decrypted OMEMO chat bodies (including XEP-0280 carbons). Plaintext stanzas use
+     * [ChatManager] listeners instead.
+     */
+    fun setOmemoLiveHandler(
+        handler: (remoteJid: String, body: String, stanza: SmackMessage, outgoing: Boolean) -> Unit,
+    ) {
+        val omemo = omemoManager ?: return
+        omemoLiveListener?.let { omemo.removeOmemoMessageListener(it) }
+        val listener = object : OmemoMessageListener {
+            override fun onOmemoMessageReceived(
+                stanza: org.jivesoftware.smack.packet.Stanza,
+                received: org.jivesoftware.smackx.omemo.OmemoMessage.Received,
+            ) {
+                val body = received.body ?: return
+                val remote = stanza.from?.asBareJid()?.toString() ?: return
+                handler(remote, body, stanza as SmackMessage, false)
+            }
+
+            override fun onOmemoCarbonCopyReceived(
+                direction: CarbonExtension.Direction,
+                carbonCopy: SmackMessage,
+                wrappingMessage: SmackMessage,
+                received: org.jivesoftware.smackx.omemo.OmemoMessage.Received,
+            ) {
+                val body = received.body ?: return
+                val remote = carbonCopy.to?.asBareJid()?.toString()
+                    ?: carbonCopy.from?.asBareJid()?.toString()
+                    ?: return
+                val outgoing = direction == CarbonExtension.Direction.sent
+                handler(remote, body, carbonCopy, outgoing)
+            }
+        }
+        omemo.addOmemoMessageListener(listener)
+        omemoLiveListener = listener
+    }
+
     @Throws(SmackException::class, Exception::class)
     suspend fun connect(
+        accountId: String,
         jid: String,
         password: String,
         server: String?,
         proxy: ProxyConfig,
+        omemoLiveHandler: ((
+            remoteJid: String,
+            body: String,
+            stanza: SmackMessage,
+            outgoing: Boolean,
+        ) -> Unit)? = null,
     ): XMPPTCPConnection = withContext(Dispatchers.IO) {
         XmppInitializer.ensureInitialized(context)
+        val omemoServiceReady = XmppInitializer.ensureOmemoSignalStore(context, accountId)
 
         val bareJid = JidCreate.entityBareFrom(jid.trim())
         val serverHost = server?.takeIf { it.isNotBlank() } ?: bareJid.domain.toString()
@@ -143,40 +192,31 @@ class SmackClientFacade(
             .setCompressionEnabled(true)
             .setSendPresence(true)
 
-        if (proxy.torRequired) {
-            val socksHost = SocksEndpointResolver.resolveReachableHost(proxy.host, proxy.port)
-            try {
-                java.net.Socket().use { socket ->
-                    socket.connect(java.net.InetSocketAddress(socksHost, proxy.port), 3_000)
-                }
-            } catch (e: Exception) {
-                throw IllegalStateException(
-                    "Tor activé : SOCKS $socksHost:${proxy.port} injoignable — démarrez OnionVPN ou désactivez Tor",
-                    e,
-                )
+        val socksHost = SocksEndpointResolver.resolveReachableHost(proxy.host, proxy.port)
+        try {
+            java.net.Socket().use { socket ->
+                socket.connect(java.net.InetSocketAddress(socksHost, proxy.port), 3_000)
             }
-            // Smack's SOCKS5 client always advertises both no-auth (0x00) and
-            // username/password (0x02) methods. Tor's SocksPort commonly selects 0x02
-            // — using the username/password purely as a stream-isolation token, not real
-            // credentials — regardless of whether the caller supplied any. If we leave
-            // these null, Smack has nothing to send once Tor picks 0x02 and the whole
-            // handshake fails with "fail in SOCKS5 proxy" before ever reaching the
-            // destination CONNECT request. Always supply a value (bare JID doubles as a
-            // free per-account circuit isolation key) so the handshake can complete either way.
-            val proxyInfo = org.jivesoftware.smack.proxy.ProxyInfo(
-                org.jivesoftware.smack.proxy.ProxyInfo.ProxyType.SOCKS5,
-                socksHost,
-                proxy.port,
-                proxy.username ?: bareJid.toString(),
-                proxy.password ?: "x",
+        } catch (e: Exception) {
+            throw IllegalStateException(
+                "Tor requis : SOCKS $socksHost:${proxy.port} injoignable — démarrez OnionVPN",
+                e,
             )
-            builder.setProxyInfo(proxyInfo)
         }
+        builder.setSocketFactory(SocksUnresolvedSocketFactory(socksHost, proxy.port))
+        org.jivesoftware.smack.util.DNSUtil.setDNSResolver(DummyTorDnsResolver())
+        builder.setProxyInfo(
+            smackSocksProxyInfo(socksHost, proxy.port, proxy.username, proxy.password),
+        )
 
         disconnect()
 
         val conn = XMPPTCPConnection(builder.build())
         conn.connect()
+        connection = conn
+        if (omemoServiceReady && omemoLiveHandler != null) {
+            setOmemoLiveHandler(omemoLiveHandler)
+        }
         conn.login()
 
         PingManager.getInstanceFor(conn).pingInterval = 60
@@ -204,22 +244,37 @@ class SmackClientFacade(
         } catch (_: Exception) {
         }
 
-        try {
-            val omemo = OmemoManager.getInstanceFor(conn)
-            omemoHelper = OmemoHelper(omemo, conn)
-            val published = omemoHelper?.initialize() == true
-            if (!published) {
-                // Keep helper (Conversations keeps AxolotlService) — encrypt stays blocked
-                // until device list publish succeeds; plaintext only for peers that advertise none.
-                Timber.w("OMEMO device list not published yet — encrypt blocked until retry")
+        if (omemoServiceReady) {
+            try {
+                val omemo = OmemoManager.getInstanceFor(conn)
+                omemoHelper = OmemoHelper(omemo, conn)
+                val published = omemoHelper?.initialize() == true
+                if (!published) {
+                    Timber.w("OMEMO device list not published — encrypt blocked until retry")
+                }
+            } catch (e: Exception) {
+                Timber.w(e, "OMEMO init failed — helper discarded")
+                omemoHelper = null
             }
-        } catch (e: Exception) {
-            Timber.w(e, "OMEMO init failed — encrypt blocked; helper discarded")
+        } else {
+            Timber.w("OMEMO Signal service setup failed — E2EE disabled for this session")
             omemoHelper = null
         }
 
-        connection = conn
         conn
+    }
+
+    fun addReconnectionFailureListener(onFailure: (Exception) -> Unit) {
+        val conn = connection ?: return
+        ReconnectionManager.getInstanceFor(conn).addReconnectionListener(
+            object : ReconnectionListener {
+                override fun reconnectingIn(seconds: Int) = Unit
+
+                override fun reconnectionFailed(e: Exception) {
+                    onFailure(e)
+                }
+            },
+        )
     }
 
     fun rosterEntries(): List<RosterEntry> = roster?.entries?.toList().orEmpty()
@@ -432,9 +487,6 @@ class SmackClientFacade(
             manager.discoverUploadService()
         }
         val mime = contentType?.takeIf { it.isNotBlank() } ?: "application/octet-stream"
-        if (mime == "application/octet-stream") {
-            return@withContext manager.uploadFile(file)
-        }
         val slot = manager.requestSlot(file.name, file.length(), mime)
         putHttpUploadSlot(slot, file)
         slot.getGetUrl()
@@ -444,13 +496,8 @@ class SmackClientFacade(
         val conn = connection ?: throw SmackException.NotConnectedException()
         val putUrl = slot.getPutUrl()
         val proxyInfo = (conn as? AbstractXMPPConnection)?.configuration?.proxyInfo
-        val urlConnection = (
-            if (proxyInfo != null) {
-                putUrl.openConnection(proxyInfo.toJavaProxy())
-            } else {
-                putUrl.openConnection()
-            }
-            ) as HttpURLConnection
+            ?: throw IOException("HTTP upload refused: session SOCKS proxy missing (Tor required)")
+        val urlConnection = openTorHttpConnection(putUrl, proxyInfo) as HttpURLConnection
         urlConnection.requestMethod = "PUT"
         urlConnection.useCaches = false
         urlConnection.doOutput = true
@@ -484,6 +531,10 @@ class SmackClientFacade(
     fun disconnect() {
         mucMessageListeners.clear()
         joinedMucs.clear()
+        omemoLiveListener?.let { listener ->
+            runCatching { omemoManager?.removeOmemoMessageListener(listener) }
+        }
+        omemoLiveListener = null
         try {
             connection?.disconnect()
         } catch (_: Exception) {
@@ -501,13 +552,8 @@ class SmackClientFacade(
         val conn = connection
             ?: throw SmackException.NotConnectedException()
         val proxyInfo = (conn as? AbstractXMPPConnection)?.configuration?.proxyInfo
-        val urlConnection = (
-            if (proxyInfo != null) {
-                parsed.fetchUrl.openConnection(proxyInfo.toJavaProxy())
-            } else {
-                parsed.fetchUrl.openConnection()
-            }
-            ) as HttpURLConnection
+            ?: throw IOException("HTTP download refused: session SOCKS proxy missing (Tor required)")
+        val urlConnection = openTorHttpConnection(parsed.fetchUrl, proxyInfo) as HttpURLConnection
         urlConnection.requestMethod = "GET"
         urlConnection.useCaches = false
         urlConnection.connectTimeout = 30_000
@@ -517,7 +563,25 @@ class SmackClientFacade(
             if (status != HttpURLConnection.HTTP_OK) {
                 throw IOException("HTTP download failed: $status ${urlConnection.responseMessage}")
             }
-            val cipherBytes = urlConnection.inputStream.use { it.readBytes() }
+            val declared = urlConnection.contentLengthLong
+            if (declared > MAX_AUTO_FETCH_BYTES) {
+                throw IOException("HTTP download exceeds $MAX_AUTO_FETCH_BYTES bytes")
+            }
+            val cipherBytes = urlConnection.inputStream.use { input ->
+                val buf = java.io.ByteArrayOutputStream()
+                val chunk = ByteArray(16_384)
+                var total = 0L
+                while (true) {
+                    val n = input.read(chunk)
+                    if (n <= 0) break
+                    total += n
+                    if (total > MAX_AUTO_FETCH_BYTES) {
+                        throw IOException("HTTP download exceeds $MAX_AUTO_FETCH_BYTES bytes")
+                    }
+                    buf.write(chunk, 0, n)
+                }
+                buf.toByteArray()
+            }
             val plain = if (parsed.iv != null && parsed.key != null) {
                 decryptAesGcm(cipherBytes, parsed.iv, parsed.key)
             } else {
@@ -625,6 +689,20 @@ class SmackClientFacade(
                 RegexOption.IGNORE_CASE,
             ).find(xml)
             return match?.groupValues?.getOrNull(1)?.trim()
+        }
+
+        const val MAX_AUTO_FETCH_BYTES = 8L * 1024L * 1024L
+
+        fun stableStanzaId(message: SmackMessage): String? {
+            val stanzaIdExt = runCatching {
+                org.jivesoftware.smackx.sid.element.StanzaIdElement.getStanzaId(message)?.id
+            }.getOrNull()
+            val originId = runCatching {
+                org.jivesoftware.smackx.sid.element.OriginIdElement.getOriginId(message)?.id
+            }.getOrNull()
+            return stanzaIdExt?.takeIf { it.isNotBlank() }
+                ?: originId?.takeIf { it.isNotBlank() }
+                ?: message.stanzaId?.takeIf { it.isNotBlank() }
         }
 
         fun isLikelyMucJid(jid: String): Boolean {

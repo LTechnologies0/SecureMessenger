@@ -93,9 +93,8 @@ fun TelegramLoginScreen(
     LaunchedEffect(accountId) {
         if (accountId == null) return@LaunchedEffect
         val protocol = viewModel.telegramProtocol() ?: return@LaunchedEffect
-        protocol.observePendingAuthStep().collectLatest { authStep ->
-            if (authStep == null) return@collectLatest
-            if (authStep.accountId != null && authStep.accountId != accountId) return@collectLatest
+        protocol.observePendingAuthByAccount().collectLatest { byAccount ->
+            val authStep = byAccount[accountId] ?: return@collectLatest
             loading = false
             when (authStep.kind) {
                 AuthStepKind.TELEGRAM_SMS_CODE -> {

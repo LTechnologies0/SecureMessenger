@@ -7,7 +7,7 @@ SecureMessenger treats IRC as a first-class `MessengerProtocol` (`ProtocolId.IRC
 | Area | Support |
 |------|---------|
 | Transport | TLS (`SECURE`, default port 6697) via Android/JVM system `TrustManagerFactory`, or cleartext (`INSECURE`, e.g. 6667). Kitteh’s built-in trust defaults are **not** used — they reject Libera and other Let’s Encrypt networks. |
-| Tor | SOCKS5 via `Client.Builder.proxy()` + `ProxyType.SOCKS_5` when `ProxyConfig.torRequired` |
+| Tor | SOCKS5 via `Client.Builder.proxy()` + `ProxyType.SOCKS_5` (mandatory); resolver throws |
 | Auth | Optional server password; NickServ; SASL PLAIN (`saslPassword` / `sasl=true`) |
 | Channels | `JOIN` / `PART` / auto-join list; PRIVMSG; NOTICE / TOPIC / JOIN / PART / KICK as `MessageKind.SYSTEM` |
 | DMs | PRIVMSG to nick |

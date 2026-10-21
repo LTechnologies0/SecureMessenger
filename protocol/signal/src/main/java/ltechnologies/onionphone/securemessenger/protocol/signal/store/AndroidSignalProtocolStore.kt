@@ -48,13 +48,24 @@ internal class SignalAccountProtocolStore(
     private val identities = ConcurrentHashMap<String, IdentityKey>()
     private val senderKeys = ConcurrentHashMap<SenderKeyId, SenderKeyRecord>()
     private val senderKeyShared = ConcurrentHashMap<DistributionId, MutableSet<SignalProtocolAddress>>()
+    private val ecPreKeyStaleAt = ConcurrentHashMap<Int, Long>()
+    private val kyberPreKeyStaleAt = ConcurrentHashMap<Int, Long>()
+
+    @Volatile
+    private var lastEcStaleMarkTime: Long = 0L
+
+    @Volatile
+    private var lastKyberStaleMarkTime: Long = 0L
 
     @Volatile
     private var multiDevice: Boolean = false
 
+    internal fun storePrefixLabel(): String = storePrefix
+
     init {
         signedPreKeys[signedPreKeyRecord.id] = signedPreKeyRecord
-        kyberPreKeys[kyberPreKeyRecord.id] = kyberPreKeyRecord
+        // Last-resort Kyber keys stay out of the one-time map. Signal-Android
+        // KyberPreKeyStore.markKyberPreKeyUsed deletes one-time rows only.
         lastResortKyberPreKeys[kyberPreKeyRecord.id] = kyberPreKeyRecord
         restorePersistedState()
     }
@@ -67,6 +78,14 @@ internal class SignalAccountProtocolStore(
         val senderPrefix = "$storePrefix:senderkey:"
         val sharedPrefix = "$storePrefix:senderkeyshared:"
         val identityPrefix = "$storePrefix:identity:"
+        decodePreKeyBlob(all["$storePrefix:oneTimeEc"])?.forEach { record ->
+            preKeys[record.id] = record
+        }
+        decodeKyberBlob(all["$storePrefix:oneTimeKyber"])?.forEach { record ->
+            if (!lastResortKyberPreKeys.containsKey(record.id)) {
+                kyberPreKeys[record.id] = record
+            }
+        }
         for ((key, value) in all) {
             when {
                 key.startsWith(sessionPrefix) -> {
@@ -162,17 +181,46 @@ internal class SignalAccountProtocolStore(
 
     override fun storePreKey(preKeyId: Int, record: PreKeyRecord) {
         preKeys[preKeyId] = record
+        persistPreKeyBlob()
     }
 
     override fun containsPreKey(preKeyId: Int): Boolean = preKeys.containsKey(preKeyId)
 
     override fun removePreKey(preKeyId: Int) {
-        preKeys.remove(preKeyId)
+        if (preKeys.remove(preKeyId) != null) {
+            persistPreKeyBlob()
+        }
     }
 
-    override fun markAllOneTimeEcPreKeysStaleIfNecessary(staleTime: Long) = Unit
+    fun oneTimeEcPreKeys(): List<PreKeyRecord> = preKeys.values.toList()
 
-    override fun deleteAllStaleOneTimeEcPreKeys(threshold: Long, minCount: Int) = Unit
+    fun oneTimeKyberPreKeys(): List<KyberPreKeyRecord> = kyberPreKeys.values.toList()
+
+    override fun markAllOneTimeEcPreKeysStaleIfNecessary(staleTime: Long) {
+        if (staleTime <= lastEcStaleMarkTime) return
+        lastEcStaleMarkTime = staleTime
+        for (id in preKeys.keys) {
+            ecPreKeyStaleAt.putIfAbsent(id, staleTime)
+        }
+    }
+
+    override fun deleteAllStaleOneTimeEcPreKeys(threshold: Long, minCount: Int) {
+        if (preKeys.size <= minCount) return
+        val staleIds = preKeys.keys
+            .filter { (ecPreKeyStaleAt[it] ?: Long.MAX_VALUE) < threshold }
+            .sortedBy { ecPreKeyStaleAt[it] ?: Long.MAX_VALUE }
+        var removed = false
+        for (id in staleIds) {
+            if (preKeys.size <= minCount) break
+            if (preKeys.remove(id) != null) {
+                ecPreKeyStaleAt.remove(id)
+                removed = true
+            }
+        }
+        if (removed) {
+            persistPreKeyBlob()
+        }
+    }
 
     override fun loadSession(address: SignalProtocolAddress): SessionRecord =
         sessions[address] ?: SessionRecord()
@@ -233,6 +281,7 @@ internal class SignalAccountProtocolStore(
 
     override fun storeSignedPreKey(signedPreKeyId: Int, record: SignedPreKeyRecord) {
         signedPreKeys[signedPreKeyId] = record
+        persistSignedPreKey(record)
     }
 
     override fun containsSignedPreKey(signedPreKeyId: Int): Boolean = signedPreKeys.containsKey(signedPreKeyId)
@@ -273,26 +322,37 @@ internal class SignalAccountProtocolStore(
     }
 
     override fun loadKyberPreKey(kyberPreKeyId: Int): KyberPreKeyRecord =
-        kyberPreKeys[kyberPreKeyId] ?: throw InvalidKeyIdException("Unknown kyber prekey $kyberPreKeyId")
+        kyberPreKeys[kyberPreKeyId]
+            ?: lastResortKyberPreKeys[kyberPreKeyId]
+            ?: throw InvalidKeyIdException("Unknown kyber prekey $kyberPreKeyId")
 
     override fun loadKyberPreKeys(): MutableList<KyberPreKeyRecord> = kyberPreKeys.values.toMutableList()
 
     override fun storeKyberPreKey(kyberPreKeyId: Int, record: KyberPreKeyRecord) {
+        if (lastResortKyberPreKeys.containsKey(kyberPreKeyId)) return
         kyberPreKeys[kyberPreKeyId] = record
+        persistKyberBlob()
     }
 
-    override fun containsKyberPreKey(kyberPreKeyId: Int): Boolean = kyberPreKeys.containsKey(kyberPreKeyId)
+    override fun containsKyberPreKey(kyberPreKeyId: Int): Boolean =
+        kyberPreKeys.containsKey(kyberPreKeyId) || lastResortKyberPreKeys.containsKey(kyberPreKeyId)
 
     override fun markKyberPreKeyUsed(kyberPreKeyId: Int, signedPreKeyId: Int, signedPreKey: ECPublicKey) {
+        if (lastResortKyberPreKeys.containsKey(kyberPreKeyId)) {
+            return
+        }
         if (!kyberPreKeys.containsKey(kyberPreKeyId)) {
             throw ReusedBaseKeyException()
         }
         kyberPreKeys.remove(kyberPreKeyId)
+        persistKyberBlob()
     }
 
     override fun storeLastResortKyberPreKey(kyberPreKeyId: Int, record: KyberPreKeyRecord) {
+        kyberPreKeys.remove(kyberPreKeyId)
         lastResortKyberPreKeys[kyberPreKeyId] = record
-        storeKyberPreKey(kyberPreKeyId, record)
+        persistKyberBlob()
+        persistLastResortKyberPreKey(record)
     }
 
     override fun loadLastResortKyberPreKeys(): MutableList<KyberPreKeyRecord> =
@@ -303,11 +363,91 @@ internal class SignalAccountProtocolStore(
         lastResortKyberPreKeys.remove(kyberPreKeyId)
     }
 
-    override fun markAllOneTimeKyberPreKeysStaleIfNecessary(staleTime: Long) = Unit
+    override fun markAllOneTimeKyberPreKeysStaleIfNecessary(staleTime: Long) {
+        if (staleTime <= lastKyberStaleMarkTime) return
+        lastKyberStaleMarkTime = staleTime
+        for (id in kyberPreKeys.keys) {
+            kyberPreKeyStaleAt.putIfAbsent(id, staleTime)
+        }
+    }
 
-    override fun deleteAllStaleOneTimeKyberPreKeys(threshold: Long, minCount: Int) = Unit
+    override fun deleteAllStaleOneTimeKyberPreKeys(threshold: Long, minCount: Int) {
+        if (kyberPreKeys.size <= minCount) return
+        val staleIds = kyberPreKeys.keys
+            .filter { (kyberPreKeyStaleAt[it] ?: Long.MAX_VALUE) < threshold }
+            .sortedBy { kyberPreKeyStaleAt[it] ?: Long.MAX_VALUE }
+        var removed = false
+        for (id in staleIds) {
+            if (kyberPreKeys.size <= minCount) break
+            if (kyberPreKeys.remove(id) != null) {
+                kyberPreKeyStaleAt.remove(id)
+                removed = true
+            }
+        }
+        if (removed) {
+            persistKyberBlob()
+        }
+    }
+
+    private fun persistPreKeyBlob() {
+        persist("$storePrefix:oneTimeEc", encodePreKeyBlob(preKeys.values))
+    }
+
+    private fun persistKyberBlob() {
+        persist("$storePrefix:oneTimeKyber", encodeKyberBlob(kyberPreKeys.values))
+    }
+
+    private fun persistSignedPreKey(record: SignedPreKeyRecord) {
+        val key = when (storePrefix) {
+            "aci" -> SignalCredentialKeys.ACI_SIGNED_PREKEY
+            "pni" -> SignalCredentialKeys.PNI_SIGNED_PREKEY
+            else -> return
+        }
+        persist(key, Base64.encodeToString(record.serialize(), Base64.NO_WRAP))
+    }
+
+    private fun persistLastResortKyberPreKey(record: KyberPreKeyRecord) {
+        val key = when (storePrefix) {
+            "aci" -> SignalCredentialKeys.ACI_KYBER_PREKEY
+            "pni" -> SignalCredentialKeys.PNI_KYBER_PREKEY
+            else -> return
+        }
+        persist(key, Base64.encodeToString(record.serialize(), Base64.NO_WRAP))
+    }
 
     private data class SenderKeyId(val address: SignalProtocolAddress, val distributionId: UUID)
+
+    companion object {
+        fun encodePreKeyBlob(records: Collection<PreKeyRecord>): String =
+            records.joinToString("\n") { record ->
+                "${record.id}:${Base64.encodeToString(record.serialize(), Base64.NO_WRAP)}"
+            }
+
+        fun encodeKyberBlob(records: Collection<KyberPreKeyRecord>): String =
+            records.joinToString("\n") { record ->
+                "${record.id}:${Base64.encodeToString(record.serialize(), Base64.NO_WRAP)}"
+            }
+
+        fun decodePreKeyBlob(raw: String?): List<PreKeyRecord>? {
+            if (raw.isNullOrBlank()) return null
+            return raw.lineSequence().mapNotNull { line ->
+                val id = line.substringBefore(':').toIntOrNull() ?: return@mapNotNull null
+                val bytes = runCatching { Base64.decode(line.substringAfter(':'), Base64.NO_WRAP) }.getOrNull()
+                    ?: return@mapNotNull null
+                runCatching { PreKeyRecord(bytes) }.getOrNull()?.takeIf { it.id == id }
+            }.toList()
+        }
+
+        fun decodeKyberBlob(raw: String?): List<KyberPreKeyRecord>? {
+            if (raw.isNullOrBlank()) return null
+            return raw.lineSequence().mapNotNull { line ->
+                val id = line.substringBefore(':').toIntOrNull() ?: return@mapNotNull null
+                val bytes = runCatching { Base64.decode(line.substringAfter(':'), Base64.NO_WRAP) }.getOrNull()
+                    ?: return@mapNotNull null
+                runCatching { KyberPreKeyRecord(bytes) }.getOrNull()?.takeIf { it.id == id }
+            }.toList()
+        }
+    }
 }
 
 internal class AndroidSignalProtocolStore private constructor(
@@ -325,6 +465,10 @@ internal class AndroidSignalProtocolStore private constructor(
     override fun aci(): SignalServiceAccountDataStore = aciStore
 
     override fun pni(): SignalServiceAccountDataStore = pniStore
+
+    internal fun aciAccountStore(): SignalAccountProtocolStore = aciStore
+
+    internal fun pniAccountStore(): SignalAccountProtocolStore = pniStore
 
     override fun isMultiDevice(): Boolean = aciStore.isMultiDevice()
 

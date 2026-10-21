@@ -14,9 +14,9 @@ class OmemoSendDecisionTest {
     }
 
     @Test
-    fun helperMissingAllowsPlaintext() {
+    fun helperMissingRefusesPlaintext() {
         assertEquals(
-            OmemoSendDecision.PLAINTEXT,
+            OmemoSendDecision.BLOCK,
             OmemoHelper.decideSend(helperPresent = false, helperReady = false, peerSupports = false),
         )
     }
@@ -38,9 +38,9 @@ class OmemoSendDecisionTest {
     }
 
     @Test
-    fun knownCleartextPeerMaySendPlain() {
+    fun knownCleartextPeerRefusesPlaintext() {
         assertEquals(
-            OmemoSendDecision.PLAINTEXT,
+            OmemoSendDecision.BLOCK,
             OmemoHelper.decideSend(helperPresent = true, helperReady = true, peerSupports = false),
         )
     }

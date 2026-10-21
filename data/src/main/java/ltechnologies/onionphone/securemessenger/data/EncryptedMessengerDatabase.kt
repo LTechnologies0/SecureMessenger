@@ -10,6 +10,7 @@ import ltechnologies.onionphone.securemessenger.data.db.MessengerDatabase
 import ltechnologies.onionphone.securemessenger.data.db.MIGRATION_2_3
 import ltechnologies.onionphone.securemessenger.data.db.MIGRATION_3_4
 import ltechnologies.onionphone.securemessenger.data.db.MIGRATION_4_5
+import ltechnologies.onionphone.securemessenger.data.db.MIGRATION_5_6
 import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
 
 /**
@@ -44,7 +45,7 @@ class EncryptedMessengerDatabase @Inject constructor(
         val factory = SupportOpenHelperFactory(passphraseStore.getOrCreatePassphrase())
         return Room.databaseBuilder(context, MessengerDatabase::class.java, DB_NAME)
             .openHelperFactory(factory)
-            .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+            .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
             .fallbackToDestructiveMigrationFrom(1)
             .build()
     }
