@@ -44,13 +44,15 @@ flowchart TB
 
 ## Protocol feature grid
 
+Inventaire détaillé des **manques / incohérences** (capabilities vs UI vs clients d’origine) : [FEATURE_GAPS.md](FEATURE_GAPS.md).
+
 | Protocole | Connexion | Envoi | Réception | Groupes | Médias | E2EE | Inscription |
 |-----------|-----------|-------|-----------|---------|--------|------|-------------|
 | XMPP | OK | OK | OK | MUC + bookmarks | HTTP upload + OOB/aesgcm | OMEMO 1:1+MUC (fail-closed) | OK (Tor) |
-| Matrix | OK + SSO | OK | OK | OK | Trixnity upload + mxc download | Megolm (H2 `fromStore`, fail-closed) | OK (Tor) |
-| Telegram | OK* | OK | OK | OK | TDLib send/receive | MTProto (cloud)† | Phone auth (TDLib)* |
-| Signal | OK | OK | OK WS | GV2 sender-key (+ encrypted fan-out) | CDN upload/download | libsignal store (sessions/SK) | OK (Tor) |
-| Email | OK | SMTP/JMAP | IMAP IDLE / POP3 / JMAP | — | MIME attachments | — (OpenPGP out of scope) | — |
+| Matrix | OK + SSO | OK | OK | OK | Trixnity upload + mxc download | Megolm (H2 `fromStore`, fail-closed); react/edit/redact UI | OK (Tor) |
+| Telegram | OK* | OK | OK | OK | TDLib send/receive; stickers/reactions | MTProto (cloud)†; pin/mute/archive | Phone auth (TDLib)* |
+| Signal | OK | OK | OK WS | GV2 sender-key (+ encrypted fan-out) | CDN upload/download | libsignal; safety number 1:1 | OK (Tor) |
+| Email | OK | SMTP/JMAP (+Cc) | IMAP IDLE / POP3 / JMAP; Sent ~50 | — | MIME attachments (JMAP send limité) | — (OpenPGP out of scope) | — |
 | IRC | OK | PRIVMSG | PRIVMSG + system | Channels | — | — | — |
 
 \* Requires prebuilt TDLib AAR with `libtdjni.so` for packaged ABIs ([docs/tdlib-build.md](tdlib-build.md)). Debug APKs include `arm64-v8a` + `x86_64` by default (Waydroid/emulators). Telegram “inscription” is TDLib phone/SMS auth, not `MessengerProtocol.register`.
