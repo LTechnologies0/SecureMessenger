@@ -25,10 +25,11 @@ Document de vérité pour finir le travail. État au commit `4c07b06` (**v1.0.16
 
 | Item | État | Action |
 |------|------|--------|
-| Merge `fix/audit-round-1` → `main` | Ouvert | PR à merger |
-| Tag/release `v1.0.16` | Corrigé (pointe `4c07b06`) | — |
-| APK attaché à la release | Ouvert | `assembleDebug` (pas de keystore release local) |
-| `main` encore en **1.0.10** | Incohérent avec release notes | Merger la branche |
+| Merge `fix/audit-round-1` → `main` | **Fait** ([PR #24](https://github.com/LTechnologies0/SecureMessenger/pull/24)) | — |
+| Tag/release `v1.0.16` | **Fait** (commit parity + assets) | — |
+| APK attaché à la release | **Fait** (`app-debug.apk` ~359 Mo) | Keystore release absent en local |
+| `main` version **1.0.16** | **Fait** | — |
+| CI fetch TDLib AAR 404 | **Corrigé** (AAR hébergé sur release SM + script) | — |
 
 ---
 

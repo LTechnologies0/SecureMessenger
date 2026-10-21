@@ -29,7 +29,9 @@ chmod +x scripts/fetch-tdlib-prebuilt.sh
 ./gradlew :app:assembleDebug -x validateSigningDebug
 ```
 
-This downloads `protocol/telegram/libs/tdlib-core-0.1.0.aar` (all ABIs + Java API).
+This downloads `protocol/telegram/libs/tdlib-core-0.1.0.aar` (all ABIs + Java API) from the
+[SecureMessenger v1.0.16 release](https://github.com/LTechnologies0/SecureMessenger/releases/tag/v1.0.16)
+(override with `TDLIB_AAR_URL`). The former `AkashPriyadarshii/tdlib-android` host is gone.
 `:protocol:telegram` **refuses** the Maven JAR stub (no natives) and auto-fetches the AAR when missing.
 
 Debug APKs package `arm64-v8a` + `x86_64` by default so Waydroid/x86 emulators get `libtdjni.so`
