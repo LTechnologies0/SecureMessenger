@@ -105,6 +105,15 @@ internal class IrcTorNetworkHandler(
     companion object {
         private val sharedEventLoop: EventLoopGroup = NioEventLoopGroup(1)
 
+        init {
+            // Process-lifetime group (mirrors Kitteh default); shut down on JVM exit.
+            Runtime.getRuntime().addShutdownHook(
+                Thread({
+                    runCatching { sharedEventLoop.shutdownGracefully().syncUninterruptibly() }
+                }, "irc-tor-netty-shutdown"),
+            )
+        }
+
         fun create(proxy: ProxyConfig): IrcTorNetworkHandler {
             val (user, pass) = ircTorSocksCredentials(proxy)
             return IrcTorNetworkHandler(user, pass)

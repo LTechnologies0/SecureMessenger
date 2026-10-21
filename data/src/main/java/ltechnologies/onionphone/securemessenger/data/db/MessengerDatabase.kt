@@ -34,6 +34,9 @@ data class ConversationEntity(
     val lastMessagePreview: String?,
     val lastMessageAt: Long,
     val unreadCount: Int,
+    val isPinned: Boolean = false,
+    val isMuted: Boolean = false,
+    val isArchived: Boolean = false,
 )
 
 @Entity(
@@ -244,7 +247,7 @@ interface ContactDao {
         ProxySettingsEntity::class,
         ContactEntity::class,
     ],
-    version = 5,
+    version = 6,
     exportSchema = true,
 )
 abstract class MessengerDatabase : RoomDatabase() {
@@ -283,6 +286,9 @@ fun ConversationEntity.toDomain(): ltechnologies.onionphone.securemessenger.core
         lastMessagePreview = lastMessagePreview,
         lastMessageAt = lastMessageAt,
         unreadCount = unreadCount,
+        isPinned = isPinned,
+        isMuted = isMuted,
+        isArchived = isArchived,
     )
 }
 
@@ -334,6 +340,9 @@ fun ltechnologies.onionphone.securemessenger.core.model.Conversation.toEntity() 
     lastMessagePreview = lastMessagePreview,
     lastMessageAt = lastMessageAt,
     unreadCount = unreadCount,
+    isPinned = isPinned,
+    isMuted = isMuted,
+    isArchived = isArchived,
 )
 
 fun ltechnologies.onionphone.securemessenger.core.model.Message.toEntity() = MessageEntity(

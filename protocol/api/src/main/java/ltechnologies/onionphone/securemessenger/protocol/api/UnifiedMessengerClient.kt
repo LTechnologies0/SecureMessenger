@@ -59,6 +59,11 @@ class UnifiedMessengerClient @Inject constructor(
 
     suspend fun pendingAuth(protocol: ProtocolId): AuthStep? = registry.get(protocol)?.pendingAuthStep()
 
+    /**
+     * Per-protocol flows are scoped to [ProtocolId] inside each [MessengerProtocol] implementation.
+     * For the full inbox, prefer [ltechnologies.onionphone.securemessenger.data.MessengerRepository.observeConversations]
+     * (as [ltechnologies.onionphone.securemessenger.ui.MainViewModel] does).
+     */
     fun observeConversations(protocol: ProtocolId? = null): Flow<List<Conversation>> {
         if (protocol != null) {
             return registry.get(protocol)?.observeConversations()

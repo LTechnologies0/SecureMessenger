@@ -14,6 +14,7 @@ import timber.log.Timber
 import org.jivesoftware.smack.AbstractXMPPConnection
 import org.jivesoftware.smack.ConnectionConfiguration
 import org.jivesoftware.smack.MessageListener
+import org.jivesoftware.smack.ReconnectionListener
 import org.jivesoftware.smack.ReconnectionManager
 import org.jivesoftware.smack.SmackException
 import org.jivesoftware.smack.chat2.Chat
@@ -168,6 +169,12 @@ class SmackClientFacade(
         password: String,
         server: String?,
         proxy: ProxyConfig,
+        omemoLiveHandler: ((
+            remoteJid: String,
+            body: String,
+            stanza: SmackMessage,
+            outgoing: Boolean,
+        ) -> Unit)? = null,
     ): XMPPTCPConnection = withContext(Dispatchers.IO) {
         XmppInitializer.ensureInitialized(context)
         val omemoServiceReady = XmppInitializer.ensureOmemoSignalStore(context, accountId)
@@ -206,6 +213,10 @@ class SmackClientFacade(
 
         val conn = XMPPTCPConnection(builder.build())
         conn.connect()
+        connection = conn
+        if (omemoServiceReady && omemoLiveHandler != null) {
+            setOmemoLiveHandler(omemoLiveHandler)
+        }
         conn.login()
 
         PingManager.getInstanceFor(conn).pingInterval = 60
@@ -250,8 +261,20 @@ class SmackClientFacade(
             omemoHelper = null
         }
 
-        connection = conn
         conn
+    }
+
+    fun addReconnectionFailureListener(onFailure: (Exception) -> Unit) {
+        val conn = connection ?: return
+        ReconnectionManager.getInstanceFor(conn).addReconnectionListener(
+            object : ReconnectionListener {
+                override fun reconnectingIn(seconds: Int) = Unit
+
+                override fun reconnectionFailed(e: Exception) {
+                    onFailure(e)
+                }
+            },
+        )
     }
 
     fun rosterEntries(): List<RosterEntry> = roster?.entries?.toList().orEmpty()
@@ -473,13 +496,8 @@ class SmackClientFacade(
         val conn = connection ?: throw SmackException.NotConnectedException()
         val putUrl = slot.getPutUrl()
         val proxyInfo = (conn as? AbstractXMPPConnection)?.configuration?.proxyInfo
-        val urlConnection = (
-            if (proxyInfo != null) {
-                openTorHttpConnection(putUrl, proxyInfo)
-            } else {
-                putUrl.openConnection()
-            }
-            ) as HttpURLConnection
+            ?: throw IOException("HTTP upload refused: session SOCKS proxy missing (Tor required)")
+        val urlConnection = openTorHttpConnection(putUrl, proxyInfo) as HttpURLConnection
         urlConnection.requestMethod = "PUT"
         urlConnection.useCaches = false
         urlConnection.doOutput = true
@@ -534,13 +552,8 @@ class SmackClientFacade(
         val conn = connection
             ?: throw SmackException.NotConnectedException()
         val proxyInfo = (conn as? AbstractXMPPConnection)?.configuration?.proxyInfo
-        val urlConnection = (
-            if (proxyInfo != null) {
-                openTorHttpConnection(parsed.fetchUrl, proxyInfo)
-            } else {
-                parsed.fetchUrl.openConnection()
-            }
-            ) as HttpURLConnection
+            ?: throw IOException("HTTP download refused: session SOCKS proxy missing (Tor required)")
+        val urlConnection = openTorHttpConnection(parsed.fetchUrl, proxyInfo) as HttpURLConnection
         urlConnection.requestMethod = "GET"
         urlConnection.useCaches = false
         urlConnection.connectTimeout = 30_000

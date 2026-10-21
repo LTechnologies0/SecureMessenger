@@ -23,8 +23,8 @@ android {
         applicationId = "ltechnologies.onionphone.securemessenger"
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
-        versionCode = 17
-        versionName = "1.0.13"
+        versionCode = 19
+        versionName = "1.0.16"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         val telegramApiId = localProperties.getProperty("telegram.api.id")

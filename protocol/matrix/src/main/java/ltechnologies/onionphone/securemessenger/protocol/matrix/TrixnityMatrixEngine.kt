@@ -42,6 +42,8 @@ import net.folivo.trixnity.client.room.RoomService
 import net.folivo.trixnity.client.room.message.audio
 import net.folivo.trixnity.client.room.message.file
 import net.folivo.trixnity.client.room.message.image
+import net.folivo.trixnity.client.room.message.react
+import net.folivo.trixnity.client.room.message.replace
 import net.folivo.trixnity.client.room.message.text
 import net.folivo.trixnity.client.room.message.video
 import net.folivo.trixnity.client.store.AccountStore
@@ -841,6 +843,49 @@ class TrixnityMatrixEngine(
             }
         }
     }
+
+    suspend fun sendReaction(roomId: String, eventId: String, emoji: String): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            val matrixClient = client
+                ?: return@withContext Result.failure(IllegalStateException("Not connected"))
+            val roomService = matrixClient.di.get<RoomService>()
+            runCatching {
+                roomService.sendMessage(RoomId(roomId)) {
+                    react(EventId(eventId), emoji)
+                }
+                Unit
+            }
+        }
+
+    suspend fun editMessage(roomId: String, eventId: String, newBody: String): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            val matrixClient = client
+                ?: return@withContext Result.failure(IllegalStateException("Not connected"))
+            val roomService = matrixClient.di.get<RoomService>()
+            runCatching {
+                roomService.sendMessage(RoomId(roomId)) {
+                    replace(EventId(eventId))
+                    text(newBody)
+                }
+                Unit
+            }
+        }
+
+    suspend fun redactMessage(roomId: String, eventId: String, reason: String? = null): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            val matrixClient = client
+                ?: return@withContext Result.failure(IllegalStateException("Not connected"))
+            runCatching {
+                matrixClient.api.room.redactEvent(
+                    roomId = RoomId(roomId),
+                    eventId = EventId(eventId),
+                    reason = reason.orEmpty(),
+                    txnId = "redact-${System.currentTimeMillis()}",
+                    asUserId = matrixClient.userId,
+                ).getOrThrow()
+                Unit
+            }
+        }
 
     suspend fun sendMedia(
         roomId: String,

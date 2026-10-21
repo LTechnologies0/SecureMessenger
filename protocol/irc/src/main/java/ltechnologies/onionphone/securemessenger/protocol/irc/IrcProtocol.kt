@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -39,12 +40,14 @@ import ltechnologies.onionphone.securemessenger.data.MessengerRepository
 import ltechnologies.onionphone.securemessenger.protocol.api.MessengerProtocol
 import net.engio.mbassy.listener.Handler
 import org.kitteh.irc.client.library.Client
+import org.kitteh.irc.client.library.feature.CaseMapping
 import org.kitteh.irc.client.library.event.channel.ChannelJoinEvent
 import org.kitteh.irc.client.library.event.channel.ChannelKickEvent
 import org.kitteh.irc.client.library.event.channel.ChannelMessageEvent
 import org.kitteh.irc.client.library.event.channel.ChannelNoticeEvent
 import org.kitteh.irc.client.library.event.channel.ChannelPartEvent
 import org.kitteh.irc.client.library.event.channel.ChannelTopicEvent
+import org.kitteh.irc.client.library.event.capabilities.CapabilitiesRejectedEvent
 import org.kitteh.irc.client.library.event.client.ClientNegotiationCompleteEvent
 import org.kitteh.irc.client.library.event.client.ClientReceiveNumericEvent
 import org.kitteh.irc.client.library.event.connection.ClientConnectionClosedEvent
@@ -86,6 +89,12 @@ class IrcProtocol @Inject constructor(
         backupExport = true,
     )
 
+    override fun capabilitiesFor(accountId: String?): ProtocolCapabilities {
+        if (accountId == null) return capabilities
+        val connected = sessions[accountId]?.connected == true
+        return capabilities.copy(contacts = connected)
+    }
+
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     override val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
 
@@ -121,23 +130,44 @@ class IrcProtocol @Inject constructor(
                 val realName = account.secrets["realName"]?.trim()?.takeIf { it.isNotEmpty() }
                     ?: account.displayName.ifBlank { nick }
                 val serverPassword = account.secrets["password"]?.takeIf { it.isNotBlank() }
-                val authPassword = account.secrets["nickServPassword"]
-                    ?.takeIf { it.isNotBlank() }
-                    ?: account.secrets["saslPassword"]?.takeIf { it.isNotBlank() }
-                val sasl = account.secrets["sasl"]?.equals("true", ignoreCase = true) == true ||
-                    account.secrets.containsKey("saslPassword")
+                val nickServPassword = account.secrets["nickServPassword"]?.takeIf { it.isNotBlank() }
+                val saslPassword = account.secrets["saslPassword"]?.takeIf { it.isNotBlank() }
+                val saslRequested = account.secrets["sasl"]?.equals("true", ignoreCase = true) == true ||
+                    saslPassword != null
+                // SASL runs during registration (CAP). NickServ IDENTIFY runs after RPL_MYINFO (004).
+                // A lone password with sasl=true is the SASL secret. Distinct secrets use both protocols.
+                val saslCredential = when {
+                    !saslRequested -> null
+                    saslPassword != null -> saslPassword
+                    else -> nickServPassword
+                }
+                val nickServCredential = when {
+                    nickServPassword == null -> null
+                    saslRequested && saslPassword == null -> null
+                    else -> nickServPassword
+                }
                 val channels = IrcTargets.parseChannels(account.secrets["channels"])
-                val authGate = when {
-                    authPassword.isNullOrBlank() -> IrcAuthGate.NONE
-                    sasl -> IrcAuthGate.SASL
-                    else -> IrcAuthGate.NICKSERV
+
+                if (!useTls &&
+                    (saslCredential != null || nickServCredential != null || serverPassword != null)
+                ) {
+                    refreshConnectionState()
+                    return@withContext ConnectionResult.Failure(
+                        "IRC : mot de passe / SASL / NickServ exigent TLS (port 6697+)",
+                    )
                 }
 
                 sessions.remove(account.accountId)?.shutdown()
 
                 val ready = CompletableDeferred<Unit>()
                 val fail = CompletableDeferred<Exception>()
-                val listener = IrcEventListener(account.accountId, authGate, ready, fail)
+                val listener = IrcEventListener(
+                    account.accountId,
+                    awaitSasl = saslCredential != null,
+                    awaitNickServ = nickServCredential != null,
+                    ready,
+                    fail,
+                )
 
                 val builder = Client.builder()
                     .name("SecureMessenger-${account.accountId.take(8)}")
@@ -176,31 +206,26 @@ class IrcProtocol @Inject constructor(
                     .then()
 
                 val torNetwork = IrcTorNetworkHandler.create(proxy)
+                // Kitteh 9 Client.Builder has no resolver(). NetworkHandler.setResolver is the hook
+                // NettyNetworkHandler.connect uses; IrcTorBlockingResolver forces unresolved SOCKS DNS.
                 torNetwork.setResolver(IrcTorBlockingResolver)
                 builder.management()
                     .networkHandler(torNetwork)
                     .then()
 
-                // Fail-closed: Kitteh must not resolve IRC host via local DNS under Tor.
-                val resolverMethod = builder.javaClass.methods.firstOrNull {
-                    it.name == "resolver" && it.parameterCount == 1
-                } ?: error("Kitteh resolver hook missing — refuse local DNS")
-                resolverMethod.invoke(builder, IrcTorBlockingResolver)
-
                 val client = builder.build()
                 client.eventManager.registerEventListener(listener)
 
-                if (!authPassword.isNullOrBlank()) {
-                    if (sasl) {
-                        client.authManager.addProtocol(SaslPlain(client, nick, authPassword))
-                    } else {
-                        client.authManager.addProtocol(
-                            NickServ.builder(client)
-                                .account(nick)
-                                .password(authPassword)
-                                .build(),
-                        )
-                    }
+                if (saslCredential != null) {
+                    client.authManager.addProtocol(SaslPlain(client, nick, saslCredential))
+                }
+                if (nickServCredential != null) {
+                    client.authManager.addProtocol(
+                        NickServ.builder(client)
+                            .account(nick)
+                            .password(nickServCredential)
+                            .build(),
+                    )
                 }
 
                 val session = IrcSession(
@@ -275,7 +300,10 @@ class IrcProtocol @Inject constructor(
         }
     }
 
-    override fun observeConversations(): Flow<List<Conversation>> = repository.observeConversations()
+    override fun observeConversations(): Flow<List<Conversation>> =
+        repository.observeConversations().map { list ->
+            list.filter { it.protocol == ProtocolId.IRC }
+        }
 
     override fun observeMessages(conversationId: String): Flow<List<Message>> =
         repository.observeMessages(conversationId)
@@ -380,7 +408,10 @@ class IrcProtocol @Inject constructor(
                 val accId = accountId ?: IrcTargets.accountIdFromConversation(conversationId)
                 val session = sessions[accId]
                     ?: return@withContext SendResult.Failure("Account not connected")
-                val remote = IrcTargets.canonicalRemote(IrcTargets.remoteFromConversation(conversationId))
+                val remote = IrcTargets.canonicalRemote(
+                    IrcTargets.remoteFromConversation(conversationId),
+                    session.caseMapping,
+                )
                 val text = body.value
                 if (text.isBlank()) return@withContext SendResult.Failure("Empty message")
 
@@ -496,12 +527,6 @@ class IrcProtocol @Inject constructor(
         }
     }
 
-    private enum class IrcAuthGate {
-        NONE,
-        SASL,
-        NICKSERV,
-    }
-
     private suspend fun touchConversation(
         accountId: String,
         remote: String,
@@ -534,7 +559,9 @@ class IrcProtocol @Inject constructor(
         sender: String?,
         kind: MessageKind = MessageKind.TEXT,
     ) {
-        val convId = IrcTargets.conversationId(accountId, remote)
+        val mapping = sessions[accountId]?.caseMapping ?: CaseMapping.RFC1459
+        val canonical = IrcTargets.canonicalRemote(remote, mapping)
+        val convId = IrcTargets.conversationId(accountId, canonical)
         val now = System.currentTimeMillis()
         repository.upsertMessage(
             Message(
@@ -549,15 +576,24 @@ class IrcProtocol @Inject constructor(
                 kind = kind,
             ),
         )
-        touchConversation(accountId, remote, body, now, unreadBump = true)
+        touchConversation(accountId, canonical, body, now, unreadBump = true)
     }
 
     private inner class IrcEventListener(
         private val accountId: String,
-        private val authGate: IrcAuthGate,
+        private val awaitSasl: Boolean,
+        private val awaitNickServ: Boolean,
         private val ready: CompletableDeferred<Unit>,
         private val fail: CompletableDeferred<Exception>,
     ) {
+        @Volatile
+        private var saslDone: Boolean = !awaitSasl
+
+        @Volatile
+        private var nickServDone: Boolean = !awaitNickServ
+
+        @Volatile
+        private var negotiationComplete: Boolean = false
         @Volatile
         private var session: IrcSession? = null
 
@@ -565,7 +601,10 @@ class IrcProtocol @Inject constructor(
             session = s
         }
 
-        private fun markReady(source: String) {
+        private fun tryMarkReady(source: String) {
+            if (!negotiationComplete) return
+            if (awaitSasl && !saslDone) return
+            if (awaitNickServ && !nickServDone) return
             if (!ready.complete(Unit)) return
             session?.syncEffectiveNick()
             Timber.i("IRC ready (%s) for %s", source, accountId)
@@ -578,25 +617,45 @@ class IrcProtocol @Inject constructor(
 
         @Handler
         fun onReady(event: ClientNegotiationCompleteEvent) {
+            negotiationComplete = true
+            val serverInfo = event.serverInfo
+            session?.caseMapping = serverInfo.caseMapping
             session?.syncEffectiveNick()
-            Timber.i("IRC negotiated with %s", event.server.name)
-            if (authGate == IrcAuthGate.NONE) {
-                markReady("registration")
+            Timber.i(
+                "IRC negotiated with %s (CASEMAPPING=%s)",
+                event.server.name,
+                serverInfo.caseMapping.name,
+            )
+            if (awaitSasl && !saslDone) {
+                markAuthFailure("Registration finished without SASL success")
+                return
+            }
+            tryMarkReady("registration")
+        }
+
+        @Handler
+        fun onCapRejected(event: CapabilitiesRejectedEvent) {
+            if (!awaitSasl || ready.isCompleted) return
+            val rejected = event.rejectedCapabilitiesRequest.map { it.name }
+            if (rejected.any { it.equals("sasl", ignoreCase = true) }) {
+                markAuthFailure("Server rejected SASL capability (CAP NAK)")
             }
         }
 
         @Handler
         @NumericFilter(903)
         fun onSaslSuccess(event: ClientReceiveNumericEvent) {
-            if (authGate != IrcAuthGate.SASL) return
-            markReady("SASL 903")
+            if (!awaitSasl) return
+            saslDone = true
+            tryMarkReady("SASL 903")
         }
 
         @Handler
         fun onSaslFailure(event: ClientReceiveNumericEvent) {
-            if (authGate != IrcAuthGate.SASL || ready.isCompleted) return
+            if (!awaitSasl || ready.isCompleted) return
+            // Kitteh AbstractSaslProtocol.Listener: 902 and 904–908 abort SASL.
             when (event.numeric) {
-                904, 905, 906, 907, 908 ->
+                902, 904, 905, 906, 907, 908 ->
                     markAuthFailure("SASL authentication failed (${event.numeric})")
             }
         }
@@ -655,10 +714,11 @@ class IrcProtocol @Inject constructor(
         fun onChannelMessage(event: ChannelMessageEvent) {
             val nick = event.actor.nick
             if (session?.isSelfNick(nick) == true) return
+            val mapping = session?.caseMapping ?: CaseMapping.RFC1459
             scope.launch {
                 persistIncoming(
                     accountId,
-                    IrcTargets.canonicalChannel(event.channel.messagingName),
+                    IrcTargets.canonicalChannel(event.channel.messagingName, mapping),
                     event.message,
                     nick,
                 )
@@ -669,8 +729,9 @@ class IrcProtocol @Inject constructor(
         fun onPrivateMessage(event: PrivateMessageEvent) {
             val nick = event.actor.nick
             if (session?.isSelfNick(nick) == true) return
+            val mapping = session?.caseMapping ?: CaseMapping.RFC1459
             scope.launch {
-                persistIncoming(accountId, IrcTargets.foldNick(nick), event.message, nick)
+                persistIncoming(accountId, IrcTargets.foldNick(nick, mapping), event.message, nick)
             }
         }
 
@@ -690,9 +751,12 @@ class IrcProtocol @Inject constructor(
         @Handler
         fun onPrivateNotice(event: PrivateNoticeEvent) {
             val from = event.actor.nick
-            if (authGate == IrcAuthGate.NICKSERV && !ready.isCompleted) {
+            if (awaitNickServ && !ready.isCompleted) {
                 when {
-                    isNickServSuccess(event) -> markReady("NickServ")
+                    isNickServSuccess(event) -> {
+                        nickServDone = true
+                        tryMarkReady("NickServ")
+                    }
                     isNickServFailure(event) -> markAuthFailure("NickServ authentication failed")
                 }
             }
@@ -792,6 +856,7 @@ class IrcProtocol @Inject constructor(
         val autoJoin: List<String>,
         @Volatile var effectiveNick: String = requestedNick,
         @Volatile var connected: Boolean = false,
+        @Volatile var caseMapping: CaseMapping = CaseMapping.RFC1459,
     ) {
         fun syncEffectiveNick() {
             val live = client.nick?.takeIf { it.isNotBlank() }
@@ -800,7 +865,11 @@ class IrcProtocol @Inject constructor(
             }
         }
 
-        fun isSelfNick(other: String): Boolean = IrcTargets.sameNick(other, effectiveNick)
+        fun isSelfNick(other: String): Boolean =
+            caseMapping.areEqualIgnoringCase(
+                IrcTargets.normalizeNick(other),
+                IrcTargets.normalizeNick(effectiveNick),
+            )
 
         fun autoJoinChannels() {
             autoJoin.forEach { ch ->

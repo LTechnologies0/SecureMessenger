@@ -25,6 +25,9 @@ object EmailCredentialKeys {
     const val JMAP_SESSION_URL = "jmapSessionUrl"
 
     const val LAST_IMAP_UID = "lastImapUid"
+    const val LAST_IMAP_SENT_UID = "lastImapSentUid"
+    /** Resolved Sent mailbox name (persisted after first IMAP connect). */
+    const val SENT_FOLDER = "sentFolder"
 }
 
 enum class EmailStoreKind {
@@ -56,6 +59,8 @@ data class EmailAccountConfig(
     val password: String,
     val storeKind: EmailStoreKind,
     val folder: String = "INBOX",
+    /** IMAP Sent folder name when detected (null until first connect). */
+    val sentFolder: String? = null,
     val imapHost: String? = null,
     val imapPort: Int = 993,
     val imapSecurity: MailSecurity = MailSecurity.SSL,
@@ -78,6 +83,7 @@ data class EmailAccountConfig(
                 password = password,
                 storeKind = EmailStoreKind.fromStored(secrets[EmailCredentialKeys.STORE_KIND]),
                 folder = secrets[EmailCredentialKeys.FOLDER]?.ifBlank { null } ?: "INBOX",
+                sentFolder = secrets[EmailCredentialKeys.SENT_FOLDER]?.ifBlank { null },
                 imapHost = secrets[EmailCredentialKeys.IMAP_HOST]?.ifBlank { null },
                 imapPort = secrets[EmailCredentialKeys.IMAP_PORT]?.toIntOrNull() ?: 993,
                 imapSecurity = MailSecurity.fromStored(secrets[EmailCredentialKeys.IMAP_SECURITY]),
@@ -99,6 +105,7 @@ data class EmailAccountConfig(
         put(EmailCredentialKeys.PASSWORD, password)
         put(EmailCredentialKeys.STORE_KIND, storeKind.name)
         put(EmailCredentialKeys.FOLDER, folder)
+        sentFolder?.let { put(EmailCredentialKeys.SENT_FOLDER, it) }
         imapHost?.let { put(EmailCredentialKeys.IMAP_HOST, it) }
         put(EmailCredentialKeys.IMAP_PORT, imapPort.toString())
         put(EmailCredentialKeys.IMAP_SECURITY, imapSecurity.name)

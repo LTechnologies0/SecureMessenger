@@ -65,7 +65,7 @@ Toutes les inscriptions et le trafic protocolaire passent par Tor (SOCKS5 fail-c
 
 Matrix E2EE is **fail-closed**: connect / SSO succeeds only when Trixnity is live; plaintext HTTP `/sync` is stopped once Trixnity owns the session. OIDC homeservers use `m.login.sso` → Tor WebView → one-shot `loginToken` → soft-login (never reuse `m.login.token` with an access token).
 
-XMPP OMEMO is **fail-closed** when the peer/room advertises OMEMO: encrypt failure aborts send (no cleartext fallback). Contacts/rooms without OMEMO still use plaintext XMPP (protocol limitation).
+XMPP OMEMO is **fail-closed**: `OmemoHelper.decideSend` refuses the send when the peer does not advertise OMEMO, when support is unknown, or when encryption fails. There is no plaintext fallback.
 
 Signal GV2 prefers sender keys; if endorsements/certificates are unavailable it fans out **encrypted** per-recipient Signal messages (not cleartext).
 

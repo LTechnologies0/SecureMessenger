@@ -517,6 +517,7 @@ private fun MainContentPane(
             modifier = Modifier.padding(padding),
             viewModel = viewModel,
             accountId = selectedAccount.id,
+            inboxProtocol = selectedAccount.protocol,
             onConversationClick = onConversationClick,
             onNewChat = onNewChat,
             embedded = true,

@@ -6,6 +6,7 @@ import javax.inject.Singleton
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -53,16 +54,23 @@ class ConnectionManager @Inject constructor(
     private val bootstrapScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val bootstrapReady = CompletableDeferred<Unit>()
     private val restoreMutex = Mutex()
+    /** Incremented on app lock — in-flight restore/connect batches bail out. */
+    @Volatile
+    private var restoreEpoch = 0
     private var proxyBootstrapped = false
 
     private var lastProxyHealthy: Boolean? = null
     private var lastProxyConfig: ProxyConfig? = null
+    private var killswitchDebounceJob: Job? = null
 
     init {
         bootstrapScope.launch {
             appLockManager.state.collect { state ->
                 when (state) {
                     AppLockState.LOCKED, AppLockState.DEVICE_INSECURE -> {
+                        restoreEpoch++
+                        killswitchDebounceJob?.cancel()
+                        killswitchDebounceJob = null
                         runCatching { disconnectAll() }
                         // Drop SQLCipher handle so DAO flows cannot keep reading after lock.
                         runCatching { encryptedDb.close() }
@@ -160,24 +168,27 @@ class ConnectionManager @Inject constructor(
             ?: return ConnectionResult.Failure("Protocol not found")
 
         val result = protocol.connect(credentials, proxy)
-        if (result is ConnectionResult.Success) {
-            val pending = protocol.pendingAuthStep()
-            // Require explicit accountId match — unscoped pending must not freeze this account.
-            val pendingForThis = pending != null && pending.accountId == credentials.accountId
-            val state = when {
-                pendingForThis -> ConnectionState.CONNECTING
-                protocol.isAccountConnected(credentials.accountId) -> ConnectionState.CONNECTED
-                else -> ConnectionState.CONNECTING
+        val state = when (result) {
+            is ConnectionResult.Success -> {
+                val pending = protocol.pendingAuthStep()
+                // Require explicit accountId match — unscoped pending must not freeze this account.
+                val pendingForThis = pending != null && pending.accountId == credentials.accountId
+                when {
+                    pendingForThis -> ConnectionState.CONNECTING
+                    protocol.isAccountConnected(credentials.accountId) -> ConnectionState.CONNECTED
+                    else -> ConnectionState.CONNECTING
+                }
             }
-            repository.get().upsertAccount(
-                ltechnologies.onionphone.securemessenger.core.model.Account(
-                    id = credentials.accountId,
-                    protocol = credentials.protocol,
-                    displayName = credentials.displayName,
-                    connectionState = state,
-                ),
-            )
+            is ConnectionResult.Failure -> ConnectionState.ERROR
         }
+        repository.get().upsertAccount(
+            ltechnologies.onionphone.securemessenger.core.model.Account(
+                id = credentials.accountId,
+                protocol = credentials.protocol,
+                displayName = credentials.displayName,
+                connectionState = state,
+            ),
+        )
         return result
     }
 
@@ -219,7 +230,12 @@ class ConnectionManager @Inject constructor(
 
         val result = protocol.continueRegistration(sessionId, fields, proxy)
         if (result is RegistrationResult.Success) {
-            connect(result.credentials)
+            val connectResult = connect(result.credentials)
+            if (connectResult is ConnectionResult.Failure) {
+                return RegistrationResult.Failure(
+                    "Compte créé mais connexion échouée : ${connectResult.reason}",
+                )
+            }
         }
         return result
     }
@@ -244,6 +260,7 @@ class ConnectionManager @Inject constructor(
     }
 
     private suspend fun restorePersistedAccountsLocked() {
+            val epoch = restoreEpoch
             val config = proxyManager.currentConfig()
             proxyManager.refreshStatusAndWait()
             if (!appLockManager.isUnlocked) return
@@ -301,7 +318,8 @@ class ConnectionManager @Inject constructor(
                 ids.map { accountId ->
                     async {
                         restoreGate.withPermit {
-                            restoreOneAccount(accountId, cleanedRoomAccounts, config)
+                            if (epoch != restoreEpoch || !appLockManager.isUnlocked) return@withPermit
+                            restoreOneAccount(accountId, cleanedRoomAccounts, config, epoch)
                         }
                     }
                 }.awaitAll()
@@ -312,8 +330,9 @@ class ConnectionManager @Inject constructor(
         accountId: String,
         cleanedRoomAccounts: List<ltechnologies.onionphone.securemessenger.core.model.Account>,
         config: ProxyConfig,
+        restoreEpochAtStart: Int,
     ) {
-                if (!appLockManager.isUnlocked) return
+                if (restoreEpochAtStart != restoreEpoch || !appLockManager.isUnlocked) return
                 val protocolName = credentialStore.getProtocol(accountId)
                     ?: cleanedRoomAccounts.firstOrNull { it.id == accountId }?.protocol?.name
                     ?: return
@@ -339,12 +358,14 @@ class ConnectionManager @Inject constructor(
                         // Soft-disconnected or mid-auth with secrets — reconnect below.
                     } else {
                         credentialStore.removeAccount(accountId)
+                        runCatching { repository.get().deleteAccount(accountId) }
                         return
                     }
                 }
                 if (protocolId == ProtocolId.SIGNAL && existing?.connectionState != ConnectionState.CONNECTED) {
                     if (!isSignalProvisioned(accountId)) {
                         credentialStore.removeAccount(accountId)
+                        runCatching { repository.get().deleteAccount(accountId) }
                         return
                     }
                     // Provisioned but still CONNECTING (link-and-sync) — reconnect to finish.
@@ -376,6 +397,7 @@ class ConnectionManager @Inject constructor(
                     displayName = displayName,
                     secrets = secrets,
                 )
+                if (restoreEpochAtStart != restoreEpoch || !appLockManager.isUnlocked) return
                 Timber.i("Restoring account $accountId ($protocolId)")
                 connect(creds)
     }
@@ -417,16 +439,20 @@ class ConnectionManager @Inject constructor(
 
     /**
      * When SOCKS stays down, arm the killswitch and disconnect every session.
+     * Only one debounce job runs — prior jobs are cancelled so a stale timer cannot
+     * clear killswitch / flip [lastProxyHealthy] after a newer unhealthy edge.
      */
-    private suspend fun disconnectIfStillUnhealthy() {
-        kotlinx.coroutines.delay(3_000)
-        proxyManager.refreshStatusAndWait()
-        if (!proxyManager.isNetworkAllowed()) {
-            _killswitchActive.value = true
-            disconnectAllSessions()
-        } else {
-            _killswitchActive.value = false
-            lastProxyHealthy = true
+    private fun scheduleDisconnectIfStillUnhealthy() {
+        killswitchDebounceJob?.cancel()
+        killswitchDebounceJob = bootstrapScope.launch {
+            kotlinx.coroutines.delay(3_000)
+            proxyManager.refreshStatusAndWait()
+            if (!proxyManager.isNetworkAllowed()) {
+                _killswitchActive.value = true
+                disconnectAllSessions()
+            }
+            // Do not clear killswitch or rewrite lastProxyHealthy here — that belongs
+            // to onProxyStateChanged on a real healthy edge.
         }
     }
 
@@ -469,11 +495,17 @@ class ConnectionManager @Inject constructor(
         _killswitchActive.value = !healthy
 
         when {
-            !healthy -> disconnectIfStillUnhealthy()
+            !healthy -> scheduleDisconnectIfStillUnhealthy()
             // null→true: unlock skipped restore while SOCKS was down; first healthy must restore.
-            (wasHealthy == null || wasHealthy == false) && healthy -> restorePersistedAccounts()
+            (wasHealthy == null || wasHealthy == false) && healthy -> {
+                killswitchDebounceJob?.cancel()
+                killswitchDebounceJob = null
+                restorePersistedAccounts()
+            }
             previousConfig != null && isMeaningfulConfigChange(previousConfig, config) -> {
                 Timber.i("Proxy config changed — reconnecting through ${config.host}:${config.port}")
+                killswitchDebounceJob?.cancel()
+                killswitchDebounceJob = null
                 disconnectAll()
                 reapplyTelegramProxy(config)
                 restorePersistedAccounts()

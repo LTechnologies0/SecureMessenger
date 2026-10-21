@@ -1,5 +1,7 @@
 package ltechnologies.onionphone.securemessenger.ui.screens
 
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -13,8 +15,12 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.ChatBubbleOutline
+import androidx.compose.material.icons.filled.NotificationsOff
+import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
@@ -52,13 +58,16 @@ import ltechnologies.onionphone.securemessenger.core.model.ProtocolId
 import ltechnologies.onionphone.securemessenger.ui.MainViewModel
 import ltechnologies.onionphone.securemessenger.ui.components.ProtocolAccentChip
 import ltechnologies.onionphone.securemessenger.ui.components.ProtocolAvatar
+import ltechnologies.onionphone.securemessenger.ui.components.inboxEmptySubtitle
+import ltechnologies.onionphone.securemessenger.ui.components.newChatFabLabel
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class, ExperimentalFoundationApi::class)
 @Composable
 fun InboxScreen(
     modifier: Modifier = Modifier,
     viewModel: MainViewModel,
     accountId: String? = null,
+    inboxProtocol: ProtocolId? = null,
     onConversationClick: (conversationId: String, title: String, protocol: ProtocolId) -> Unit,
     onNewChat: () -> Unit,
     embedded: Boolean = false,
@@ -75,6 +84,8 @@ fun InboxScreen(
     }
     var query by rememberSaveable { mutableStateOf("") }
     var searchExpanded by rememberSaveable { mutableStateOf(false) }
+    var showTelegramArchive by rememberSaveable { mutableStateOf(false) }
+    var telegramMenuConv by remember { mutableStateOf<Conversation?>(null) }
 
     val filtered = remember(conversations, query) {
         val q = query.trim()
@@ -89,8 +100,60 @@ fun InboxScreen(
         }
     }
 
+    val displayList = remember(filtered, inboxProtocol, showTelegramArchive) {
+        filtered
+            .filter { conv ->
+                inboxProtocol != ProtocolId.TELEGRAM ||
+                    showTelegramArchive ||
+                    !conv.isArchived
+            }
+            .sortedWith(
+                compareByDescending<Conversation> { it.isPinned }
+                    .thenByDescending { it.lastMessageAt },
+            )
+    }
+
     val listContent: @Composable (Modifier) -> Unit = { contentModifier ->
         Column(modifier = contentModifier.fillMaxSize()) {
+            if (inboxProtocol == ProtocolId.EMAIL) {
+                val sentNote = if (viewModel.emailImapSentFolderConfigured(accountId)) {
+                    " INBOX + dossier Sent (~50 msgs) synchronisés quand détecté."
+                } else {
+                    " Pas de dossier Sent IMAP détecté pour l’instant."
+                }
+                Text(
+                    "Messages récents (IMAP/JMAP) — pas une archive complète.$sentNote",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                )
+            }
+            if (inboxProtocol == ProtocolId.TELEGRAM) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        if (showTelegramArchive) "Archives Telegram" else "Chats Telegram",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    TextButton(onClick = { showTelegramArchive = !showTelegramArchive }) {
+                        Text(if (showTelegramArchive) "Retour aux chats" else "Voir archives")
+                    }
+                }
+            }
+            if (inboxProtocol == ProtocolId.IRC) {
+                Text(
+                    "Canaux rejoints et DMs — pas d’historique serveur avant connexion.",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                )
+            }
             SearchBar(
                 inputField = {
                     SearchBarDefaults.InputField(
@@ -137,17 +200,23 @@ fun InboxScreen(
             if (filtered.isEmpty() && !searchExpanded) {
                 InboxEmptyState(
                     query = query,
+                    protocol = inboxProtocol,
                     onNewChat = onNewChat,
                     onClearQuery = { query = "" },
                 )
             } else if (!searchExpanded) {
                 LazyColumn(contentPadding = PaddingValues(vertical = 4.dp)) {
-                    items(filtered, key = { it.id }) { conv ->
+                    items(displayList, key = { it.id }) { conv ->
                         ConversationRow(
                             conv = conv,
                             timeLabel = formatInboxTime(conv, timeFormat, relativeTime),
                             onClick = {
                                 onConversationClick(conv.id, conv.title, conv.protocol)
+                            },
+                            onLongClick = {
+                                if (conv.protocol == ProtocolId.TELEGRAM) {
+                                    telegramMenuConv = conv
+                                }
                             },
                         )
                         HorizontalDivider(
@@ -160,6 +229,46 @@ fun InboxScreen(
         }
     }
 
+    telegramMenuConv?.let { conv ->
+        AlertDialog(
+            onDismissRequest = { telegramMenuConv = null },
+            title = { Text(conv.title) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(onClick = {
+                        viewModel.setTelegramChatPinned(conv.id, !conv.isPinned) {
+                            telegramMenuConv = null
+                        }
+                    }) {
+                        Icon(Icons.Default.PushPin, contentDescription = null)
+                        Text(if (conv.isPinned) "Désépingler" else "Épingler")
+                    }
+                    TextButton(onClick = {
+                        val mute = if (conv.isMuted) 0 else 365 * 24 * 3600
+                        viewModel.setTelegramChatMuted(conv.id, mute) {
+                            telegramMenuConv = null
+                        }
+                    }) {
+                        Icon(Icons.Default.NotificationsOff, contentDescription = null)
+                        Text(if (conv.isMuted) "Activer notifications" else "Couper notifications (1 an)")
+                    }
+                    TextButton(onClick = {
+                        viewModel.setTelegramChatArchived(conv.id, !conv.isArchived) {
+                            telegramMenuConv = null
+                        }
+                    }) {
+                        Icon(Icons.Default.Archive, contentDescription = null)
+                        Text(if (conv.isArchived) "Désarchiver" else "Archiver")
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { telegramMenuConv = null }) { Text("Fermer") }
+            },
+        )
+    }
+
     if (embedded) {
         Box(modifier = modifier.fillMaxSize()) {
             listContent(Modifier.fillMaxSize())
@@ -169,7 +278,7 @@ fun InboxScreen(
                     .align(Alignment.BottomEnd)
                     .padding(20.dp),
             ) {
-                Icon(Icons.Default.Add, contentDescription = "Nouveau chat")
+                Icon(Icons.Default.Add, contentDescription = newChatFabLabel(inboxProtocol))
             }
         }
     } else {
@@ -187,11 +296,13 @@ fun InboxScreen(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ConversationRow(
     conv: Conversation,
     timeLabel: String,
     onClick: () -> Unit,
+    onLongClick: () -> Unit = {},
 ) {
     val unread = conv.unreadCount > 0
     ListItem(
@@ -247,12 +358,21 @@ private fun ConversationRow(
             }
         },
         trailingContent = {
-            if (unread) {
-                Badge { Text(conv.unreadCount.coerceAtMost(99).toString()) }
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (conv.isPinned) {
+                    Icon(
+                        Icons.Default.PushPin,
+                        contentDescription = "Épinglé",
+                        modifier = Modifier.padding(end = 2.dp),
+                    )
+                }
+                if (conv.isMuted) {
+                    Icon(Icons.Default.NotificationsOff, contentDescription = "Silencieux")
+                }
             }
         },
         modifier = Modifier
-            .clickable(onClick = onClick)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .semantics {
                 contentDescription = "${conv.protocol} conversation ${conv.title}"
             },
@@ -262,6 +382,7 @@ private fun ConversationRow(
 @Composable
 private fun InboxEmptyState(
     query: String,
+    protocol: ProtocolId?,
     onNewChat: () -> Unit,
     onClearQuery: () -> Unit,
 ) {
@@ -288,7 +409,7 @@ private fun InboxEmptyState(
         )
         Text(
             text = if (query.isBlank()) {
-                "Lance un nouveau chat pour démarrer."
+                inboxEmptySubtitle(protocol)
             } else {
                 "Essaie un autre terme de recherche."
             },
@@ -299,7 +420,7 @@ private fun InboxEmptyState(
         if (query.isBlank()) {
             Button(onClick = onNewChat) {
                 Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.padding(end = 8.dp))
-                Text("Nouveau chat")
+                Text(newChatFabLabel(protocol))
             }
         } else {
             TextButton(onClick = onClearQuery) { Text("Effacer la recherche") }

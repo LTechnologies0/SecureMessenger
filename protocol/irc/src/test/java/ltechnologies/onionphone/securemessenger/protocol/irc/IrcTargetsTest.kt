@@ -10,7 +10,10 @@ class IrcTargetsTest {
     fun channelDetection() {
         assertTrue(IrcTargets.isChannel("#libera"))
         assertTrue(IrcTargets.isChannel("&local"))
+        assertTrue(IrcTargets.isChannel("+secret"))
         assertFalse(IrcTargets.isChannel("alice"))
+        assertFalse(IrcTargets.isChannel("#"))
+        assertFalse(IrcTargets.isChannel("#has space"))
     }
 
     @Test
@@ -23,7 +26,11 @@ class IrcTargetsTest {
     fun foldNickAndChannel() {
         assertEquals("alice", IrcTargets.foldNick("Alice"))
         assertTrue(IrcTargets.sameNick("Alice", "alice"))
+        assertEquals("{alice}", IrcTargets.foldNick("[Alice]"))
+        assertTrue(IrcTargets.sameNick("[Alice]", "{alice}"))
+        assertEquals("~alice", IrcTargets.foldNick("^Alice"))
         assertEquals("#libera", IrcTargets.foldChannel("#LIBERA"))
+        assertEquals("#{libera}", IrcTargets.foldChannel("#[LIBERA]"))
     }
 
     @Test

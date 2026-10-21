@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 import ltechnologies.onionphone.securemessenger.core.model.AccountCredentials
 import ltechnologies.onionphone.securemessenger.core.model.AccountProfile
@@ -308,8 +309,8 @@ class MatrixProtocol @Inject constructor(
                 }
 
                 val tokenPresent = !accessToken.isNullOrBlank()
-                var matrixDeviceId = account.secrets[DEVICE_ID_KEY]
-                    ?: credentialStore.get(account.accountId, DEVICE_ID_KEY)
+                // Stored deviceId is only a login reuse hint; whoami / login response win.
+                var matrixDeviceId: String? = null
                 var effectiveUserId = matrixUser
 
                 if (tokenPresent) {
@@ -319,17 +320,27 @@ class MatrixProtocol @Inject constructor(
                             err.message ?: "Token Matrix invalide (whoami)",
                         )
                     }
-                    if (effectiveUserId.isBlank()) {
-                        effectiveUserId = runCatching {
-                            MatrixUrls.normalizeUserId(whoami.userId, server)
-                        }.getOrElse {
+                    val whoamiUser = runCatching {
+                        MatrixUrls.normalizeUserId(whoami.userId, server)
+                    }.getOrElse {
+                        return@withContext ConnectionResult.Failure(
+                            it.message ?: "Invalid Matrix user ID",
+                        )
+                    }
+                    if (effectiveUserId.isNotBlank()) {
+                        val configured = runCatching {
+                            MatrixUrls.normalizeUserId(effectiveUserId, server)
+                        }.getOrNull()
+                        if (configured != null && configured != whoamiUser) {
                             return@withContext ConnectionResult.Failure(
-                                it.message ?: "Invalid Matrix user ID",
+                                "Token Matrix lié à $whoamiUser, pas à $configured",
                             )
                         }
                     }
-                    if (matrixDeviceId.isNullOrBlank()) {
-                        matrixDeviceId = whoami.deviceId
+                    effectiveUserId = whoamiUser
+                    matrixDeviceId = whoami.deviceId?.takeIf { it.isNotBlank() }
+                    if (matrixDeviceId != null) {
+                        credentialStore.put(account.accountId, DEVICE_ID_KEY, matrixDeviceId!!)
                     }
                 }
 
@@ -426,6 +437,13 @@ class MatrixProtocol @Inject constructor(
                     )
                 }
 
+                // Password path: HS login response device_id is authoritative.
+                // Token path: whoami device_id already in matrixDeviceId.
+                val softLoginDeviceId = if (tokenPresent) {
+                    matrixDeviceId
+                } else {
+                    fallback.persistedDeviceId ?: matrixDeviceId
+                }
                 return@withContext finalizeMatrixSession(
                     accountId = account.accountId,
                     displayName = account.displayName,
@@ -437,7 +455,7 @@ class MatrixProtocol @Inject constructor(
                     password = password,
                     proxy = proxy,
                     fallback = fallback,
-                    deviceId = matrixDeviceId ?: fallback.persistedDeviceId,
+                    deviceId = softLoginDeviceId,
                 )
             } catch (e: Exception) {
                 Timber.e(e, "Matrix connect failed")
@@ -475,26 +493,39 @@ class MatrixProtocol @Inject constructor(
         )
         var liveEngine = engine
         if (trixnityLogin.isFailure) {
-            Timber.w(trixnityLogin.exceptionOrNull(), "Trixnity first login failed; wiping store and retrying")
-            engine.close()
-            TrixnityMatrixEngine.wipeAccountStore(context.filesDir, accountId)
-            val retryEngine = TrixnityMatrixEngine(
-                repository,
-                context.filesDir,
-                credentialStore.getOrCreateMatrixH2Password(accountId),
-            )
-            trixnityLogin = retryEngine.loginWithAccessToken(
-                accountId,
-                apiBaseUrl,
-                matrixUser,
-                accessToken,
-                proxy,
-                deviceId = resolvedDeviceId,
-            )
-            if (trixnityLogin.isSuccess) {
-                liveEngine = retryEngine
+            val cause = trixnityLogin.exceptionOrNull()
+            val msg = cause?.message.orEmpty()
+            // Wipe only on store/crypto corruption signals — not transient Tor/HS errors.
+            val wipeWorthy = msg.contains("token", ignoreCase = true) ||
+                msg.contains("device", ignoreCase = true) ||
+                msg.contains("decrypt", ignoreCase = true) ||
+                msg.contains("corrupt", ignoreCase = true) ||
+                msg.contains("H2", ignoreCase = true) ||
+                msg.contains("database", ignoreCase = true)
+            if (wipeWorthy) {
+                Timber.w(cause, "Trixnity login failed with store/crypto signal; wiping and retrying")
+                engine.close()
+                TrixnityMatrixEngine.wipeAccountStore(context.filesDir, accountId)
+                val retryEngine = TrixnityMatrixEngine(
+                    repository,
+                    context.filesDir,
+                    credentialStore.getOrCreateMatrixH2Password(accountId),
+                )
+                trixnityLogin = retryEngine.loginWithAccessToken(
+                    accountId,
+                    apiBaseUrl,
+                    matrixUser,
+                    accessToken,
+                    proxy,
+                    deviceId = resolvedDeviceId,
+                )
+                if (trixnityLogin.isSuccess) {
+                    liveEngine = retryEngine
+                } else {
+                    retryEngine.close()
+                }
             } else {
-                retryEngine.close()
+                Timber.w(cause, "Trixnity login failed (transient); preserving crypto store")
             }
         }
 
@@ -603,7 +634,10 @@ class MatrixProtocol @Inject constructor(
             }
         }
 
-    override fun observeConversations(): Flow<List<Conversation>> = repository.observeConversations()
+    override fun observeConversations(): Flow<List<Conversation>> =
+        repository.observeConversations().map { list ->
+            list.filter { it.protocol == ProtocolId.MATRIX }
+        }
 
     override fun observeMessages(conversationId: String): Flow<List<Message>> =
         repository.observeMessages(conversationId)
@@ -1003,6 +1037,53 @@ class MatrixProtocol @Inject constructor(
                 )
             }
         }
+
+    suspend fun addReaction(
+        conversationId: String,
+        messageId: String,
+        emoji: String,
+        accountId: String? = null,
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            networkGuard.assertNetworkAllowed()
+            val accId = accountId ?: ConversationIds.accountId(conversationId)
+                ?: error("Compte Matrix introuvable")
+            val engine = sessions[accId]?.trixnityEngine ?: error("Matrix non connecté")
+            val roomId = ConversationIds.remoteId(conversationId) ?: error("Room invalide")
+            engine.sendReaction(roomId, messageId, emoji).getOrThrow()
+        }
+    }
+
+    suspend fun editMessage(
+        conversationId: String,
+        messageId: String,
+        newBody: String,
+        accountId: String? = null,
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            networkGuard.assertNetworkAllowed()
+            val accId = accountId ?: ConversationIds.accountId(conversationId)
+                ?: error("Compte Matrix introuvable")
+            val engine = sessions[accId]?.trixnityEngine ?: error("Matrix non connecté")
+            val roomId = ConversationIds.remoteId(conversationId) ?: error("Room invalide")
+            engine.editMessage(roomId, messageId, newBody).getOrThrow()
+        }
+    }
+
+    suspend fun redactMessage(
+        conversationId: String,
+        messageId: String,
+        accountId: String? = null,
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            networkGuard.assertNetworkAllowed()
+            val accId = accountId ?: ConversationIds.accountId(conversationId)
+                ?: error("Compte Matrix introuvable")
+            val engine = sessions[accId]?.trixnityEngine ?: error("Matrix non connecté")
+            val roomId = ConversationIds.remoteId(conversationId) ?: error("Room invalide")
+            engine.redactMessage(roomId, messageId).getOrThrow()
+        }
+    }
 
     override suspend fun wipeLocalData(accountId: String) {
         TrixnityMatrixEngine.wipeAccountStore(context.filesDir, accountId)

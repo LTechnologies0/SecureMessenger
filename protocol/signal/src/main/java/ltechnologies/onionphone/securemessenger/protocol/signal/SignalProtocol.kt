@@ -123,6 +123,25 @@ class SignalProtocol @Inject constructor(
             credentialStore.get(forAccountId, SignalCredentialKeys.LINK_SYNC_SKIPPED) != "1"
     }
 
+    /** Numeric safety number for 1:1 chats (libsignal fingerprint). Groups and SVR2 excluded. */
+    suspend fun safetyNumberForConversation(
+        conversationId: String,
+        accountId: String? = null,
+    ): Result<String> = withContext(signalDispatcher) {
+        runCatching {
+            val accId = accountId ?: ConversationIds.accountId(conversationId)
+                ?: error("Compte Signal introuvable")
+            val active = resolveLiveAccount(accId)?.second ?: error("Signal non connecté")
+            val remoteId = ConversationIds.remoteId(conversationId)
+                ?: conversationId.removePrefix("${accId}_").takeIf { it != conversationId }
+                ?: error("Conversation Signal invalide")
+            if (remoteId.startsWith("gv2:")) {
+                error("Numéro de sécurité disponible seulement en conversation directe")
+            }
+            SignalSafetyNumber.format(active, remoteId).getOrThrow()
+        }
+    }
+
     private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val signalDispatcher = Dispatchers.IO.limitedParallelism(1)
 
@@ -195,7 +214,7 @@ class SignalProtocol @Inject constructor(
                 accountId = account.accountId
                 proxyConfig = proxy
                 applySignalSocks(proxy)
-                registrationFlow = SignalRegistrationFlow(trustStore)
+                registrationFlow = SignalRegistrationFlow(trustStore, credentialStore, account.accountId)
 
                 val secrets = account.secrets
                 if (secrets[SignalCredentialKeys.SESSION_READY] == "true") {
@@ -391,7 +410,7 @@ class SignalProtocol @Inject constructor(
             accountId = linkAccountId
             proxyConfig = proxy
             applySignalSocks(proxy)
-            linkFlow = SignalLinkFlow(trustStore)
+            linkFlow = SignalLinkFlow(trustStore, credentialStore, linkAccountId)
             _deviceLinkUrl.value = null
             _pendingAuthStep.value = signalAuthStep(
                 kind = AuthStepKind.SIGNAL_DEVICE_LINK,
@@ -435,7 +454,11 @@ class SignalProtocol @Inject constructor(
     suspend fun cancelDeviceLink() {
         withContext(signalDispatcher) {
             val wasLink = _pendingAuthStep.value?.kind == AuthStepKind.SIGNAL_DEVICE_LINK
+            val provisionalId = accountId
             cancelDeviceLinkLocked()
+            if (provisionalId != null) {
+                SignalPreKeyMaterial.wipeProvisionalCredentialsIfNeeded(credentialStore, provisionalId)
+            }
             // Do not flip CONNECTING→DISCONNECTED when a phone/PIN registration is in flight.
             if (wasLink && _connectionState.value != ConnectionState.CONNECTED) {
                 _connectionState.value = ConnectionState.DISCONNECTED
@@ -660,6 +683,9 @@ class SignalProtocol @Inject constructor(
             is SignalRegistrationStep.Failed -> {
                 val reason = outcome.step.reason
                 Timber.w("Signal auth/link failed: %s", reason)
+                accountId?.let { id ->
+                    SignalPreKeyMaterial.wipeProvisionalCredentialsIfNeeded(credentialStore, id)
+                }
                 // Keep SIGNAL_DEVICE_LINK step so the QR screen can show the error.
                 if (_deviceLinkUrl.value != null || linkFlow != null) {
                     _pendingAuthStep.value = signalAuthStep(
@@ -703,6 +729,16 @@ class SignalProtocol @Inject constructor(
             },
             onKeysSynced = {
                 ioScope.launch(signalDispatcher) {
+                    session?.let { active ->
+                        runCatching {
+                            SignalPreKeyMaterial.syncPreKeysIfNeeded(
+                                active.keysApi,
+                                credentialStore,
+                                accId,
+                                active.protocolStore,
+                            )
+                        }.onFailure { Timber.w(it, "Signal prekey sync failed for $accId") }
+                    }
                     runStorageSyncLocked(accId)
                 }
             },
@@ -1139,38 +1175,44 @@ class SignalProtocol @Inject constructor(
         }
         configure(builder)
         val dataMessage = builder.build()
-        val results = if (plan.canUseSenderKeys) {
-            activeSession.messageSender.sendGroupDataMessage(
-                plan.distributionId,
-                plan.recipients,
-                plan.unidentifiedAccess,
-                plan.groupSendEndorsements,
-                false,
-                ContentHint.DEFAULT,
-                dataMessage,
-                SignalServiceMessageSender.SenderKeyGroupEvents.EMPTY,
-                true,
-                false,
-                null,
-                null,
-            )
+        val senderKeyResults = if (plan.canUseSenderKeys) {
+            runCatching {
+                activeSession.messageSender.sendGroupDataMessage(
+                    plan.distributionId,
+                    plan.recipients,
+                    plan.unidentifiedAccess,
+                    plan.groupSendEndorsements,
+                    false,
+                    ContentHint.DEFAULT,
+                    dataMessage,
+                    SignalServiceMessageSender.SenderKeyGroupEvents.EMPTY,
+                    true,
+                    false,
+                    null,
+                    null,
+                )
+            }.getOrElse { error ->
+                Timber.w(error, "Signal GV2 sender-key send failed; fan-out remaining recipients")
+                emptyList()
+            }
         } else {
-            Timber.w("Signal GV2 sender-key unavailable; falling back to fan-out")
-            val sealed = List(plan.recipients.size) { SealedSenderAccess.NONE }
-            activeSession.messageSender.sendDataMessage(
-                plan.recipients,
-                sealed,
-                false,
-                ContentHint.DEFAULT,
-                dataMessage,
-                SignalServiceMessageSender.LegacyGroupEvents.EMPTY,
-                null,
-                null,
-                true,
-            )
+            emptyList()
         }
-        val anySuccess = results.any { it.isSuccess }
-        if (!anySuccess) {
+        val succeeded = senderKeyResults.filter { it.isSuccess }.map { it.address.serviceId.toString() }.toSet()
+        val pending = plan.recipients.filter { it.serviceId.toString() !in succeeded }
+        val fanOutResults = if (pending.isNotEmpty()) {
+            if (plan.canUseSenderKeys) {
+                Timber.w("Signal GV2 sender-key covered %d/%d; fan-out the rest", succeeded.size, plan.recipients.size)
+            } else {
+                Timber.w("Signal GV2 sender-key unavailable; falling back to fan-out")
+            }
+            fanOutGroupDataMessage(activeSession, plan, pending, dataMessage)
+        } else {
+            emptyList()
+        }
+        val results = senderKeyResults.filter { it.isSuccess } + fanOutResults
+        val delivered = results.filter { it.isSuccess }.map { it.address.serviceId.toString() }.toSet()
+        if (plan.recipients.any { it.serviceId.toString() !in delivered }) {
             return SendResult.Failure("Envoi Signal groupe échoué")
         }
         val remoteId = "gv2:" + android.util.Base64.encodeToString(masterKeyBytes, android.util.Base64.NO_WRAP)
@@ -1201,6 +1243,43 @@ class SignalProtocol @Inject constructor(
             ),
         )
         return SendResult.Success(msg.id)
+    }
+
+    /**
+     * Per-recipient encrypted send. Endorsement tokens first, then identified
+     * sealed-sender access, matching SealedSenderAccess.forFanOutGroupSend.
+     */
+    private fun fanOutGroupDataMessage(
+        activeSession: SignalSessionContext,
+        plan: SignalGroupHelper.GroupSendPlan,
+        recipients: List<org.whispersystems.signalservice.api.push.SignalServiceAddress>,
+        dataMessage: org.whispersystems.signalservice.api.messages.SignalServiceDataMessage,
+    ): List<org.whispersystems.signalservice.api.messages.SendMessageResult> {
+        val endorsements = plan.groupSendEndorsements
+        val accesses = recipients.map { recipient ->
+            val index = plan.recipients.indexOfFirst { it.serviceId == recipient.serviceId }
+            if (index >= 0) plan.unidentifiedAccess.getOrNull(index) else null
+        }
+        val sealed = if (endorsements != null) {
+            SealedSenderAccess.forFanOutGroupSend(
+                endorsements.forIndividuals(recipients),
+                endorsements.sealedSenderCertificate,
+                accesses,
+            )
+        } else {
+            recipients.map { resolveSealedSenderAccess(activeSession, it) }
+        }
+        return activeSession.messageSender.sendDataMessage(
+            recipients,
+            sealed,
+            false,
+            ContentHint.DEFAULT,
+            dataMessage,
+            SignalServiceMessageSender.LegacyGroupEvents.EMPTY,
+            null,
+            null,
+            true,
+        )
     }
 
     private suspend fun deliverMessage(
@@ -2255,6 +2334,9 @@ class SignalProtocol @Inject constructor(
             val provisioned =
                 credentialStore.get(id, SignalCredentialKeys.SESSION_READY) == "true" &&
                     !credentialStore.get(id, SignalCredentialKeys.ACI).isNullOrBlank()
+            if (!provisioned) {
+                SignalPreKeyMaterial.wipeProvisionalCredentialsIfNeeded(credentialStore, id)
+            }
             val roomState = if (provisioned) {
                 ConnectionState.CONNECTING
             } else {

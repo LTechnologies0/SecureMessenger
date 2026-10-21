@@ -167,13 +167,14 @@ internal object IspdbXmlParser {
                     when (parser.name) {
                         "incomingServer" -> {
                             val security = socketTypeToSecurity(socketType)
+                            // Thunderbird ISPDB lists the preferred server first.
                             when (incomingType?.lowercase()) {
-                                "imap" -> {
+                                "imap" -> if (imapHost == null) {
                                     imapHost = hostname
                                     imapPort = port
                                     imapSecurity = security
                                 }
-                                "pop3" -> {
+                                "pop3" -> if (pop3Host == null) {
                                     pop3Host = hostname
                                     pop3Port = port
                                     pop3Security = security
@@ -181,7 +182,7 @@ internal object IspdbXmlParser {
                             }
                         }
                         "outgoingServer" -> {
-                            if (inOutgoing) {
+                            if (inOutgoing && smtpHost == null) {
                                 smtpHost = hostname
                                 smtpPort = port
                                 smtpSecurity = socketTypeToSecurity(socketType)

@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import ltechnologies.onionphone.securemessenger.core.model.AccountCredentials
@@ -198,10 +199,13 @@ class XmppProtocol @Inject constructor(
                 sessions.remove(account.accountId)?.disconnect()
 
                 val smack = SmackClientFacade(context)
-                smack.connect(account.accountId, jid, password, server, proxy)
-                sessions[account.accountId] = smack
-
-                smack.setOmemoLiveHandler { remoteJid, body, stanza, outgoing ->
+                smack.connect(
+                    account.accountId,
+                    jid,
+                    password,
+                    server,
+                    proxy,
+                ) { remoteJid, body, stanza, outgoing ->
                     scope.launch {
                         persistLiveChatBody(
                             accId = account.accountId,
@@ -211,6 +215,22 @@ class XmppProtocol @Inject constructor(
                             body = body,
                             outgoing = outgoing,
                         )
+                    }
+                }
+                sessions[account.accountId] = smack
+
+                smack.addReconnectionFailureListener { e ->
+                    scope.launch {
+                        Timber.w(e, "XMPP reconnection failed for %s", account.accountId)
+                        repository.upsertAccount(
+                            ltechnologies.onionphone.securemessenger.core.model.Account(
+                                id = account.accountId,
+                                protocol = ProtocolId.XMPP,
+                                displayName = account.displayName,
+                                connectionState = ConnectionState.ERROR,
+                            ),
+                        )
+                        refreshConnectionState(preferErrorIfEmpty = true)
                     }
                 }
 
@@ -395,6 +415,10 @@ class XmppProtocol @Inject constructor(
         val decryptOmemo = smack.omemoHelper?.ready == true
         val body = OmemoHelper.unwrapChatBody(smack.omemoHelper, remoteJid, smackMessage, decryptOmemo)
             ?: return
+        if (shouldRefuseInboundCleartext(smack, remoteJid, isOutgoing(smack, smackMessage))) {
+            Timber.w("Refusing inbound cleartext from %s (OMEMO expected)", remoteJid)
+            return
+        }
         persistLiveChatBody(
             accId = accId,
             smack = smack,
@@ -487,6 +511,26 @@ class XmppProtocol @Inject constructor(
         val myJid = smack.myBareJid()
         return SmackClientFacade.isCarbonSent(smackMessage) ||
             smackMessage.from?.asBareJid()?.toString() == myJid
+    }
+
+    /** Fail-closed like outbound [OmemoHelper.decideSend]: no cleartext when OMEMO is expected. */
+    private fun shouldRefuseInboundCleartext(
+        smack: SmackClientFacade,
+        remoteJid: String,
+        outgoing: Boolean,
+    ): Boolean {
+        if (outgoing) return false
+        val helper = smack.omemoHelper ?: return false
+        if (!helper.ready) return false
+        val peerSupports = if (smack.isMucRoom(remoteJid)) {
+            val muc = smack.mucManager?.getMultiUserChat(
+                org.jxmpp.jid.impl.JidCreate.entityBareFrom(remoteJid),
+            ) ?: return true
+            helper.multiUserChatSupportsOmemo(muc)
+        } else {
+            helper.contactSupportsOmemo(remoteJid)
+        }
+        return peerSupports != false
     }
 
     /**
@@ -611,7 +655,10 @@ class XmppProtocol @Inject constructor(
         }
     }
 
-    override fun observeConversations(): Flow<List<Conversation>> = repository.observeConversations()
+    override fun observeConversations(): Flow<List<Conversation>> =
+        repository.observeConversations().map { list ->
+            list.filter { it.protocol == ProtocolId.XMPP }
+        }
 
     override fun observeMessages(conversationId: String): Flow<List<Message>> =
         repository.observeMessages(conversationId)
@@ -1101,6 +1148,8 @@ class XmppProtocol @Inject constructor(
     override suspend fun wipeLocalData(accountId: String) {
         withContext(Dispatchers.IO) {
             runCatching { java.io.File(context.filesDir, "xmpp_media/$accountId").deleteRecursively() }
+            // Legacy per-account directory. The live store is filesDir/omemo, shared and
+            // namespaced by bare JID inside FileBasedOmemoStore — do not delete that root here.
             runCatching { java.io.File(context.filesDir, "omemo_$accountId").deleteRecursively() }
         }
     }
@@ -1171,7 +1220,8 @@ object XmppInitializer {
     }
 
     /**
-     * Registers Signal-backed OMEMO once and points the file store at [accountId]'s directory.
+     * Registers Signal-backed OMEMO once. The file store is `filesDir/omemo` for every account;
+     * Smack namespaces device lists and sessions by local bare JID.
      * Returns false when GPLv3 Signal setup fails (no OMEMO for that session).
      */
     fun ensureOmemoSignalStore(context: Context, accountId: String): Boolean {

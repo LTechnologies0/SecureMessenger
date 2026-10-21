@@ -74,6 +74,8 @@ internal object SignalCredentialKeys {
     const val SESSION_READY = "sessionReady"
     const val REGISTRATION_SESSION_ID = "registrationSessionId"
     const val REGISTRATION_PIN = "registrationPin"
+    /** Set after KeysApi.setPreKeysSync accepts the one-time EC and Kyber batches. */
+    const val ONE_TIME_PREKEYS_UPLOADED = "oneTimePreKeysUploaded"
     const val PROFILE_KEY = "profileKey"
     const val CDSI_TOKEN = "cdsiToken"
     const val PROFILE_NAME = "profileName"

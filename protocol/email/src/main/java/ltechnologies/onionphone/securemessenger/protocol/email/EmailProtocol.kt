@@ -93,6 +93,9 @@ class EmailProtocol @Inject constructor(
             return baseCapabilities.copy(mediaSend = anyMedia)
         }
 
+    fun hasImapSentFolder(accountId: String): Boolean =
+        credentialStore.get(accountId, EmailCredentialKeys.SENT_FOLDER)?.isNotBlank() == true
+
     override fun capabilitiesFor(accountId: String?): ProtocolCapabilities {
         if (accountId == null) return capabilities
         val session = sessions[accountId] ?: return baseCapabilities.copy(mediaSend = false)
@@ -310,6 +313,7 @@ class EmailProtocol @Inject constructor(
                     emptyList(),
                     accountId,
                     subjectOverride = content.subject?.trim()?.takeIf { it.isNotEmpty() } ?: parsedSubject,
+                    cc = EmailAddress.parseList(content.cc.orEmpty()),
                 )
             }
             is OutgoingContent.Media -> sendMedia(
@@ -328,6 +332,7 @@ class EmailProtocol @Inject constructor(
         attachments: List<Attachment>,
         accountId: String?,
         subjectOverride: String? = null,
+        cc: List<String> = emptyList(),
     ): SendResult {
         val conversation = repository.getConversation(conversationId)
             ?: return SendResult.Failure("Conversation introuvable")
@@ -361,7 +366,7 @@ class EmailProtocol @Inject constructor(
                         "Pièces jointes JMAP non supportées — utilisez IMAP/SMTP",
                     )
                 }
-                session.jmapClient?.submit(to, subject, body, inReplyTo)
+                session.jmapClient?.submit(to, subject, body, cc, inReplyTo)
                     ?: SendResult.Failure("Client JMAP manquant")
             }
             EmailStoreKind.IMAP, EmailStoreKind.POP3 -> {
@@ -370,6 +375,7 @@ class EmailProtocol @Inject constructor(
                     to = to,
                     subject = subject,
                     body = body,
+                    cc = cc,
                     inReplyTo = inReplyTo,
                     references = references,
                     attachments = attachments,
@@ -403,6 +409,9 @@ class EmailProtocol @Inject constructor(
                         .put("subject", subject)
                         .put("rootMessageId", root)
                         .put("to", to.firstOrNull().orEmpty())
+                        .apply {
+                            if (cc.isNotEmpty()) put("cc", cc.joinToString(", "))
+                        }
                         .toString(),
                 ),
             )

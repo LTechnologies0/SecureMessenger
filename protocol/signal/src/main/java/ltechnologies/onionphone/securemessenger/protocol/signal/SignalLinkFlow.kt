@@ -18,6 +18,7 @@ import org.whispersystems.signalservice.internal.push.ProvisionMessage
 import org.whispersystems.signalservice.internal.push.PushServiceSocket
 import org.whispersystems.signalservice.internal.util.StaticCredentialsProvider
 import timber.log.Timber
+import ltechnologies.onionphone.securemessenger.core.security.EncryptedCredentialStore
 
 /**
  * Secondary-device link flow: open provisioning WebSocket → QR URL → wait for primary scan →
@@ -25,6 +26,8 @@ import timber.log.Timber
  */
 internal class SignalLinkFlow(
     private val trustStore: SignalAndroidTrustStore,
+    private val credentialStore: EncryptedCredentialStore? = null,
+    private val accountId: String? = null,
 ) {
     private val configuration by lazy { SignalServiceEnvironment.configuration(trustStore) }
 
@@ -117,6 +120,12 @@ internal class SignalLinkFlow(
         val attributes = preKeys.buildDeviceAttributes(deviceName, aciIdentity)
 
         Timber.i("Signal link: PUT /v1/devices/link")
+        val store = credentialStore
+        val acc = accountId
+        val persistedBeforeNetwork = store != null && acc != null
+        if (persistedBeforeNetwork) {
+            SignalPreKeyMaterial.persistBeforeNetwork(store!!, acc!!, preKeys, password, pin = null)
+        }
         return when (
             val result = api.registerAsSecondaryDevice(
                 verificationCode = provisioningCode,
@@ -137,7 +146,7 @@ internal class SignalLinkFlow(
                     put(SignalCredentialKeys.E164, e164)
                     put(SignalCredentialKeys.ACI, aci.toString())
                     put(SignalCredentialKeys.PNI, pni.toString())
-                    putAll(preKeys.toSecrets(password, pin = null, deviceId = deviceId))
+                    putAll(preKeys.toSecrets(password, pin = null, deviceId = deviceId, sessionReady = true))
                     message.profileKey?.takeIf { it.size > 0 }?.let { pk ->
                         put(
                             SignalCredentialKeys.PROFILE_KEY,
@@ -163,6 +172,9 @@ internal class SignalLinkFlow(
                         put(SignalCredentialKeys.CONFIG_READ_RECEIPTS, enabled.toString())
                     }
                 }
+                if (store != null && acc != null) {
+                    SignalPreKeyMaterial.seedMetadataAfterRegistration(store, acc, preKeys)
+                }
                 Timber.i("Signal link: success deviceId=%s", deviceId)
                 SignalRegistrationOutcome(
                     step = SignalRegistrationStep.Complete,
@@ -172,14 +184,23 @@ internal class SignalLinkFlow(
                 )
             }
             is NetworkResult.StatusCodeError -> {
+                if (persistedBeforeNetwork) {
+                    SignalPreKeyMaterial.wipeProvisionalCredentialsIfNeeded(store!!, acc!!)
+                }
                 Timber.e(result.exception, "Signal link refused HTTP %s", result.code)
                 failure(result.exception.message ?: "Lien refusé (${result.code})")
             }
             is NetworkResult.NetworkError -> {
+                if (persistedBeforeNetwork) {
+                    SignalPreKeyMaterial.wipeProvisionalCredentialsIfNeeded(store!!, acc!!)
+                }
                 Timber.e(result.exception, "Signal link network error")
                 failure(result.exception.message ?: "Erreur réseau pendant le lien")
             }
             is NetworkResult.ApplicationError -> {
+                if (persistedBeforeNetwork) {
+                    SignalPreKeyMaterial.wipeProvisionalCredentialsIfNeeded(store!!, acc!!)
+                }
                 Timber.e(result.throwable, "Signal link application error")
                 failure(result.throwable.message ?: "Erreur de lien")
             }

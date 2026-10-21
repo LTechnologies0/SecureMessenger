@@ -38,6 +38,10 @@ class EmailSession(
         storeAuthenticated = false
     }
 
+    fun invalidateSmtpAuth() {
+        smtpAuthenticated = false
+    }
+
     fun reconnectStore(): Boolean {
         val store = this.store ?: return false
         if (storeAuthenticated) return true
@@ -103,7 +107,7 @@ class EmailSession(
                     storeProtocol = if (storeSecurity == MailSecurity.SSL) "imaps" else "imap"
                     storeConnectHost = EmailSocksProperties.resolveConnectHost(
                         storeServerName, proxy, httpFactory,
-                    )
+                    ) ?: error("Missing IMAP connect host")
                     EmailSocksProperties.applyStoreSecurity(
                         props, storeProtocol, storeSecurity, storeServerName, storePort, storeConnectHost,
                     )
@@ -116,7 +120,7 @@ class EmailSession(
                     storeProtocol = if (storeSecurity == MailSecurity.SSL) "pop3s" else "pop3"
                     storeConnectHost = EmailSocksProperties.resolveConnectHost(
                         storeServerName, proxy, httpFactory,
-                    )
+                    ) ?: error("Missing POP3 connect host")
                     EmailSocksProperties.applyStoreSecurity(
                         props, storeProtocol, storeSecurity, storeServerName, storePort, storeConnectHost,
                     )
@@ -127,12 +131,6 @@ class EmailSession(
 
             val smtpServerName = config.smtpHost ?: error("Missing SMTP host")
             val smtpProtocol = if (config.smtpSecurity == MailSecurity.SSL) "smtps" else "smtp"
-            val smtpConnectHost = EmailSocksProperties.resolveConnectHost(
-                smtpServerName, proxy, httpFactory,
-            )
-            EmailSocksProperties.applyStoreSecurity(
-                props, smtpProtocol, config.smtpSecurity, smtpServerName, config.smtpPort, smtpConnectHost,
-            )
             EmailSocksProperties.applySocks(props, listOf(smtpProtocol, "smtp", "smtps"), proxy)
             props["mail.$smtpProtocol.auth"] = "true"
             props["mail.smtp.auth"] = "true"
@@ -144,14 +142,36 @@ class EmailSession(
             val store = session.getStore(props.getProperty("mail.store.protocol"))
             store.connect(storeConnectHost, storePort, config.email, config.password)
 
+            // Resolve SMTP via DoH after store is up; DoH failure must not block inbox.
+            val smtpConnectHost = EmailSocksProperties.resolveConnectHost(
+                smtpServerName,
+                proxy,
+                httpFactory,
+                strict = false,
+            )
+            if (smtpConnectHost != null) {
+                EmailSocksProperties.applyStoreSecurity(
+                    props,
+                    smtpProtocol,
+                    config.smtpSecurity,
+                    smtpServerName,
+                    config.smtpPort,
+                    smtpConnectHost,
+                )
+            } else {
+                Timber.w("SMTP DoH skipped — outbound mail unavailable until retry")
+            }
+
             val transport = session.getTransport(smtpProtocol)
             var smtpOk = false
-            runCatching {
-                // Reuse the Tor-resolved IP — never pass the original hostname (local DNS leak).
-                transport.connect(smtpConnectHost, config.smtpPort, config.email, config.password)
-                smtpOk = true
-            }.onFailure { e ->
-                Timber.w(e, "SMTP connect failed (inbox still available)")
+            if (smtpConnectHost != null) {
+                runCatching {
+                    // Reuse the Tor-resolved IP — never pass the original hostname (local DNS leak).
+                    transport.connect(smtpConnectHost, config.smtpPort, config.email, config.password)
+                    smtpOk = true
+                }.onFailure { e ->
+                    Timber.w(e, "SMTP connect failed (inbox still available)")
+                }
             }
 
             return EmailSession(

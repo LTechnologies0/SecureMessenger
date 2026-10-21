@@ -205,6 +205,19 @@ internal object SignalRuntimeFactory {
         runCatching { unauthWebSocket.connect() }
             .onFailure { Timber.w(it, "Signal unauth websocket connect failed") }
 
+        if (credentialStore.get(accountId, SignalCredentialKeys.ONE_TIME_PREKEYS_UPLOADED) != "1") {
+            val uploaded = runCatching {
+                SignalPreKeyMaterial.uploadOneTimePreKeys(
+                    keysApi,
+                    protocolStore.aciAccountStore(),
+                    protocolStore.pniAccountStore(),
+                )
+            }.getOrDefault(false)
+            if (uploaded) {
+                credentialStore.put(accountId, SignalCredentialKeys.ONE_TIME_PREKEYS_UPLOADED, "1")
+            }
+        }
+
         return SignalSessionContext(
             e164 = e164,
             aci = aci,

@@ -183,6 +183,15 @@ def patch_url_extensions() -> None:
         """  val socksProxy = SignalSocksHolder.get()
   if (socksProxy != null) {
     builder.proxy(socksProxy)
+    val socksUser = SignalSocksHolder.getUsername()
+    if (!socksUser.isNullOrEmpty()) {
+      val socksPass = SignalSocksHolder.getPassword().orEmpty()
+      builder.proxyAuthenticator { _, response ->
+        response.request.newBuilder()
+          .header("Proxy-Authorization", okhttp3.Credentials.basic(socksUser, socksPass))
+          .build()
+      }
+    }
   } else if (configuration.signalProxy.isPresent) {
     val proxy = configuration.signalProxy.get()
     builder.socketFactory(TlsProxySocketFactory(proxy.host, proxy.port, configuration.dns))

@@ -10,6 +10,7 @@ import org.signal.core.util.SignalSocksHolder
 import org.whispersystems.signalservice.internal.push.PushServiceSocket
 import org.whispersystems.signalservice.internal.push.RegistrationSessionMetadataResponse
 import org.whispersystems.signalservice.internal.util.StaticCredentialsProvider
+import ltechnologies.onionphone.securemessenger.core.security.EncryptedCredentialStore
 
 internal sealed class SignalRegistrationStep {
     data object RequestSms : SignalRegistrationStep()
@@ -30,6 +31,8 @@ internal data class SignalRegistrationOutcome(
 
 internal class SignalRegistrationFlow(
     private val trustStore: SignalAndroidTrustStore,
+    private val credentialStore: EncryptedCredentialStore? = null,
+    private val accountId: String? = null,
 ) {
     private val configuration by lazy { SignalServiceEnvironment.configuration(trustStore) }
 
@@ -145,6 +148,12 @@ internal class SignalRegistrationFlow(
         pin: String?,
     ): SignalRegistrationOutcome {
         val attributes = preKeys.buildAccountAttributes(password, pin, fetchesMessages = true)
+        val store = credentialStore
+        val acc = accountId
+        val persistedBeforeNetwork = store != null && acc != null
+        if (persistedBeforeNetwork) {
+            SignalPreKeyMaterial.persistBeforeNetwork(store!!, acc!!, preKeys, password, pin)
+        }
         return when (
             val result = api.registerAccount(
                 sessionId,
@@ -163,11 +172,14 @@ internal class SignalRegistrationFlow(
                     put(SignalCredentialKeys.E164, e164)
                     put(SignalCredentialKeys.ACI, aci.toString())
                     put(SignalCredentialKeys.PNI, pni.toString())
-                    putAll(preKeys.toSecrets(password, pin))
+                    putAll(preKeys.toSecrets(password, pin, sessionReady = true))
                     put(
                         SignalCredentialKeys.PROFILE_KEY,
                         SignalFeatureHelpers.encodeProfileKey(SignalFeatureHelpers.generateProfileKey()),
                     )
+                }
+                if (store != null && acc != null) {
+                    SignalPreKeyMaterial.seedMetadataAfterRegistration(store, acc, preKeys)
                 }
                 SignalRegistrationOutcome(
                     step = SignalRegistrationStep.Complete,
@@ -177,9 +189,24 @@ internal class SignalRegistrationFlow(
                     displayName = e164,
                 )
             }
-            is NetworkResult.StatusCodeError -> failure(result.exception.message ?: "Registration failed (${result.code})")
-            is NetworkResult.NetworkError -> failure(result.exception.message ?: "Network error")
-            is NetworkResult.ApplicationError -> failure(result.throwable.message ?: "Registration error")
+            is NetworkResult.StatusCodeError -> {
+                if (persistedBeforeNetwork) {
+                    SignalPreKeyMaterial.wipeProvisionalCredentialsIfNeeded(store!!, acc!!)
+                }
+                failure(result.exception.message ?: "Registration failed (${result.code})")
+            }
+            is NetworkResult.NetworkError -> {
+                if (persistedBeforeNetwork) {
+                    SignalPreKeyMaterial.wipeProvisionalCredentialsIfNeeded(store!!, acc!!)
+                }
+                failure(result.exception.message ?: "Network error")
+            }
+            is NetworkResult.ApplicationError -> {
+                if (persistedBeforeNetwork) {
+                    SignalPreKeyMaterial.wipeProvisionalCredentialsIfNeeded(store!!, acc!!)
+                }
+                failure(result.throwable.message ?: "Registration error")
+            }
         }
     }
 

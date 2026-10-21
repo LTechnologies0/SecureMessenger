@@ -45,6 +45,7 @@ import androidx.compose.ui.unit.dp
 import ltechnologies.onionphone.securemessenger.core.model.ProtocolId
 import ltechnologies.onionphone.securemessenger.ui.MainViewModel
 import ltechnologies.onionphone.securemessenger.ui.components.ProtocolAvatar
+import ltechnologies.onionphone.securemessenger.ui.components.contactsEmptyHint
 import ltechnologies.onionphone.securemessenger.ui.components.protocolDisplayName
 import ltechnologies.onionphone.securemessenger.ui.components.protocolShortPrefix
 
@@ -180,7 +181,7 @@ fun ContactsScreen(
                                         query.isNotBlank() -> "Aucun contact pour « $query »"
                                         status?.contains("échou", ignoreCase = true) == true ->
                                             status ?: "Erreur de synchronisation"
-                                        else -> "Aucun contact. Tire pour actualiser."
+                                        else -> contactsEmptyHint(protocol)
                                     },
                                     style = MaterialTheme.typography.bodyLarge,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,

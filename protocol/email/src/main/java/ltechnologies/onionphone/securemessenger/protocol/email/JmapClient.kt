@@ -129,11 +129,13 @@ class JmapClient(
         to: List<String>,
         subject: String,
         body: String,
+        cc: List<String> = emptyList(),
         inReplyTo: String? = null,
     ): SendResult {
         val s = session ?: return SendResult.Failure("JMAP not connected")
         return try {
             val recipients = to.map { EmailAddress.requireValid(it) }
+            val ccRecipients = cc.map { EmailAddress.requireValid(it) }
             val identityId = s.identityId
                 ?: return SendResult.Failure("No JMAP identity — configure provider identity")
             val draftMailbox = s.draftsId ?: s.inboxId
@@ -181,6 +183,16 @@ class JmapClient(
                                                                 }
                                                             },
                                                         )
+                                                        if (ccRecipients.isNotEmpty()) {
+                                                            put(
+                                                                "cc",
+                                                                buildJsonArray {
+                                                                    ccRecipients.forEach { addr ->
+                                                                        add(buildJsonObject { put("email", addr) })
+                                                                    }
+                                                                },
+                                                            )
+                                                        }
                                                         put("subject", subject)
                                                         if (!inReplyTo.isNullOrBlank()) {
                                                             put(
@@ -194,8 +206,8 @@ class JmapClient(
                                                                 put(
                                                                     "body",
                                                                     buildJsonObject {
+                                                                        // RFC 8621 §4.1.4 EmailBodyValue: value, isEncodingProblem, isTruncated only.
                                                                         put("value", body)
-                                                                        put("charset", "utf-8")
                                                                     },
                                                                 )
                                                             },
@@ -207,6 +219,8 @@ class JmapClient(
                                                                     buildJsonObject {
                                                                         put("partId", "body")
                                                                         put("type", "text/plain")
+                                                                        // RFC 8621 §4.1.4 EmailBodyPart.charset (not a bodyValues field).
+                                                                        put("charset", "utf-8")
                                                                     },
                                                                 )
                                                             },
@@ -392,6 +406,9 @@ class JmapClient(
         http.newCall(request).execute().use { response ->
             val text = response.body.string()
             if (!response.isSuccessful) {
+                if (response.code == 401 || response.code == 403) {
+                    session = null
+                }
                 error("JMAP API HTTP ${response.code}: ${text.take(200)}")
             }
             return json.parseToJsonElement(text).jsonObject

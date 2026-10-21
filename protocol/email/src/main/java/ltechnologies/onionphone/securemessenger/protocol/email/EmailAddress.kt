@@ -32,6 +32,14 @@ object EmailAddress {
         return normalized
     }
 
+    /** Parses comma/semicolon-separated mailbox lists (Cc/Bcc fields). */
+    fun parseList(raw: String): List<String> {
+        if (raw.isBlank()) return emptyList()
+        return raw.split(',', ';')
+            .map { extract(it) }
+            .filter { it.isNotBlank() && isValid(it) }
+    }
+
     /** Extracts bare address from `Display Name <user@domain>` or returns trimmed input. */
     fun extract(raw: String): String {
         val trimmed = raw.trim()

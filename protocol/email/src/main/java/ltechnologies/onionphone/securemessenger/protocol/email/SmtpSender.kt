@@ -12,6 +12,7 @@ class SmtpSender {
         to: List<String>,
         subject: String,
         body: String,
+        cc: List<String> = emptyList(),
         inReplyTo: String? = null,
         references: String? = null,
         attachments: List<Attachment> = emptyList(),
@@ -23,12 +24,14 @@ class SmtpSender {
         return try {
             val recipients = to.map { EmailAddress.requireValid(it) }
             if (recipients.isEmpty()) return SendResult.Failure("No recipients")
+            val ccRecipients = cc.map { EmailAddress.requireValid(it) }
             val mime: MimeMessage = MimeMapper.buildMime(
                 session = angus,
                 from = session.config.email,
                 to = recipients,
                 subject = subject,
                 body = body,
+                cc = ccRecipients,
                 inReplyTo = inReplyTo,
                 references = references,
                 attachments = attachments,
@@ -43,6 +46,7 @@ class SmtpSender {
         } catch (e: IllegalArgumentException) {
             SendResult.Failure(e.message ?: "Invalid recipient")
         } catch (e: Exception) {
+            session.invalidateSmtpAuth()
             Timber.w(e, "SMTP send failed")
             SendResult.Failure(e.message ?: "SMTP send failed")
         }
