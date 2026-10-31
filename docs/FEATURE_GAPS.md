@@ -54,9 +54,10 @@
 ### Matrix
 | ID | Prio | État | Note |
 |----|------|------|------|
-| MX-01/02 | P3 | Absent | Cross-signing QR / key backup |
-| MX-03–13 | P2 | Absent | Room settings, threads, spaces, polls, Element Call, … |
-| MX-08 | P1 | Partiel | Réactions outbound + chip local ; sync inbound aggregations incomplet |
+| MX-01/02 | P3 | Absent / bloqué | Cross-signing QR (bloqué taille) ; key backup UX absent |
+| MX-03–13 | P2 | **Partiel** `feat/parity-matrix` | leave/invite/state/directory/hierarchy/relations/reply/thread/ignore/favourite protocol APIs — voir `docs/features/MATRIX_FULL_INVENTORY.md` |
+| MX-08 | P1 | **Fait** | Réactions inbound+outbound ; edit/redact inbound ; `m.in_reply_to` |
+| MX-CALL / widgets | P3 | Bloqué | MatrixRTC / Jitsi sans WebRTC |
 
 ### XMPP
 | ID | Prio | État | Note |
