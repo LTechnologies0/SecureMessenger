@@ -93,6 +93,15 @@ class TelegramProtocol @Inject constructor(
         ephemeralMessages = false,
         messageHistory = true,
         backupExport = true,
+        reactions = true,
+        messageEdit = true,
+        messageDelete = true,
+        messageForward = true,
+        messageReply = true,
+        localChatListControls = true,
+        voiceCalls = false,
+        videoCalls = false,
+        stories = false,
     )
 
     override fun capabilitiesFor(accountId: String?): ProtocolCapabilities {
@@ -113,6 +122,11 @@ class TelegramProtocol @Inject constructor(
                 contactShare = false,
                 stickers = false,
                 messageHistory = false,
+                reactions = false,
+                messageEdit = false,
+                messageDelete = false,
+                messageForward = false,
+                localChatListControls = false,
             )
         }
         return capabilities
@@ -1165,12 +1179,16 @@ class TelegramProtocol @Inject constructor(
                 facade.sendSticker(chatId, content.localPath, content.emoji)
             }
             is OutgoingContent.Ephemeral -> {
+                // Capability ephemeralMessages=false: not per-message self-destruct (secret chats
+                // out of scope). Chat auto-delete exists in TDLib but is not advertised in UI.
+                if (!capabilities.ephemeralMessages) {
+                    return SendResult.Failure(
+                        "Messages éphémères Telegram non exposés (pas de secret chats / TTL UI)",
+                    )
+                }
                 if (content.expireSeconds <= 0) {
                     return SendResult.Failure("Durée d'expiration invalide")
                 }
-                // awaitResult: null = OK, non-null = error string. Do NOT Elvis TTL→send
-                // (that sent plain text whenever TTL succeeded). Text has no per-message
-                // selfDestruct in this TDLib; enable chat auto-delete then send once.
                 return sendViaFacade(conversationId, accountId) { facade, chatId ->
                     val ttlError = facade.setChatMessageAutoDeleteTime(chatId, content.expireSeconds)
                     when {
@@ -1390,6 +1408,63 @@ class TelegramProtocol @Inject constructor(
                 networkGuard.assertNetworkAllowed()
                 session.facade.addMessageReaction(chatId, tdMessageId, emoji)
                     ?.let { throw IllegalStateException(it) }
+                val existing = repository.getMessage(messageId)
+                if (existing != null) {
+                    val json = runCatching {
+                        org.json.JSONObject(existing.payloadJson ?: "{}")
+                    }.getOrElse { org.json.JSONObject() }
+                    val arr = json.optJSONArray("reactions") ?: org.json.JSONArray()
+                    arr.put(emoji)
+                    json.put("reactions", arr)
+                    repository.upsertMessage(existing.copy(payloadJson = json.toString()))
+                }
+                Unit
+            }
+        }
+    }
+
+    suspend fun editMessage(
+        conversationId: String,
+        messageId: String,
+        newBody: String,
+    ): Result<Unit> {
+        val session = sessionForConversation(conversationId)
+            ?: return Result.failure(IllegalStateException("Telegram non connecté"))
+        val chatId = TdLibMapper.chatIdFromConversation(conversationId)
+            ?: return Result.failure(IllegalStateException("Conversation invalide"))
+        val tdMessageId = messageId.substringAfterLast('_').toLongOrNull()
+            ?: return Result.failure(IllegalStateException("Message invalide"))
+        return withContext(session.dispatcher) {
+            runCatching {
+                networkGuard.assertNetworkAllowed()
+                session.facade.editMessageText(chatId, tdMessageId, newBody)
+                    ?.let { throw IllegalStateException(it) }
+                val existing = repository.getMessage(messageId)
+                if (existing != null) {
+                    repository.upsertMessage(existing.copy(body = newBody))
+                }
+                Unit
+            }
+        }
+    }
+
+    suspend fun deleteMessages(
+        conversationId: String,
+        messageIds: List<String>,
+        revoke: Boolean = true,
+    ): Result<Unit> {
+        val session = sessionForConversation(conversationId)
+            ?: return Result.failure(IllegalStateException("Telegram non connecté"))
+        val chatId = TdLibMapper.chatIdFromConversation(conversationId)
+            ?: return Result.failure(IllegalStateException("Conversation invalide"))
+        val tdIds = messageIds.mapNotNull { it.substringAfterLast('_').toLongOrNull() }.toLongArray()
+        if (tdIds.isEmpty()) return Result.failure(IllegalStateException("Message invalide"))
+        return withContext(session.dispatcher) {
+            runCatching {
+                networkGuard.assertNetworkAllowed()
+                session.facade.deleteMessages(chatId, tdIds, revoke)
+                    ?.let { throw IllegalStateException(it) }
+                repository.deleteMessages(messageIds)
                 Unit
             }
         }

@@ -99,6 +99,25 @@ class MessengerRepository @Inject constructor(
         database.get().conversationDao().upsert(conversation.toEntity())
     }
 
+    /** Local inbox pin/mute/archive (non-Telegram protocols; TG prefers TDLib sync). */
+    suspend fun setConversationListFlags(
+        conversationId: String,
+        isPinned: Boolean? = null,
+        isMuted: Boolean? = null,
+        isArchived: Boolean? = null,
+    ): Boolean {
+        if (!appLockManager.isUnlocked) return false
+        val existing = getConversation(conversationId) ?: return false
+        upsertConversation(
+            existing.copy(
+                isPinned = isPinned ?: existing.isPinned,
+                isMuted = isMuted ?: existing.isMuted,
+                isArchived = isArchived ?: existing.isArchived,
+            ),
+        )
+        return true
+    }
+
     suspend fun upsertConversations(conversations: List<Conversation>) {
         if (!appLockManager.isUnlocked) return
         database.get().conversationDao().upsertAll(conversations.map { it.toEntity() })

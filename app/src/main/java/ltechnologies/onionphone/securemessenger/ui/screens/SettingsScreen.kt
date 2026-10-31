@@ -314,7 +314,7 @@ fun SettingsScreen(
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
             ListItem(
                 headlineContent = { Text("SecureMessenger") },
-                supportingContent = { Text("1.0.16 · Tor-only multi-protocole") },
+                supportingContent = { Text("1.0.17 · Tor-only multi-protocole") },
             )
         }
     }

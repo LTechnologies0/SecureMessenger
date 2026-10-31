@@ -104,7 +104,11 @@ fun ContactsScreen(
             TopAppBar(
                 title = {
                     Column {
-                        Text("Contacts")
+                        Text(
+                            ltechnologies.onionphone.securemessenger.ui.components.contactsScreenTitle(
+                                protocol,
+                            ),
+                        )
                         Text(
                             protocolDisplayName(protocol),
                             style = MaterialTheme.typography.labelMedium,

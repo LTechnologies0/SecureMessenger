@@ -160,6 +160,21 @@ data class ProtocolCapabilities(
     val videoCalls: Boolean = false,
     /** Protocol can receive and/or send ephemeral stories. */
     val stories: Boolean = false,
+    /** Long-press emoji reactions on messages. */
+    val reactions: Boolean = false,
+    /** Edit own text messages after send. */
+    val messageEdit: Boolean = false,
+    /** Delete/redact messages (for everyone when protocol supports it). */
+    val messageDelete: Boolean = false,
+    /** Forward messages to another conversation on the same account. */
+    val messageForward: Boolean = false,
+    /** Quote-reply affordance in the composer (local citation or protocol reply). */
+    val messageReply: Boolean = true,
+    /**
+     * Local inbox pin/mute/archive without a server chat-list API
+     * (Telegram uses TDLib instead and still sets this true when authorized).
+     */
+    val localChatListControls: Boolean = true,
 )
 
 enum class MessageKind {
@@ -211,6 +226,8 @@ sealed class OutgoingContent {
         val subject: String? = null,
         /** Optional comma-separated Cc recipients (email only). */
         val cc: String? = null,
+        /** Optional comma-separated Bcc recipients (email only). */
+        val bcc: String? = null,
     ) : OutgoingContent()
 
     data class Media(
@@ -319,11 +336,11 @@ data class Conversation(
     val lastMessagePreview: String? = null,
     val lastMessageAt: Long = 0L,
     val unreadCount: Int = 0,
-    /** Telegram (TDLib): pinned on main chat list. */
+    /** Pinned in inbox (TDLib main list and/or local). */
     val isPinned: Boolean = false,
-    /** Telegram: chat notifications muted (mute_for > 0). */
+    /** Notifications muted (TDLib mute_for > 0 and/or local). */
     val isMuted: Boolean = false,
-    /** Telegram: chat in archive list, not main. */
+    /** Archived (TDLib archive list and/or local). */
     val isArchived: Boolean = false,
 )
 

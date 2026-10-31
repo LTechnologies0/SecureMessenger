@@ -70,6 +70,15 @@ class MatrixProtocol @Inject constructor(
         ephemeralMessages = false,
         messageHistory = true,
         backupExport = true,
+        reactions = true,
+        messageEdit = true,
+        messageDelete = true,
+        messageForward = false,
+        messageReply = true,
+        localChatListControls = true,
+        voiceCalls = false,
+        videoCalls = false,
+        stories = false,
     )
 
     /**
@@ -1051,6 +1060,16 @@ class MatrixProtocol @Inject constructor(
             val engine = sessions[accId]?.trixnityEngine ?: error("Matrix non connecté")
             val roomId = ConversationIds.remoteId(conversationId) ?: error("Room invalide")
             engine.sendReaction(roomId, messageId, emoji).getOrThrow()
+            val existing = repository.getMessage(messageId)
+            if (existing != null) {
+                val json = runCatching {
+                    org.json.JSONObject(existing.payloadJson ?: "{}")
+                }.getOrElse { org.json.JSONObject() }
+                val arr = json.optJSONArray("reactions") ?: org.json.JSONArray()
+                arr.put(emoji)
+                json.put("reactions", arr)
+                repository.upsertMessage(existing.copy(payloadJson = json.toString()))
+            }
         }
     }
 

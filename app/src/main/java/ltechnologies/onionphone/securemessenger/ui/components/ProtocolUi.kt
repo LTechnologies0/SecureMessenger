@@ -155,7 +155,15 @@ fun contactsEmptyHint(protocol: ProtocolId): String = when (protocol) {
     ProtocolId.XMPP -> "Le roster XMPP se remplit depuis le serveur et vos salles."
     ProtocolId.MATRIX -> "Contacts Matrix locaux et membres de rooms synchronisés."
     ProtocolId.EMAIL -> "Adresses tirées des fils récents — pas un carnet serveur complet."
-    ProtocolId.IRC -> "Nicks visibles dans vos canaux (LIST / JOIN)."
+    ProtocolId.IRC -> "Nicks visibles dans vos canaux (LIST / JOIN). Tapez /me action pour un CTCP ACTION."
+}
+
+/** Tab / screen title for the contacts surface (IRC is nicks, not an address book). */
+fun contactsScreenTitle(protocol: ProtocolId?): String = when (protocol) {
+    ProtocolId.IRC -> "Nicks"
+    ProtocolId.EMAIL -> "Adresses"
+    null -> "Contacts"
+    else -> "Contacts"
 }
 
 fun capabilityLabels(caps: ProtocolCapabilities?, canRegister: Boolean = false): List<String> {
@@ -178,6 +186,10 @@ fun capabilityLabels(caps: ProtocolCapabilities?, canRegister: Boolean = false):
         if (caps.contactShare) add("contact")
         if (caps.ephemeralMessages) add("éphémères")
         if (caps.messageHistory) add("historique")
+        if (caps.reactions) add("réactions")
+        if (caps.messageEdit) add("édition")
+        if (caps.messageDelete) add("suppression")
+        if (caps.messageForward) add("transfert")
         if (caps.backupExport) add("export")
         if (canRegister) add("inscription")
     }

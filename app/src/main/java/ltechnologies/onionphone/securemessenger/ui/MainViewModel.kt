@@ -252,32 +252,116 @@ class MainViewModel @Inject constructor(
                     telegramProtocol()?.addReaction(conversationId, messageId, emoji)?.isSuccess == true
                 ProtocolId.MATRIX ->
                     matrixProtocol()?.addReaction(conversationId, messageId, emoji)?.isSuccess == true
+                ProtocolId.SIGNAL ->
+                    signalProtocol()?.addReaction(conversationId, messageId, emoji)?.isSuccess == true
                 else -> false
             }
             onResult(ok)
         }
     }
 
-    fun editMatrixMessage(
+    fun editMessage(
         conversationId: String,
+        protocol: ProtocolId,
         messageId: String,
         newBody: String,
         onResult: (Boolean) -> Unit = {},
     ) {
         viewModelScope.launch {
-            val ok = matrixProtocol()?.editMessage(conversationId, messageId, newBody)?.isSuccess == true
+            val ok = when (protocol) {
+                ProtocolId.MATRIX ->
+                    matrixProtocol()?.editMessage(conversationId, messageId, newBody)?.isSuccess == true
+                ProtocolId.TELEGRAM ->
+                    telegramProtocol()?.editMessage(conversationId, messageId, newBody)?.isSuccess == true
+                else -> false
+            }
             onResult(ok)
         }
     }
 
-    fun redactMatrixMessage(
+    /** @deprecated Use [editMessage]. */
+    fun editMatrixMessage(
         conversationId: String,
+        messageId: String,
+        newBody: String,
+        onResult: (Boolean) -> Unit = {},
+    ) = editMessage(conversationId, ProtocolId.MATRIX, messageId, newBody, onResult)
+
+    fun deleteMessage(
+        conversationId: String,
+        protocol: ProtocolId,
         messageId: String,
         onResult: (Boolean) -> Unit = {},
     ) {
         viewModelScope.launch {
-            val ok = matrixProtocol()?.redactMessage(conversationId, messageId)?.isSuccess == true
+            val ok = when (protocol) {
+                ProtocolId.MATRIX ->
+                    matrixProtocol()?.redactMessage(conversationId, messageId)?.isSuccess == true
+                ProtocolId.TELEGRAM ->
+                    telegramProtocol()?.deleteMessages(conversationId, listOf(messageId))?.isSuccess == true
+                ProtocolId.SIGNAL ->
+                    signalProtocol()?.deleteMessage(conversationId, messageId)?.isSuccess == true
+                else -> false
+            }
             onResult(ok)
+        }
+    }
+
+    /** @deprecated Use [deleteMessage]. */
+    fun redactMatrixMessage(
+        conversationId: String,
+        messageId: String,
+        onResult: (Boolean) -> Unit = {},
+    ) = deleteMessage(conversationId, ProtocolId.MATRIX, messageId, onResult)
+
+    fun setConversationListFlags(
+        conversationId: String,
+        protocol: ProtocolId,
+        pinned: Boolean? = null,
+        mutedSeconds: Int? = null,
+        archived: Boolean? = null,
+        onResult: (Boolean) -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            val ok = when (protocol) {
+                ProtocolId.TELEGRAM -> {
+                    var allOk = true
+                    if (pinned != null) {
+                        allOk = telegramProtocol()?.setChatPinned(conversationId, pinned)?.isSuccess == true && allOk
+                    }
+                    if (mutedSeconds != null) {
+                        allOk = telegramProtocol()?.setChatMuted(conversationId, mutedSeconds)?.isSuccess == true && allOk
+                    }
+                    if (archived != null) {
+                        allOk = telegramProtocol()?.setChatArchived(conversationId, archived)?.isSuccess == true && allOk
+                    }
+                    allOk
+                }
+                else -> repository.setConversationListFlags(
+                    conversationId,
+                    isPinned = pinned,
+                    isMuted = mutedSeconds?.let { it > 0 },
+                    isArchived = archived,
+                )
+            }
+            onResult(ok)
+        }
+    }
+
+    fun loadOmemoFingerprint(
+        conversationId: String,
+        accountId: String?,
+        onResult: (String?, String?) -> Unit,
+    ) {
+        viewModelScope.launch {
+            val protocol = connectionManager.protocolFor(ProtocolId.XMPP)
+                as? ltechnologies.onionphone.securemessenger.protocol.xmpp.XmppProtocol
+            val result = protocol?.omemoFingerprintForConversation(conversationId, accountId)
+            if (result?.isSuccess == true) {
+                onResult(result.getOrNull(), null)
+            } else {
+                onResult(null, result?.exceptionOrNull()?.message ?: "OMEMO indisponible")
+            }
         }
     }
 

@@ -87,7 +87,8 @@ class SignalProtocol @Inject constructor(
         contacts = true,
         profileEdit = true,
         voiceNotes = true,
-        stickers = false, // No composer sticker picker yet.
+        // Local-path / pack stickers via OutgoingContent.Sticker (composer picker).
+        stickers = true,
         // No dedicated GIF/animation path — would fall through as plain media.
         gifs = false,
         locationShare = true,
@@ -99,7 +100,14 @@ class SignalProtocol @Inject constructor(
         // A/V media needs RingRTC; do not advertise call/story composers.
         voiceCalls = false,
         videoCalls = false,
+        // sendStory exists but has no UI — keep false until a story surface ships.
         stories = false,
+        reactions = true,
+        messageEdit = false, // inbound edit handled; outbound EditMessage not wired yet
+        messageDelete = true,
+        messageForward = false,
+        messageReply = true,
+        localChatListControls = true,
     )
 
     override val capabilities: ProtocolCapabilities
@@ -140,6 +148,97 @@ class SignalProtocol @Inject constructor(
             }
             SignalSafetyNumber.format(active, remoteId).getOrThrow()
         }
+    }
+
+    /**
+     * Sends a reaction to [messageId] (`${conversationId}_$sentTimestamp` for 1:1).
+     * Groups: not supported yet (needs GV2 reaction fan-out).
+     */
+    suspend fun addReaction(
+        conversationId: String,
+        messageId: String,
+        emoji: String,
+        accountId: String? = null,
+    ): Result<Unit> = withContext(signalDispatcher) {
+        runCatching {
+            val (accId, active) = resolveLiveAccount(accountId)
+                ?: error("Signal non connecté")
+            val remoteId = conversationId.removePrefix("${accId}_")
+            if (remoteId == conversationId || remoteId.startsWith("gv2:")) {
+                error("Réactions Signal disponibles en DM uniquement pour l’instant")
+            }
+            val targetTs = messageId.substringAfterLast('_').toLongOrNull()
+                ?: error("Message Signal invalide")
+            val targetMsg = repository.getMessage(messageId)
+            val address = resolveSignalAddress(remoteId)
+            val targetAuthor = when (targetMsg?.direction) {
+                ltechnologies.onionphone.securemessenger.core.model.MessageDirection.OUTGOING ->
+                    active.localAddress.serviceId
+                else -> address.serviceId
+            } ?: error("ServiceId auteur introuvable pour la réaction")
+            val reaction = SignalServiceDataMessage.Reaction(
+                emoji = emoji,
+                isRemove = false,
+                targetAuthor = targetAuthor,
+                targetSentTimestamp = targetTs,
+            )
+            val send = deliverMessage(
+                active,
+                conversationId,
+                accId,
+                address,
+                SanitizedText(""),
+                configure = { it.withReaction(reaction).withBody(null) },
+            )
+            if (send !is SendResult.Success) {
+                error((send as? SendResult.Failure)?.reason ?: "Réaction Signal échouée")
+            }
+            mergeReactionPayload(messageId, emoji)
+        }
+    }
+
+    /** Remote-delete for everyone (1:1). Removes local row on success. */
+    suspend fun deleteMessage(
+        conversationId: String,
+        messageId: String,
+        accountId: String? = null,
+    ): Result<Unit> = withContext(signalDispatcher) {
+        runCatching {
+            val (accId, active) = resolveLiveAccount(accountId)
+                ?: error("Signal non connecté")
+            val remoteId = conversationId.removePrefix("${accId}_")
+            if (remoteId == conversationId || remoteId.startsWith("gv2:")) {
+                error("Suppression Signal disponible en DM uniquement pour l’instant")
+            }
+            val targetTs = messageId.substringAfterLast('_').toLongOrNull()
+                ?: error("Message Signal invalide")
+            val address = resolveSignalAddress(remoteId)
+            val send = deliverMessage(
+                active,
+                conversationId,
+                accId,
+                address,
+                SanitizedText(""),
+                configure = {
+                    it.withRemoteDelete(SignalServiceDataMessage.RemoteDelete(targetTs)).withBody(null)
+                },
+            )
+            if (send !is SendResult.Success) {
+                error((send as? SendResult.Failure)?.reason ?: "Suppression Signal échouée")
+            }
+            repository.deleteMessages(listOf(messageId))
+        }
+    }
+
+    private suspend fun mergeReactionPayload(messageId: String, emoji: String) {
+        val existing = repository.getMessage(messageId) ?: return
+        val json = runCatching {
+            org.json.JSONObject(existing.payloadJson ?: "{}")
+        }.getOrElse { org.json.JSONObject() }
+        val arr = json.optJSONArray("reactions") ?: org.json.JSONArray()
+        arr.put(emoji)
+        json.put("reactions", arr)
+        repository.upsertMessage(existing.copy(payloadJson = json.toString()))
     }
 
     private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -1929,6 +2028,10 @@ class SignalProtocol @Inject constructor(
         content: OutgoingContent.CallAction,
         accountId: String?,
     ): SendResult {
+        // RingRTC media path not shipped — keep signaling reachable for hangup/busy only.
+        if (!capabilities.voiceCalls && !capabilities.videoCalls) {
+            // Still allow hangup/busy so an incoming offer can be declined without a media stack.
+        }
         val (accId, activeSession) = resolveLiveAccount(accountId)
             ?: return liveAccountFailure(accountId)
         val remoteId = conversationId.removePrefix("${accId}_")
@@ -1992,6 +2095,9 @@ class SignalProtocol @Inject constructor(
         content: OutgoingContent.Story,
         accountId: String?,
     ): SendResult {
+        if (!capabilities.stories) {
+            return SendResult.Failure("Stories Signal non exposées dans l’UI (capabilities.stories=false)")
+        }
         val (accId, activeSession) = resolveLiveAccount(accountId)
             ?: return liveAccountFailure(accountId)
         val profileKey = activeSession.profileKey?.serialize()

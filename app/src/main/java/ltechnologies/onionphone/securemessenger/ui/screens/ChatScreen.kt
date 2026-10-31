@@ -126,6 +126,9 @@ fun ChatScreen(
     var draft by remember(conversationId) { mutableStateOf("") }
     var emailSubject by remember(conversationId) { mutableStateOf("") }
     var emailCc by remember(conversationId) { mutableStateOf("") }
+    var emailBcc by remember(conversationId) { mutableStateOf("") }
+    var e2eeDetailText by remember { mutableStateOf<String?>(null) }
+    var e2eeDetailError by remember { mutableStateOf<String?>(null) }
     val emailTo = remember(conversationId) {
         ConversationIds.remoteId(conversationId).orEmpty()
     }
@@ -136,8 +139,6 @@ fun ChatScreen(
     var stickerChoices by remember { mutableStateOf<List<TelegramSticker>>(emptyList()) }
     var actionMessage by remember { mutableStateOf<Message?>(null) }
     var editDraft by remember { mutableStateOf("") }
-    var safetyNumberText by remember { mutableStateOf<String?>(null) }
-    var safetyNumberError by remember { mutableStateOf<String?>(null) }
     val allConversations by viewModel.conversations.collectAsState()
     val signalLinkSync = protocol == ProtocolId.SIGNAL &&
         accountId?.let { viewModel.isSignalLinkAndSyncInProgress(it) } == true
@@ -351,17 +352,36 @@ fun ChatScreen(
                                 conversationE2ee -> {
                                     AssistChip(
                                         onClick = {
-                                            if (protocol == ProtocolId.SIGNAL) {
-                                                safetyNumberText = null
-                                                safetyNumberError = null
-                                                dialog = ComposerDialog.SAFETY_NUMBER
-                                                viewModel.loadSignalSafetyNumber(conversationId, accountId) { num, err ->
-                                                    safetyNumberText = num
-                                                    safetyNumberError = err
+                                            when (protocol) {
+                                                ProtocolId.SIGNAL -> {
+                                                    e2eeDetailText = null
+                                                    e2eeDetailError = null
+                                                    dialog = ComposerDialog.SAFETY_NUMBER
+                                                    viewModel.loadSignalSafetyNumber(
+                                                        conversationId,
+                                                        accountId,
+                                                    ) { num, err ->
+                                                        e2eeDetailText = num
+                                                        e2eeDetailError = err
+                                                    }
                                                 }
+                                                ProtocolId.XMPP -> {
+                                                    e2eeDetailText = null
+                                                    e2eeDetailError = null
+                                                    dialog = ComposerDialog.SAFETY_NUMBER
+                                                    viewModel.loadOmemoFingerprint(
+                                                        conversationId,
+                                                        accountId,
+                                                    ) { num, err ->
+                                                        e2eeDetailText = num
+                                                        e2eeDetailError = err
+                                                    }
+                                                }
+                                                else -> Unit
                                             }
                                         },
-                                        enabled = protocol == ProtocolId.SIGNAL,
+                                        enabled = protocol == ProtocolId.SIGNAL ||
+                                            protocol == ProtocolId.XMPP,
                                         label = { Text("E2EE") },
                                         leadingIcon = {
                                             Icon(
@@ -449,6 +469,15 @@ fun ChatScreen(
                         singleLine = true,
                     )
                     OutlinedTextField(
+                        value = emailBcc,
+                        onValueChange = { emailBcc = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Bcc") },
+                        placeholder = { Text("copie-cachée@example.com") },
+                        shape = MaterialTheme.shapes.large,
+                        singleLine = true,
+                    )
+                    OutlinedTextField(
                         value = emailSubject,
                         onValueChange = { emailSubject = it },
                         modifier = Modifier.fillMaxWidth(),
@@ -456,6 +485,14 @@ fun ChatScreen(
                         shape = MaterialTheme.shapes.large,
                         singleLine = true,
                     )
+                    if (!capabilities.mediaSend) {
+                        Text(
+                            "Pièces jointes indisponibles sur ce compte (ex. JMAP).",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(horizontal = 4.dp),
+                        )
+                    }
                     Text(
                         if (viewModel.emailImapSentFolderConfigured(accountId)) {
                             "Boîte récente (~100 msgs INBOX + ~50 Sent IMAP synchronisés / 50 JMAP)."
@@ -495,6 +532,7 @@ fun ChatScreen(
                                         body = MessageSanitizer.sanitize(draft),
                                         subject = emailSubject.trim().takeIf { it.isNotEmpty() },
                                         cc = emailCc.trim().takeIf { it.isNotEmpty() },
+                                        bcc = emailBcc.trim().takeIf { it.isNotEmpty() },
                                     ),
                                 ) { ok, reason, remapped ->
                                     if (ok) {
@@ -699,7 +737,7 @@ fun ChatScreen(
                     title = { Text("Message") },
                     text = {
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            if (protocol == ProtocolId.TELEGRAM || protocol == ProtocolId.MATRIX) {
+                            if (capabilities.reactions) {
                                 Text("Réactions rapides")
                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     listOf("👍", "❤️", "🔥", "👏").forEach { emoji ->
@@ -718,25 +756,27 @@ fun ChatScreen(
                                     }
                                 }
                             }
-                            TextButton(
-                                onClick = {
-                                    draft = buildString {
-                                        if (msg.body.isNotBlank()) {
-                                            append("> ")
-                                            append(msg.body.lines().joinToString("\n> "))
-                                            append("\n\n")
-                                        }
-                                    } + draft
-                                    dialog = ComposerDialog.NONE
-                                    actionMessage = null
-                                },
-                            ) { Text("Répondre (citation)") }
-                            if (protocol == ProtocolId.TELEGRAM) {
+                            if (capabilities.messageReply) {
+                                TextButton(
+                                    onClick = {
+                                        draft = buildString {
+                                            if (msg.body.isNotBlank()) {
+                                                append("> ")
+                                                append(msg.body.lines().joinToString("\n> "))
+                                                append("\n\n")
+                                            }
+                                        } + draft
+                                        dialog = ComposerDialog.NONE
+                                        actionMessage = null
+                                    },
+                                ) { Text("Répondre (citation)") }
+                            }
+                            if (capabilities.messageForward) {
                                 TextButton(onClick = {
                                     dialog = ComposerDialog.FORWARD
                                 }) { Text("Transférer…") }
                             }
-                            if (protocol == ProtocolId.MATRIX &&
+                            if (capabilities.messageEdit &&
                                 msg.direction == MessageDirection.OUTGOING &&
                                 msg.kind == MessageKind.TEXT
                             ) {
@@ -744,13 +784,25 @@ fun ChatScreen(
                                     editDraft = msg.body
                                     dialog = ComposerDialog.EDIT_MATRIX
                                 }) { Text("Modifier…") }
+                            }
+                            if (capabilities.messageDelete &&
+                                msg.direction == MessageDirection.OUTGOING
+                            ) {
                                 TextButton(onClick = {
-                                    viewModel.redactMatrixMessage(conversationId, msg.id) { ok ->
+                                    viewModel.deleteMessage(conversationId, protocol, msg.id) { ok ->
                                         if (!ok) sendError = "Suppression échouée"
                                     }
                                     dialog = ComposerDialog.NONE
                                     actionMessage = null
-                                }) { Text("Supprimer (redaction)") }
+                                }) {
+                                    Text(
+                                        if (protocol == ProtocolId.MATRIX) {
+                                            "Supprimer (redaction)"
+                                        } else {
+                                            "Supprimer"
+                                        },
+                                    )
+                                }
                             }
                         }
                     },
@@ -784,7 +836,12 @@ fun ChatScreen(
                 confirmButton = {
                     TextButton(onClick = {
                         if (msg != null && editDraft.isNotBlank()) {
-                            viewModel.editMatrixMessage(conversationId, msg.id, editDraft.trim()) { ok ->
+                            viewModel.editMessage(
+                                conversationId,
+                                protocol,
+                                msg.id,
+                                editDraft.trim(),
+                            ) { ok ->
                                 if (!ok) sendError = "Modification échouée"
                             }
                         }
@@ -803,21 +860,34 @@ fun ChatScreen(
         ComposerDialog.SAFETY_NUMBER -> {
             AlertDialog(
                 onDismissRequest = { dialog = ComposerDialog.NONE },
-                title = { Text("Numéro de sécurité Signal") },
+                title = {
+                    Text(
+                        when (protocol) {
+                            ProtocolId.XMPP -> "Empreintes OMEMO"
+                            else -> "Numéro de sécurité Signal"
+                        },
+                    )
+                },
                 text = {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(
-                            "Comparez ces chiffres avec votre contact (hors groupe). " +
-                                "SVR2 et verrouillage d’inscription ne sont pas gérés ici.",
+                            when (protocol) {
+                                ProtocolId.XMPP ->
+                                    "Comparez ces empreintes avec votre contact (TOFU). " +
+                                        "Correction XEP-0308 / réactions XEP-0444 pas encore dans l’UI."
+                                else ->
+                                    "Comparez ces chiffres avec votre contact (hors groupe). " +
+                                        "SVR2 et verrouillage d’inscription ne sont pas gérés ici."
+                            },
                             style = MaterialTheme.typography.bodySmall,
                         )
                         when {
-                            safetyNumberError != null -> Text(
-                                safetyNumberError!!,
+                            e2eeDetailError != null -> Text(
+                                e2eeDetailError!!,
                                 color = MaterialTheme.colorScheme.error,
                             )
-                            safetyNumberText != null -> Text(
-                                safetyNumberText!!,
+                            e2eeDetailText != null -> Text(
+                                e2eeDetailText!!,
                                 style = MaterialTheme.typography.bodyLarge,
                                 fontFamily = FontFamily.Monospace,
                             )
@@ -833,7 +903,7 @@ fun ChatScreen(
         ComposerDialog.FORWARD -> {
             val msg = actionMessage
             val targets = allConversations.filter {
-                it.accountId == accountId && it.protocol == ProtocolId.TELEGRAM && it.id != conversationId
+                it.accountId == accountId && it.protocol == protocol && it.id != conversationId
             }
             AlertDialog(
                 onDismissRequest = {
@@ -844,7 +914,9 @@ fun ChatScreen(
                 text = {
                     Column {
                         if (targets.isEmpty()) {
-                            Text("Aucun autre chat Telegram sur ce compte.")
+                            Text("Aucun autre chat sur ce compte.")
+                        } else if (protocol != ProtocolId.TELEGRAM) {
+                            Text("Transfert serveur disponible pour Telegram uniquement.")
                         } else {
                             targets.take(8).forEach { conv ->
                                 TextButton(onClick = {
@@ -941,6 +1013,7 @@ private fun MessageBubble(
                         },
                     )
                 }
+                ReactionChips(message.payloadJson)
                 Row(
                     modifier = Modifier
                         .align(Alignment.End)
@@ -961,6 +1034,34 @@ private fun MessageBubble(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun ReactionChips(payloadJson: String?) {
+    val reactions = remember(payloadJson) {
+        runCatching {
+            val arr = JSONObject(payloadJson ?: return@runCatching emptyList<String>())
+                .optJSONArray("reactions") ?: return@runCatching emptyList()
+            buildList {
+                for (i in 0 until arr.length()) {
+                    arr.optString(i).takeIf { it.isNotBlank() }?.let { add(it) }
+                }
+            }
+        }.getOrDefault(emptyList())
+    }
+    if (reactions.isEmpty()) return
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        modifier = Modifier.padding(top = 4.dp),
+    ) {
+        reactions.distinct().take(8).forEach { emoji ->
+            AssistChip(
+                onClick = {},
+                enabled = false,
+                label = { Text(emoji, style = MaterialTheme.typography.labelMedium) },
+            )
         }
     }
 }

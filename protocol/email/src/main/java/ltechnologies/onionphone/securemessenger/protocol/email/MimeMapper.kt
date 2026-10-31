@@ -137,6 +137,7 @@ object MimeMapper {
         subject: String,
         body: String,
         cc: List<String> = emptyList(),
+        bcc: List<String> = emptyList(),
         inReplyTo: String? = null,
         references: String? = null,
         attachments: List<Attachment> = emptyList(),
@@ -151,6 +152,12 @@ object MimeMapper {
             message.setRecipients(
                 MailMessage.RecipientType.CC,
                 cc.map { InternetAddress(it) }.toTypedArray(),
+            )
+        }
+        if (bcc.isNotEmpty()) {
+            message.setRecipients(
+                MailMessage.RecipientType.BCC,
+                bcc.map { InternetAddress(it) }.toTypedArray(),
             )
         }
         message.subject = subject
