@@ -51,6 +51,7 @@ import org.kitteh.irc.client.library.event.capabilities.CapabilitiesRejectedEven
 import org.kitteh.irc.client.library.event.client.ClientNegotiationCompleteEvent
 import org.kitteh.irc.client.library.event.client.ClientReceiveNumericEvent
 import org.kitteh.irc.client.library.event.connection.ClientConnectionClosedEvent
+import org.kitteh.irc.client.library.event.connection.ClientConnectionFailedEvent
 import org.kitteh.irc.client.library.event.user.PrivateMessageEvent
 import org.kitteh.irc.client.library.event.user.PrivateNoticeEvent
 import org.kitteh.irc.client.library.event.user.UserNickChangeEvent
@@ -697,7 +698,25 @@ class IrcProtocol @Inject constructor(
         }
 
         @Handler
+        fun onConnectionFailed(event: ClientConnectionFailedEvent) {
+            // Kitteh defaults to auto-reconnect; that produced repeated Tor/IRC dials after a
+            // failed add or TLS error. SM owns reconnect via ConnectionManager.restore*.
+            event.setAttemptReconnect(false)
+            val cause = event.cause.orElse(null)
+            if (!ready.isCompleted) {
+                fail.complete(
+                    when (cause) {
+                        is Exception -> cause
+                        is Throwable -> Exception(cause)
+                        else -> IllegalStateException("IRC connection failed")
+                    },
+                )
+            }
+        }
+
+        @Handler
         fun onClosed(event: ClientConnectionClosedEvent) {
+            event.setAttemptReconnect(false)
             val s = session ?: return
             s.connected = false
             if (!ready.isCompleted) {
