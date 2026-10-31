@@ -91,6 +91,56 @@ internal class SignalGroupHelper(
      * Creates a GV2 group. Returns master-key bytes on success, or null on failure
      * (including missing self profile-key credential).
      */
+    /**
+     * Leaves a GV2 group (self-remove via [GroupsV2Operations.GroupOperations.createRemoveMembersChange]).
+     * Returns true after a successful [GroupsV2Api.patchGroup].
+     */
+    fun leaveGroup(session: SignalSessionContext, masterKeyBytes: ByteArray): Boolean {
+        val masterKey = GroupMasterKey(masterKeyBytes)
+        val secretParams = GroupSecretParams.deriveFromMasterKey(masterKey)
+        val fetched = fetchGroupState(session, masterKeyBytes, secretParams)
+            ?: run {
+                Timber.w("Signal leaveGroup: cannot fetch group state")
+                return false
+            }
+        val authString = groupsV2AuthString(session, secretParams) ?: run {
+            Timber.w("Signal leaveGroup: GV2 auth unavailable")
+            return false
+        }
+        return try {
+            val ops = session.groupsV2Operations.forGroup(secretParams)
+            val change = ops.createRemoveMembersChange(
+                setOf(session.aci),
+                /* alsoBan = */ false,
+                emptyList(),
+            )
+                .sourceUserId(ops.encryptServiceId(session.aci))
+                .version(fetched.revision + 1)
+                .build()
+            session.accountManager.groupsV2Api.patchGroup(
+                change,
+                authString,
+                Optional.empty(),
+            )
+            clearLocalCache(masterKeyBytes)
+            true
+        } catch (e: Exception) {
+            Timber.e(e, "Signal GV2 leaveGroup failed")
+            false
+        }
+    }
+
+    private fun clearLocalCache(masterKeyBytes: ByteArray) {
+        listOf(
+            membersKey(masterKeyBytes),
+            revKey(masterKeyBytes),
+            titleKey(masterKeyBytes),
+            distKey(masterKeyBytes),
+        ).forEach { key ->
+            runCatching { credentialStore.put(accountId, key, "") }
+        }
+    }
+
     fun createGroup(
         session: SignalSessionContext,
         title: String,

@@ -137,7 +137,7 @@ Capabilities (`baseSignalCapabilities`): DM/group/media/typing/receipts/E2EE/con
 | SIG-GV2-03 | Refresh group / members | `getGroup` | **partial** | Cache + storage seed; no change-log UI |
 | SIG-GV2-04 | Admin: title/desc/members/roles/ban | `patchGroup` + GroupOperations | **missing** | |
 | SIG-GV2-05 | Invite links / join by link | join info + link password | **missing** | |
-| SIG-GV2-06 | Leave / terminate / announce | leave builders | **missing** | |
+| SIG-GV2-06 | Leave / terminate / announce | leave builders | **partial** | `SignalGroupHelper.leaveGroup` + `SignalProtocol.leaveGroup` (self-remove via `createRemoveMembersChange`/`patchGroup`); no terminate/announce; UI not wired (`closeConversation` is screen dispose only) |
 | SIG-GV2-07 | Group avatar upload | `uploadAvatar` | **missing** | |
 | SIG-GV2-08 | SKDM process | `SignalGroupSessionBuilder` | **done** | Handler |
 

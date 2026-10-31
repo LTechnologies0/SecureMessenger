@@ -1256,6 +1256,31 @@ class SignalProtocol @Inject constructor(
         }
     }
 
+    /**
+     * Leaves a Signal GV2 group and removes the local conversation row.
+     *
+     * UI note: [MessengerProtocol.closeConversation] is only a chat-screen dispose hook
+     * (see ChatScreen DisposableEffect) — it must not call leave. Call this API from an
+     * explicit “Quitter le groupe” action when one is added.
+     */
+    suspend fun leaveGroup(conversationId: String, accountId: String? = null): Result<Unit> =
+        withContext(signalDispatcher) {
+            runCatching {
+                val (accId, activeSession) = resolveLiveAccount(accountId)
+                    ?: error("Signal non connecté")
+                val remoteId = conversationId.removePrefix("${accId}_")
+                if (remoteId == conversationId) error("Conversation Signal invalide")
+                val masterKey = SignalGroupHelper.parseMasterKey(remoteId)
+                    ?: error("Seul un groupe Signal (gv2:) peut être quitté")
+                val helper = groupHelper
+                    ?: SignalGroupHelper(context, accId, credentialStore).also { groupHelper = it }
+                if (!helper.leaveGroup(activeSession, masterKey)) {
+                    error("Impossible de quitter le groupe Signal")
+                }
+                repository.deleteConversation(conversationId)
+            }
+        }
+
     /** Parses `Title|+33...,+44...` or `Title|aci,aci`. */
     private fun parseSignalGroupCreate(remoteId: String): Pair<String, List<String>>? {
         val sep = remoteId.indexOf('|')
