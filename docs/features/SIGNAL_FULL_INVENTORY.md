@@ -146,7 +146,7 @@ Capabilities (`baseSignalCapabilities`): DM/group/media/typing/receipts/E2EE/con
 | ID | Feature | API / req→resp | SM status | Notes |
 |----|---------|----------------|-----------|-------|
 | SIG-PROF-01 | Get/set name+about | `ProfileApi` versioned | **done** | |
-| SIG-PROF-02 | Profile avatar upload | AvatarUploadParams | **missing** | Uses `unchanged` |
+| SIG-PROF-02 | Profile avatar upload | AvatarUploadParams | **done** | `setProfileAvatar` via `AvatarUploadParams.forAvatar` + PushServiceSocket CDN (Tor SOCKS) |
 | SIG-PROF-03 | Fetch peer profiles / credentials | getVersioned + credential | **partial** | Used for GV2 create; no peer UX |
 | SIG-CDS-01 | CDSI v2 contact discovery | `CdsiV2Service` | **done** | `refreshContacts` + token |
 | SIG-SAFE-01 | Safety number 1:1 | libsignal fingerprint | **done** | |
@@ -204,7 +204,7 @@ Priority order for atomic commits on this branch (excludes blocked):
 4. **SIG-EPH-01** — conversation timer update message
 5. ~~**SIG-SAFE-02** — mark verified + sync outbound~~ (1:1 done; group SN still open)
 6. ~~**SIG-USER-01** — username set (API)~~ (reserve/confirm/delete done; link UI open)
-7. **SIG-PROF-02** — profile avatar upload
+7. ~~**SIG-PROF-02** — profile avatar upload~~
 8. **SIG-SEAL-01** — fetch peer profile key for sealed sender
 9. **SIG-POLL-02** — poll vote
 10. **SIG-GV2-05** — invite links (if time)

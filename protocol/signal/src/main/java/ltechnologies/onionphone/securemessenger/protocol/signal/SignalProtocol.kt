@@ -2924,6 +2924,8 @@ class SignalProtocol @Inject constructor(
         val storedAbout = credentialStore.get(accountId, SignalCredentialKeys.PROFILE_ABOUT)
         val storedUsername = credentialStore.get(accountId, SignalCredentialKeys.USERNAME)
             ?.takeIf { it.isNotBlank() }
+        val storedAvatar = credentialStore.get(accountId, SignalCredentialKeys.PROFILE_AVATAR_PATH)
+            ?.takeIf { it.isNotBlank() }
         val live = resolveLiveAccount(accountId)
         if (live != null) {
             val (_, activeSession) = live
@@ -2945,6 +2947,7 @@ class SignalProtocol @Inject constructor(
                         handle = storedUsername,
                         phone = activeSession.e164,
                         bio = about ?: storedAbout,
+                        avatarLocalPath = storedAvatar,
                     )
                 }.onFailure { Timber.d(it, "Signal profile fetch failed") }
             }
@@ -2955,6 +2958,7 @@ class SignalProtocol @Inject constructor(
                 handle = storedUsername,
                 phone = activeSession.e164,
                 bio = storedAbout,
+                avatarLocalPath = storedAvatar,
             )
         }
         // Non-live Signal row: local credentials only — never leak the other session's e164/profile.
@@ -2965,6 +2969,7 @@ class SignalProtocol @Inject constructor(
             handle = storedUsername,
             phone = credentialStore.get(accountId, SignalCredentialKeys.E164),
             bio = storedAbout,
+            avatarLocalPath = storedAvatar,
         )
     }
 
@@ -3000,6 +3005,73 @@ class SignalProtocol @Inject constructor(
             credentialStore.put(accountId, SignalCredentialKeys.PROFILE_NAME, displayName)
             if (bio != null) {
                 credentialStore.put(accountId, SignalCredentialKeys.PROFILE_ABOUT, bio)
+            }
+            Unit
+        }
+    }
+
+    /**
+     * Uploads or clears the Signal profile avatar (ProfileApi → CDN via Tor SOCKS).
+     * Keeps current name/about from credentials. Pass [localPath]=null to remove the avatar.
+     */
+    suspend fun setProfileAvatar(
+        accountId: String,
+        localPath: String?,
+    ): Result<Unit> = withContext(signalDispatcher) {
+        val live = resolveLiveAccount(accountId)
+            ?: return@withContext Result.failure(
+                IllegalStateException(liveAccountFailure(accountId).reason),
+            )
+        val (_, activeSession) = live
+        runCatching {
+            var profileKey = activeSession.profileKey
+            if (profileKey == null) {
+                profileKey = SignalFeatureHelpers.generateProfileKey()
+                credentialStore.put(
+                    accountId,
+                    SignalCredentialKeys.PROFILE_KEY,
+                    SignalFeatureHelpers.encodeProfileKey(profileKey),
+                )
+            }
+            val displayName = credentialStore.get(accountId, SignalCredentialKeys.PROFILE_NAME)
+            val about = credentialStore.get(accountId, SignalCredentialKeys.PROFILE_ABOUT)
+            val avatarParams = if (localPath == null) {
+                AvatarUploadParams.forAvatar(null)
+            } else {
+                val file = File(localPath)
+                if (!file.isFile) error("Avatar introuvable: $localPath")
+                val mime = when {
+                    localPath.endsWith(".png", ignoreCase = true) -> "image/png"
+                    localPath.endsWith(".webp", ignoreCase = true) -> "image/webp"
+                    localPath.endsWith(".gif", ignoreCase = true) -> "image/gif"
+                    else -> "image/jpeg"
+                }
+                val stream = org.whispersystems.signalservice.api.util.StreamDetails(
+                    FileInputStream(file),
+                    mime,
+                    file.length(),
+                )
+                AvatarUploadParams.forAvatar(stream)
+            }
+            try {
+                activeSession.profileApi.setVersionedProfile(
+                    activeSession.aci,
+                    profileKey!!,
+                    displayName,
+                    about,
+                    null,
+                    null,
+                    avatarParams,
+                    emptyList(),
+                    false,
+                ).successOrThrow()
+            } finally {
+                avatarParams.stream?.close()
+            }
+            if (localPath == null) {
+                credentialStore.put(accountId, SignalCredentialKeys.PROFILE_AVATAR_PATH, "")
+            } else {
+                credentialStore.put(accountId, SignalCredentialKeys.PROFILE_AVATAR_PATH, localPath)
             }
             Unit
         }
