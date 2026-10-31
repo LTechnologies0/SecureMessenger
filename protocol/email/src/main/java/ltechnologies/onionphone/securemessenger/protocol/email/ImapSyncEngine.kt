@@ -1,6 +1,7 @@
 package ltechnologies.onionphone.securemessenger.protocol.email
 
 import android.content.Context
+import jakarta.mail.Flags
 import jakarta.mail.Folder
 import jakarta.mail.UIDFolder
 import jakarta.mail.internet.MimeMessage
@@ -40,6 +41,7 @@ class ImapSyncEngine(
                     }
                     // Hold folderMutex for sync + IDLE — one Angus Store, one open folder.
                     folderMutex.withLock {
+                        detectSpecialFoldersLocked(session)
                         syncFolderLocked(session)
                         syncSentFolderLocked(session)
                         idleOnceLocked(session)
@@ -62,19 +64,116 @@ class ImapSyncEngine(
 
     suspend fun syncFolder(session: EmailSession) {
         folderMutex.withLock {
+            detectSpecialFoldersLocked(session)
             syncFolderLocked(session)
             syncSentFolderLocked(session)
         }
     }
 
-    fun ensureSentFolderDetected(session: EmailSession): String? {
+    /**
+     * Bounded progressive backfill: fetch up to [chunkSize] older messages than the current
+     * oldest watermark (never unbounded full archive).
+     */
+    suspend fun backfillOlder(session: EmailSession, chunkSize: Int = 50): Int {
+        return folderMutex.withLock {
+            val before = credentialStore.get(session.accountId, EmailCredentialKeys.OLDEST_IMAP_UID)
+                ?.toLongOrNull()
+                ?: credentialStore.get(session.accountId, EmailCredentialKeys.LAST_IMAP_UID)
+                    ?.toLongOrNull()
+                ?: 0L
+            val (messages, minUid) = ImapMailboxOps.fetchOlderChunk(
+                session = session,
+                folderName = session.config.folder,
+                beforeUidExclusive = before,
+                chunkSize = chunkSize,
+            )
+            var persisted = 0
+            for (mail in messages) {
+                persistMail(session, mail)
+                persisted++
+            }
+            val newOldest = minUid
+                ?: messages.mapNotNull { mail ->
+                    runCatching {
+                        (session.store?.getFolder(session.config.folder) as? UIDFolder)?.getUID(mail)
+                    }.getOrNull()
+                }.minOrNull()
+            if (newOldest != null && newOldest > 0L) {
+                val previous = credentialStore.get(session.accountId, EmailCredentialKeys.OLDEST_IMAP_UID)
+                    ?.toLongOrNull()
+                if (previous == null || newOldest < previous) {
+                    credentialStore.put(
+                        session.accountId,
+                        EmailCredentialKeys.OLDEST_IMAP_UID,
+                        newOldest.toString(),
+                    )
+                }
+            }
+            persisted
+        }
+    }
+
+    fun ensureSentFolderDetected(session: EmailSession): String? =
+        ensureFolder(
+            session,
+            EmailCredentialKeys.SENT_FOLDER,
+            session.config.sentFolder,
+            ImapFolderNames::detectSentFolder,
+        )
+
+    fun ensureDraftsFolderDetected(session: EmailSession): String? =
+        ensureFolder(
+            session,
+            EmailCredentialKeys.DRAFTS_FOLDER,
+            session.config.draftsFolder,
+            ImapFolderNames::detectDraftsFolder,
+        )
+
+    fun ensureTrashFolderDetected(session: EmailSession): String? =
+        ensureFolder(
+            session,
+            EmailCredentialKeys.TRASH_FOLDER,
+            session.config.trashFolder,
+            ImapFolderNames::detectTrashFolder,
+        )
+
+    fun ensureArchiveFolderDetected(session: EmailSession): String? =
+        ensureFolder(
+            session,
+            EmailCredentialKeys.ARCHIVE_FOLDER,
+            session.config.archiveFolder,
+            ImapFolderNames::detectArchiveFolder,
+        )
+
+    fun ensureJunkFolderDetected(session: EmailSession): String? =
+        ensureFolder(
+            session,
+            EmailCredentialKeys.JUNK_FOLDER,
+            session.config.junkFolder,
+            ImapFolderNames::detectJunkFolder,
+        )
+
+    private fun ensureFolder(
+        session: EmailSession,
+        key: String,
+        existingConfig: String?,
+        detect: (jakarta.mail.Store) -> String?,
+    ): String? {
         val store = session.store ?: return null
-        val existing = session.config.sentFolder
-            ?: credentialStore.get(session.accountId, EmailCredentialKeys.SENT_FOLDER)?.ifBlank { null }
+        val existing = existingConfig
+            ?: credentialStore.get(session.accountId, key)?.ifBlank { null }
         if (existing != null) return existing
-        val detected = ImapFolderNames.detectSentFolder(store) ?: return null
-        credentialStore.put(session.accountId, EmailCredentialKeys.SENT_FOLDER, detected)
+        val detected = detect(store) ?: return null
+        credentialStore.put(session.accountId, key, detected)
         return detected
+    }
+
+    private fun detectSpecialFoldersLocked(session: EmailSession) {
+        ensureSentFolderDetected(session)
+        ensureDraftsFolderDetected(session)
+        ensureTrashFolderDetected(session)
+        ensureArchiveFolderDetected(session)
+        ensureJunkFolderDetected(session)
     }
 
     private suspend fun syncFolderLocked(session: EmailSession) {
@@ -100,11 +199,14 @@ class ImapSyncEngine(
                 }
             }
             var maxUid = lastUid
+            var minUid: Long? = null
             for (mail in messages) {
                 if (mail == null) continue
                 persistMail(session, mail as? MimeMessage ?: continue)
                 if (uidFolder != null) {
-                    maxUid = maxOf(maxUid, uidFolder.getUID(mail))
+                    val uid = uidFolder.getUID(mail)
+                    maxUid = maxOf(maxUid, uid)
+                    minUid = minOf(minUid ?: uid, uid)
                 }
             }
             if (uidFolder != null && maxUid > lastUid) {
@@ -113,6 +215,20 @@ class ImapSyncEngine(
                     EmailCredentialKeys.LAST_IMAP_UID,
                     maxUid.toString(),
                 )
+            }
+            // Seed oldest watermark on first sync so progressive backfill has a ceiling.
+            if (uidFolder != null && minUid != null) {
+                val existingOldest = credentialStore.get(
+                    session.accountId,
+                    EmailCredentialKeys.OLDEST_IMAP_UID,
+                )?.toLongOrNull()
+                if (existingOldest == null) {
+                    credentialStore.put(
+                        session.accountId,
+                        EmailCredentialKeys.OLDEST_IMAP_UID,
+                        minUid.toString(),
+                    )
+                }
             }
         } finally {
             runCatching { folder.close(false) }
@@ -229,6 +345,86 @@ class ImapSyncEngine(
         }
     }
 
+    suspend fun setFlagged(session: EmailSession, messageIds: Collection<String>, flagged: Boolean): Int =
+        folderMutex.withLock {
+            ImapMailboxOps.setFlagsByMessageIds(
+                session,
+                session.config.folder,
+                messageIds,
+                Flags.Flag.FLAGGED,
+                flagged,
+            )
+        }
+
+    suspend fun markAnswered(session: EmailSession, messageIds: Collection<String>): Int =
+        folderMutex.withLock {
+            ImapMailboxOps.setFlagsByMessageIds(
+                session,
+                session.config.folder,
+                messageIds,
+                Flags.Flag.ANSWERED,
+                true,
+            )
+        }
+
+    suspend fun trashMessages(session: EmailSession, messageIds: Collection<String>): Int =
+        folderMutex.withLock {
+            val trash = ensureTrashFolderDetected(session) ?: return@withLock 0
+            ImapMailboxOps.moveByMessageIds(
+                session,
+                session.config.folder,
+                trash,
+                messageIds,
+            )
+        }
+
+    suspend fun moveMessages(
+        session: EmailSession,
+        messageIds: Collection<String>,
+        destFolder: String,
+    ): Int = folderMutex.withLock {
+        ImapMailboxOps.moveByMessageIds(
+            session,
+            session.config.folder,
+            destFolder,
+            messageIds,
+        )
+    }
+
+    suspend fun saveDraft(
+        session: EmailSession,
+        mime: MimeMessage,
+    ): Boolean = folderMutex.withLock {
+        val drafts = ensureDraftsFolderDetected(session) ?: return@withLock false
+        ImapMailboxOps.appendMime(
+            session,
+            drafts,
+            mime,
+            Flags(Flags.Flag.DRAFT),
+        )
+    }
+
+    suspend fun search(
+        session: EmailSession,
+        query: String,
+        folderName: String? = null,
+        limit: Int = 50,
+    ): List<ImapMailboxOps.SearchHit> = folderMutex.withLock {
+        ImapMailboxOps.search(
+            session,
+            folderName ?: session.config.folder,
+            query,
+            limit,
+        )
+    }
+
+    suspend fun listMailboxes(session: EmailSession): List<ImapFolderNames.MailboxInfo> =
+        folderMutex.withLock {
+            val store = session.store ?: return@withLock emptyList()
+            if (!session.reconnectStore()) return@withLock emptyList()
+            ImapFolderNames.listMailboxes(store)
+        }
+
     private suspend fun markSeenLocked(session: EmailSession, messageIds: Collection<String>): Int {
         val store = session.store ?: return 0
         val normalized = messageIds.map { EmailThreading.normalizeMessageId(it) }.toSet()
@@ -249,7 +445,7 @@ class ImapSyncEngine(
                     mime.messageID?.takeIf { it.isNotBlank() } ?: continue,
                 )
                 if (mid !in normalized) continue
-                mime.setFlag(jakarta.mail.Flags.Flag.SEEN, true)
+                mime.setFlag(Flags.Flag.SEEN, true)
                 marked++
             }
             marked

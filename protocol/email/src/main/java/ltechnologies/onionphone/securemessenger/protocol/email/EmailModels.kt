@@ -26,8 +26,16 @@ object EmailCredentialKeys {
 
     const val LAST_IMAP_UID = "lastImapUid"
     const val LAST_IMAP_SENT_UID = "lastImapSentUid"
+    /** Lowest UID already backfilled (bounded progressive older sync). */
+    const val OLDEST_IMAP_UID = "oldestImapUid"
     /** Resolved Sent mailbox name (persisted after first IMAP connect). */
     const val SENT_FOLDER = "sentFolder"
+    const val DRAFTS_FOLDER = "draftsFolder"
+    const val TRASH_FOLDER = "trashFolder"
+    const val ARCHIVE_FOLDER = "archiveFolder"
+    const val JUNK_FOLDER = "junkFolder"
+    /** Optional personal name for SMTP/IMAP From header. */
+    const val FROM_DISPLAY_NAME = "fromDisplayName"
 }
 
 enum class EmailStoreKind {
@@ -61,6 +69,12 @@ data class EmailAccountConfig(
     val folder: String = "INBOX",
     /** IMAP Sent folder name when detected (null until first connect). */
     val sentFolder: String? = null,
+    val draftsFolder: String? = null,
+    val trashFolder: String? = null,
+    val archiveFolder: String? = null,
+    val junkFolder: String? = null,
+    /** Personal name for From header (K-9 / Thunderbird identity). */
+    val fromDisplayName: String? = null,
     val imapHost: String? = null,
     val imapPort: Int = 993,
     val imapSecurity: MailSecurity = MailSecurity.SSL,
@@ -84,6 +98,11 @@ data class EmailAccountConfig(
                 storeKind = EmailStoreKind.fromStored(secrets[EmailCredentialKeys.STORE_KIND]),
                 folder = secrets[EmailCredentialKeys.FOLDER]?.ifBlank { null } ?: "INBOX",
                 sentFolder = secrets[EmailCredentialKeys.SENT_FOLDER]?.ifBlank { null },
+                draftsFolder = secrets[EmailCredentialKeys.DRAFTS_FOLDER]?.ifBlank { null },
+                trashFolder = secrets[EmailCredentialKeys.TRASH_FOLDER]?.ifBlank { null },
+                archiveFolder = secrets[EmailCredentialKeys.ARCHIVE_FOLDER]?.ifBlank { null },
+                junkFolder = secrets[EmailCredentialKeys.JUNK_FOLDER]?.ifBlank { null },
+                fromDisplayName = secrets[EmailCredentialKeys.FROM_DISPLAY_NAME]?.ifBlank { null },
                 imapHost = secrets[EmailCredentialKeys.IMAP_HOST]?.ifBlank { null },
                 imapPort = secrets[EmailCredentialKeys.IMAP_PORT]?.toIntOrNull() ?: 993,
                 imapSecurity = MailSecurity.fromStored(secrets[EmailCredentialKeys.IMAP_SECURITY]),
@@ -106,6 +125,11 @@ data class EmailAccountConfig(
         put(EmailCredentialKeys.STORE_KIND, storeKind.name)
         put(EmailCredentialKeys.FOLDER, folder)
         sentFolder?.let { put(EmailCredentialKeys.SENT_FOLDER, it) }
+        draftsFolder?.let { put(EmailCredentialKeys.DRAFTS_FOLDER, it) }
+        trashFolder?.let { put(EmailCredentialKeys.TRASH_FOLDER, it) }
+        archiveFolder?.let { put(EmailCredentialKeys.ARCHIVE_FOLDER, it) }
+        junkFolder?.let { put(EmailCredentialKeys.JUNK_FOLDER, it) }
+        fromDisplayName?.let { put(EmailCredentialKeys.FROM_DISPLAY_NAME, it) }
         imapHost?.let { put(EmailCredentialKeys.IMAP_HOST, it) }
         put(EmailCredentialKeys.IMAP_PORT, imapPort.toString())
         put(EmailCredentialKeys.IMAP_SECURITY, imapSecurity.name)

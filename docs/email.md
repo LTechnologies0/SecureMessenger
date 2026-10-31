@@ -42,7 +42,18 @@ Fail-closed: `NetworkGuard.assertNetworkAllowed()` before connect.
 ## Autoconfig
 
 1. Thunderbird ISPDB: `https://autoconfig.thunderbird.net/v1.1/{domain}`
-2. Fallback DNS SRV via Cloudflare DoH (`_imaps._tcp`, `_submission._tcp`, `_pop3s._tcp`)
+2. Domain well-known: `https://autoconfig.{domain}/mail/config-v1.1.xml` then `/.well-known/autoconfig/mail/config-v1.1.xml`
+3. Fallback DNS SRV via Cloudflare DoH (`_imaps._tcp`, `_submission._tcp`, `_pop3s._tcp`)
+
+## IMAP extras (protocol APIs)
+
+- SPECIAL-USE / name heuristics: Sent, Drafts, Trash, Archive, Junk
+- Bounded progressive older backfill (`backfillOlder`, chunk ≤100) — not full archive
+- APPEND Sent after SMTP; Drafts APPEND; trash/move; `\Flagged` / `\Answered`
+- IMAP SEARCH / JMAP text query
+- HTML part stored in `payloadJson.htmlBody` (sanitized viewer still app-side)
+
+Full ID matrix: [`docs/features/EMAIL_FULL_INVENTORY.md`](features/EMAIL_FULL_INVENTORY.md).
 
 ## Capabilities
 

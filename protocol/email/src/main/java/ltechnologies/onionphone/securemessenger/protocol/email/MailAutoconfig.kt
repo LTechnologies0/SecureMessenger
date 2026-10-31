@@ -33,7 +33,30 @@ class MailAutoconfig @Inject constructor(
         val normalized = EmailAddress.requireValid(email)
         val domain = normalized.substringAfter('@')
         detectIspdb(domain)?.let { return@withContext it }
+        detectWellKnown(domain)?.let { return@withContext it }
         detectSrv(domain)
+    }
+
+    /** EM-ACCT-10: https://autoconfig.{domain}/mail/config-v1.1.xml and .well-known fallback. */
+    private fun detectWellKnown(domain: String): MailAutoconfigResult? {
+        val urls = listOf(
+            "https://autoconfig.$domain/mail/config-v1.1.xml",
+            "https://$domain/.well-known/autoconfig/mail/config-v1.1.xml",
+        )
+        val client = httpFactory.okhttpClient()
+        for (url in urls) {
+            try {
+                val request = Request.Builder().url(url).get().build()
+                client.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) return@use
+                    val parsed = parseIspdbXml(response.body.string(), source = "wellknown:$url")
+                    if (parsed != null) return parsed
+                }
+            } catch (e: Exception) {
+                Timber.d(e, "Well-known autoconfig failed for %s", url)
+            }
+        }
+        return null
     }
 
     private fun detectIspdb(domain: String): MailAutoconfigResult? {

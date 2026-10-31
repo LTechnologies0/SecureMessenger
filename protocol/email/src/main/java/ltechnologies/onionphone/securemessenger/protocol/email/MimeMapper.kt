@@ -27,6 +27,8 @@ object MimeMapper {
         val rootMessageId: String,
         val subject: String,
         val body: String,
+        /** Raw text/html part when present (sanitized viewer is app-side). */
+        val htmlBody: String?,
         val from: String,
         val to: List<String>,
         val cc: List<String>,
@@ -62,14 +64,18 @@ object MimeMapper {
             ?: System.currentTimeMillis()
 
         val textParts = mutableListOf<String>()
+        val htmlParts = mutableListOf<String>()
         val attachments = mutableListOf<Attachment>()
-        collectParts(context, accountId, mail, textParts, attachments)
+        collectParts(context, accountId, mail, textParts, htmlParts, attachments)
 
         return ParsedMail(
             messageId = messageId,
             rootMessageId = root,
             subject = subject,
-            body = textParts.firstOrNull { it.isNotBlank() }.orEmpty().ifBlank { subject },
+            body = textParts.firstOrNull { it.isNotBlank() }.orEmpty().ifBlank {
+                htmlParts.firstOrNull()?.let { stripHtml(it) }.orEmpty().ifBlank { subject }
+            },
+            htmlBody = htmlParts.firstOrNull { it.isNotBlank() },
             from = from,
             to = to,
             cc = cc,
@@ -125,6 +131,15 @@ object MimeMapper {
                 append("\"subject\":\"").append(jsonEscape(parsed.subject)).append("\",")
                 append("\"rootMessageId\":\"").append(jsonEscape(parsed.rootMessageId)).append("\",")
                 append("\"to\":\"").append(jsonEscape(peer)).append('"')
+                if (parsed.cc.isNotEmpty()) {
+                    append(",\"cc\":\"").append(jsonEscape(parsed.cc.joinToString(", "))).append('"')
+                }
+                if (!parsed.htmlBody.isNullOrBlank()) {
+                    append(",\"hasHtml\":true")
+                    // Cap stored HTML to keep Room rows bounded (viewer may re-fetch later).
+                    val html = parsed.htmlBody.take(64_000)
+                    append(",\"htmlBody\":\"").append(jsonEscape(html)).append('"')
+                }
                 append('}')
             },
         )
@@ -141,9 +156,17 @@ object MimeMapper {
         inReplyTo: String? = null,
         references: String? = null,
         attachments: List<Attachment> = emptyList(),
+        fromPersonal: String? = null,
+        htmlBody: String? = null,
+        draft: Boolean = false,
     ): MimeMessage {
         val message = MimeMessage(session)
-        message.setFrom(InternetAddress(from))
+        val fromAddr = if (!fromPersonal.isNullOrBlank()) {
+            InternetAddress(from, fromPersonal, Charsets.UTF_8.name())
+        } else {
+            InternetAddress(from)
+        }
+        message.setFrom(fromAddr)
         message.setRecipients(
             MailMessage.RecipientType.TO,
             to.map { InternetAddress(it) }.toTypedArray(),
@@ -170,27 +193,56 @@ object MimeMapper {
         } else if (!inReplyTo.isNullOrBlank()) {
             message.setHeader("References", "<$inReplyTo>")
         }
+        if (draft) {
+            message.setFlag(jakarta.mail.Flags.Flag.DRAFT, true)
+        }
 
-        if (attachments.isEmpty()) {
-            message.setText(body, "UTF-8")
-        } else {
-            val multipart = MimeMultipart()
-            val textPart = MimeBodyPart()
-            textPart.setText(body, "UTF-8")
-            multipart.addBodyPart(textPart)
-            for (attachment in attachments) {
-                val path = attachment.localPath ?: continue
-                val file = File(path)
-                if (!file.isFile || file.length() > MAX_ATTACHMENT_BYTES) continue
-                val part = MimeBodyPart()
-                part.attachFile(file)
-                part.fileName = attachment.fileName ?: file.name
-                if (attachment.mimeType.isNotBlank()) {
-                    part.setHeader("Content-Type", attachment.mimeType)
-                }
-                multipart.addBodyPart(part)
+        when {
+            attachments.isEmpty() && htmlBody.isNullOrBlank() -> {
+                message.setText(body, "UTF-8")
             }
-            message.setContent(multipart)
+            attachments.isEmpty() && !htmlBody.isNullOrBlank() -> {
+                val alt = MimeMultipart("alternative")
+                val textPart = MimeBodyPart()
+                textPart.setText(body, "UTF-8")
+                alt.addBodyPart(textPart)
+                val htmlPart = MimeBodyPart()
+                htmlPart.setContent(htmlBody, "text/html; charset=UTF-8")
+                alt.addBodyPart(htmlPart)
+                message.setContent(alt)
+            }
+            else -> {
+                val multipart = MimeMultipart()
+                if (!htmlBody.isNullOrBlank()) {
+                    val alt = MimeMultipart("alternative")
+                    val textPart = MimeBodyPart()
+                    textPart.setText(body, "UTF-8")
+                    alt.addBodyPart(textPart)
+                    val htmlPart = MimeBodyPart()
+                    htmlPart.setContent(htmlBody, "text/html; charset=UTF-8")
+                    alt.addBodyPart(htmlPart)
+                    val wrapper = MimeBodyPart()
+                    wrapper.setContent(alt)
+                    multipart.addBodyPart(wrapper)
+                } else {
+                    val textPart = MimeBodyPart()
+                    textPart.setText(body, "UTF-8")
+                    multipart.addBodyPart(textPart)
+                }
+                for (attachment in attachments) {
+                    val path = attachment.localPath ?: continue
+                    val file = File(path)
+                    if (!file.isFile || file.length() > MAX_ATTACHMENT_BYTES) continue
+                    val part = MimeBodyPart()
+                    part.attachFile(file)
+                    part.fileName = attachment.fileName ?: file.name
+                    if (attachment.mimeType.isNotBlank()) {
+                        part.setHeader("Content-Type", attachment.mimeType)
+                    }
+                    multipart.addBodyPart(part)
+                }
+                message.setContent(multipart)
+            }
         }
         message.saveChanges()
         return message
@@ -201,20 +253,28 @@ object MimeMapper {
         accountId: String,
         part: Part,
         textParts: MutableList<String>,
+        htmlParts: MutableList<String>,
         attachments: MutableList<Attachment>,
     ) {
         when {
             part.isMimeType("text/plain") -> {
                 textParts += (part.content as? String).orEmpty()
             }
-            part.isMimeType("text/html") && textParts.isEmpty() -> {
+            part.isMimeType("text/html") -> {
                 val html = (part.content as? String).orEmpty()
-                textParts += html.replace(Regex("<[^>]+>"), " ").replace(Regex("\\s+"), " ").trim()
+                if (html.isNotBlank()) htmlParts += html
             }
             part.isMimeType("multipart/*") -> {
                 val multipart = part.content as? Multipart ?: return
                 for (i in 0 until multipart.count) {
-                    collectParts(context, accountId, multipart.getBodyPart(i), textParts, attachments)
+                    collectParts(
+                        context,
+                        accountId,
+                        multipart.getBodyPart(i),
+                        textParts,
+                        htmlParts,
+                        attachments,
+                    )
                 }
             }
             Part.ATTACHMENT.equals(part.disposition, ignoreCase = true) ||
@@ -238,6 +298,9 @@ object MimeMapper {
             }
         }
     }
+
+    fun stripHtml(html: String): String =
+        html.replace(Regex("<[^>]+>"), " ").replace(Regex("\\s+"), " ").trim()
 
     private fun formatAddress(address: Address): String {
         val internet = address as? InternetAddress

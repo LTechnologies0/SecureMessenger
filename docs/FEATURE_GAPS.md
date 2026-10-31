@@ -70,10 +70,17 @@
 | ID | Prio | État | Note |
 |----|------|------|------|
 | EM-01 | P1 | **Fait** 1.0.17 | Bcc |
-| EM-02/03/05 | P1–P2 | Absent | Multi-folder UI, full archive, Drafts IMAP |
+| EM-02 | P2 | **Proto** parity-email | `listMailboxes` + SPECIAL-USE; UI multi-folder absente |
+| EM-03 | P2 | **Proto** / **blocked** full | Backfill borné (`backfillOlder`); archive totale bloquée |
+| EM-05 | P2 | **Proto** parity-email | Drafts APPEND (`saveDraft`) |
 | EM-06 | P3 | Volontaire | OpenPGP / S/MIME |
 | EM-07 | P1 | **Fait** honesty | JMAP mediaSend=false per account |
-| EM-08–12 | P2 | Absent | HTML viewer, search, move, identities, POP3 policy |
+| EM-08 | P2 | **Partiel** | `htmlBody` payload; viewer HTML sanitizé absent |
+| EM-09 | P2 | **Proto** | IMAP SEARCH + JMAP `Email/query` text |
+| EM-10 | P2 | **Proto** | Trash/move/Archive via Message-ID |
+| EM-11 | P2 | **Partiel** | From display name; multi-identités absentes |
+| EM-12 | P2 | **Fait** | POP3 leave-on-server toggle |
+| Inventaire | — | **Fait** | `docs/features/EMAIL_FULL_INVENTORY.md` |
 
 ### IRC
 | ID | Prio | État | Note |
