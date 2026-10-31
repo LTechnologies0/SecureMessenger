@@ -72,7 +72,7 @@ def patch_push_socket() -> None:
           String socksPass = SignalSocksHolder.getPassword() != null ? SignalSocksHolder.getPassword() : "";
           builder.proxyAuthenticator((route, response) ->
               response.request().newBuilder()
-                  .header("Proxy-Authorization", Credentials.basic(socksUser, socksPass))
+                  .header("Proxy-Authorization", okhttp3.Credentials.basic(socksUser, socksPass))
                   .build());
         }
       } else if (proxy.isPresent()) {
