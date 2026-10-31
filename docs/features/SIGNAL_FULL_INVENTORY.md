@@ -150,7 +150,7 @@ Capabilities (`baseSignalCapabilities`): DM/group/media/typing/receipts/E2EE/con
 | SIG-PROF-03 | Fetch peer profiles / credentials | getVersioned + credential | **partial** | Used for GV2 create; no peer UX |
 | SIG-CDS-01 | CDSI v2 contact discovery | `CdsiV2Service` | **done** | `refreshContacts` + token |
 | SIG-SAFE-01 | Safety number 1:1 | libsignal fingerprint | **done** | |
-| SIG-SAFE-02 | Verified mark persist + group SN | Verified sync | **partial** | Inbound verified; no outbound mark / group SN |
+| SIG-SAFE-02 | Verified mark persist + group SN | Verified sync | **partial** | Inbound + outbound `markIdentityVerified` + SyncMessage.forVerified; no group SN |
 
 ### Sync & storage
 
@@ -202,7 +202,7 @@ Priority order for atomic commits on this branch (excludes blocked):
 2. **SIG-GV2-06** — leave group
 3. **SIG-GV2-04** — title/desc/add/remove members (minimal admin)
 4. **SIG-EPH-01** — conversation timer update message
-5. **SIG-SAFE-02** — mark verified + sync outbound
+5. ~~**SIG-SAFE-02** — mark verified + sync outbound~~ (1:1 done; group SN still open)
 6. **SIG-USER-01** — username set (API)
 7. **SIG-PROF-02** — profile avatar upload
 8. **SIG-SEAL-01** — fetch peer profile key for sealed sender

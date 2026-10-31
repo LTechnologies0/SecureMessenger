@@ -154,6 +154,68 @@ class SignalProtocol @Inject constructor(
     }
 
     /**
+     * Marks a 1:1 peer identity verified/unverified (credential `verified:$aci`) and
+     * syncs via SyncMessage.forVerified to linked devices.
+     * Group safety numbers remain out of scope.
+     */
+    suspend fun markIdentityVerified(
+        conversationId: String,
+        verified: Boolean,
+        accountId: String? = null,
+    ): Result<Unit> = withContext(signalDispatcher) {
+        runCatching {
+            val accId = accountId ?: ConversationIds.accountId(conversationId)
+                ?: error("Compte Signal introuvable")
+            val active = resolveLiveAccount(accId)?.second ?: error("Signal non connecté")
+            val remoteId = ConversationIds.remoteId(conversationId)
+                ?: conversationId.removePrefix("${accId}_").takeIf { it != conversationId }
+                ?: error("Conversation Signal invalide")
+            if (remoteId.startsWith("gv2:")) {
+                error("Vérification disponible seulement en conversation directe")
+            }
+            val remoteAddress = resolveSignalAddress(remoteId)
+            val aci = org.signal.core.models.ServiceId.ACI.parseOrThrow(remoteAddress.identifier).toString()
+            val protocolAddress = org.signal.libsignal.protocol.SignalProtocolAddress(
+                aci,
+                SignalServiceAddress.DEFAULT_DEVICE_ID,
+            )
+            val aciStore = active.protocolStore.aciAccountStore()
+            val identity = aciStore.getIdentity(protocolAddress)
+                ?: aciStore.getIdentity(
+                    org.signal.libsignal.protocol.SignalProtocolAddress(
+                        remoteAddress.identifier,
+                        SignalServiceAddress.DEFAULT_DEVICE_ID,
+                    ),
+                )
+                ?: error("Pas encore de session chiffrée avec ce contact")
+            active.protocolStore.aci().saveIdentity(protocolAddress, identity)
+            val stateValue = if (verified) {
+                org.whispersystems.signalservice.internal.push.Verified.State.VERIFIED.value
+            } else {
+                org.whispersystems.signalservice.internal.push.Verified.State.UNVERIFIED.value
+            }
+            credentialStore.put(accId, "verified:$aci", stateValue.toString())
+            val verifiedState = if (verified) {
+                org.whispersystems.signalservice.api.messages.multidevice.VerifiedMessage.VerifiedState.VERIFIED
+            } else {
+                org.whispersystems.signalservice.api.messages.multidevice.VerifiedMessage.VerifiedState.UNVERIFIED
+            }
+            val verifiedMessage = org.whispersystems.signalservice.api.messages.multidevice.VerifiedMessage(
+                SignalServiceAddress(org.signal.core.models.ServiceId.ACI.parseOrThrow(aci)),
+                identity,
+                verifiedState,
+                System.currentTimeMillis(),
+            )
+            active.messageSender.sendSyncMessage(
+                org.whispersystems.signalservice.api.messages.multidevice.SignalServiceSyncMessage.forVerified(
+                    verifiedMessage,
+                ),
+            )
+            Unit
+        }
+    }
+
+    /**
      * Sends a reaction to [messageId] (`${conversationId}_$sentTimestamp`).
      * DM uses [deliverMessage]; GV2 (`gv2:`) uses [deliverGroupMessage] fan-out.
      */
@@ -1391,6 +1453,7 @@ class SignalProtocol @Inject constructor(
             repository.getConversation(conversationId)?.let { conv ->
                 repository.upsertConversation(conv.copy(title = title.trim()))
             }
+            Unit
         }
     }
 
