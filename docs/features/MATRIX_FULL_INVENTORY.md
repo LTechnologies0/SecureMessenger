@@ -206,20 +206,19 @@ Tor constraint: all CS HTTP goes through SOCKS (`MatrixHttpClientFactory`). Clea
 
 ---
 
-## L. Implementation queue (this branch)
+## L. Implementation wave (this branch)
 
-Ordered feasible work (protocol module first; Tor-safe):
+**Landed in `feat/parity-matrix`:**
 
-1. MX-REL-02/04/06/07/08 — inbound aggregations + protocol reply  
-2. MX-ROOM-04/05/06/07/08/09/12/16 — leave/forget/invite/kick/ban/knock/directory/hierarchy  
-3. MX-STATE-02/03 — set name/topic  
-4. MX-ACC-02/03 — ignore + favourite tag  
-5. MX-REL-09 — thread reply send  
-6. MX-MSG-05 — emote  
+1. MX-REL-02/04/06/07/08/09 — inbound aggregations + protocol reply + thread send
+2. MX-ROOM-04/05/06/07/08/09/12/16 — leave/forget/invite/kick/ban/knock/directory/hierarchy
+3. MX-STATE-02/03 — set name/topic
+4. MX-ACC-02/03 — ignore + favourite tag
+5. MX-MSG-05 — emote
 
-**Explicitly not in this pass:** MX-E2EE-07 (QR), MX-CALL-*, MX-WID-01, full cross-signing UX, key backup UX, polls UI, stickers pack UX.
+**Still open (feasible later):** leave/space/directory UI, power levels, avatar, stickers/polls, server search, key backup UX, SAS verify UI.
 
----
+**Blocked:** MX-E2EE-07 (QR ceremony), MX-CALL-*, MX-WID-01 (Jitsi/WebRTC).
 
 ## M. Code map
 
