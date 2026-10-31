@@ -1281,6 +1281,73 @@ class SignalProtocol @Inject constructor(
             }
         }
 
+    /** SIG-GV2-04: rename a GV2 group title. */
+    suspend fun updateGroupTitle(
+        conversationId: String,
+        title: String,
+        accountId: String? = null,
+    ): Result<Unit> = withContext(signalDispatcher) {
+        runCatching {
+            val (accId, activeSession, masterKey, helper) = resolveGv2Admin(conversationId, accountId)
+            if (!helper.updateGroupTitle(activeSession, masterKey, title)) {
+                error("Impossible de renommer le groupe Signal")
+            }
+            repository.getConversation(conversationId)?.let { conv ->
+                repository.upsertConversation(conv.copy(title = title.trim()))
+            }
+        }
+    }
+
+    /** SIG-GV2-04: add/invite members by ACI. */
+    suspend fun addGroupMembers(
+        conversationId: String,
+        acis: Collection<String>,
+        accountId: String? = null,
+    ): Result<Unit> = withContext(signalDispatcher) {
+        runCatching {
+            val (_, activeSession, masterKey, helper) = resolveGv2Admin(conversationId, accountId)
+            if (!helper.addGroupMembers(activeSession, masterKey, acis.toSet())) {
+                error("Impossible d'ajouter des membres au groupe Signal")
+            }
+        }
+    }
+
+    /** SIG-GV2-04: remove members by ACI (same remove builder as leave). */
+    suspend fun removeGroupMembers(
+        conversationId: String,
+        acis: Collection<String>,
+        accountId: String? = null,
+    ): Result<Unit> = withContext(signalDispatcher) {
+        runCatching {
+            val (_, activeSession, masterKey, helper) = resolveGv2Admin(conversationId, accountId)
+            if (!helper.removeGroupMembers(activeSession, masterKey, acis.toSet())) {
+                error("Impossible de retirer des membres du groupe Signal")
+            }
+        }
+    }
+
+    private fun resolveGv2Admin(
+        conversationId: String,
+        accountId: String?,
+    ): QuadrupleGv2 {
+        val (accId, activeSession) = resolveLiveAccount(accountId)
+            ?: error("Signal non connecté")
+        val remoteId = conversationId.removePrefix("${accId}_")
+        if (remoteId == conversationId) error("Conversation Signal invalide")
+        val masterKey = SignalGroupHelper.parseMasterKey(remoteId)
+            ?: error("Seul un groupe Signal (gv2:) accepte cette action")
+        val helper = groupHelper
+            ?: SignalGroupHelper(context, accId, credentialStore).also { groupHelper = it }
+        return QuadrupleGv2(accId, activeSession, masterKey, helper)
+    }
+
+    private data class QuadrupleGv2(
+        val accId: String,
+        val session: SignalSessionContext,
+        val masterKey: ByteArray,
+        val helper: SignalGroupHelper,
+    )
+
     /** Parses `Title|+33...,+44...` or `Title|aci,aci`. */
     private fun parseSignalGroupCreate(remoteId: String): Pair<String, List<String>>? {
         val sep = remoteId.indexOf('|')

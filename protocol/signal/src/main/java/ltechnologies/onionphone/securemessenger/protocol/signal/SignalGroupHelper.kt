@@ -130,6 +130,126 @@ internal class SignalGroupHelper(
         }
     }
 
+    /**
+     * Minimal GV2 admin (SIG-GV2-04): change group title via
+     * [GroupsV2Operations.GroupOperations.createModifyGroupTitle].
+     */
+    fun updateGroupTitle(
+        session: SignalSessionContext,
+        masterKeyBytes: ByteArray,
+        title: String,
+    ): Boolean {
+        val trimmed = title.trim()
+        if (trimmed.isEmpty()) return false
+        return patchGroupChange(session, masterKeyBytes, "updateGroupTitle") { ops, fetched ->
+            ops.createModifyGroupTitle(trimmed)
+                .sourceUserId(ops.encryptServiceId(session.aci))
+                .version(fetched.revision + 1)
+                .build()
+        }.also { ok ->
+            if (ok) rememberTitle(masterKeyBytes, trimmed)
+        }
+    }
+
+    /**
+     * Add / invite members (SIG-GV2-04). Without peer profile-key credentials,
+     * [createModifyGroupMembershipChange] emits pending-profile-key invites.
+     */
+    fun addGroupMembers(
+        session: SignalSessionContext,
+        masterKeyBytes: ByteArray,
+        memberAcis: Set<String>,
+    ): Boolean {
+        if (memberAcis.isEmpty()) return false
+        val candidates = memberAcis.mapNotNull { aciString ->
+            runCatching {
+                GroupCandidate(ACI.parseOrThrow(aciString), Optional.empty())
+            }.getOrNull()
+        }.toSet()
+        if (candidates.isEmpty()) return false
+        return patchGroupChange(session, masterKeyBytes, "addGroupMembers") { ops, fetched ->
+            ops.createModifyGroupMembershipChange(
+                candidates,
+                /* bannedMembers = */ emptySet(),
+                session.aci,
+            )
+                .sourceUserId(ops.encryptServiceId(session.aci))
+                .version(fetched.revision + 1)
+                .build()
+        }.also { ok ->
+            if (ok) {
+                rememberMembers(masterKeyBytes, cachedMembers(masterKeyBytes) + memberAcis)
+            }
+        }
+    }
+
+    /**
+     * Remove members (SIG-GV2-04). Same builder path as [leaveGroup]
+     * ([createRemoveMembersChange]) without clearing local group cache.
+     */
+    fun removeGroupMembers(
+        session: SignalSessionContext,
+        masterKeyBytes: ByteArray,
+        memberAcis: Set<String>,
+    ): Boolean {
+        if (memberAcis.isEmpty()) return false
+        val toRemove = memberAcis.mapNotNull { aciString ->
+            runCatching { ACI.parseOrThrow(aciString) }.getOrNull()
+        }.toSet()
+        if (toRemove.isEmpty()) return false
+        return patchGroupChange(session, masterKeyBytes, "removeGroupMembers") { ops, fetched ->
+            ops.createRemoveMembersChange(
+                toRemove,
+                /* alsoBan = */ false,
+                emptyList(),
+            )
+                .sourceUserId(ops.encryptServiceId(session.aci))
+                .version(fetched.revision + 1)
+                .build()
+        }.also { ok ->
+            if (ok) {
+                val remaining = cachedMembers(masterKeyBytes) - memberAcis
+                credentialStore.put(accountId, membersKey(masterKeyBytes), remaining.joinToString(","))
+            }
+        }
+    }
+
+    private fun patchGroupChange(
+        session: SignalSessionContext,
+        masterKeyBytes: ByteArray,
+        label: String,
+        build: (
+            org.whispersystems.signalservice.api.groupsv2.GroupsV2Operations.GroupOperations,
+            FetchedGroup,
+        ) -> org.signal.storageservice.storage.protos.groups.GroupChange.Actions,
+    ): Boolean {
+        val masterKey = GroupMasterKey(masterKeyBytes)
+        val secretParams = GroupSecretParams.deriveFromMasterKey(masterKey)
+        val fetched = fetchGroupState(session, masterKeyBytes, secretParams)
+            ?: run {
+                Timber.w("Signal %s: cannot fetch group state", label)
+                return false
+            }
+        val authString = groupsV2AuthString(session, secretParams) ?: run {
+            Timber.w("Signal %s: GV2 auth unavailable", label)
+            return false
+        }
+        return try {
+            val ops = session.groupsV2Operations.forGroup(secretParams)
+            val change = build(ops, fetched)
+            session.accountManager.groupsV2Api.patchGroup(
+                change,
+                authString,
+                Optional.empty(),
+            )
+            rememberRevision(masterKeyBytes, fetched.revision + 1)
+            true
+        } catch (e: Exception) {
+            Timber.e(e, "Signal GV2 %s failed", label)
+            false
+        }
+    }
+
     private fun clearLocalCache(masterKeyBytes: ByteArray) {
         listOf(
             membersKey(masterKeyBytes),
