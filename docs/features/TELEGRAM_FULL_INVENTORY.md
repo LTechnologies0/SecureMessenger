@@ -31,10 +31,10 @@ Status legend: `present` · `partial` · `missing` · `blocked`
 | TG-GROUP-02 | Supergroup / channel create | `CreateNewSupergroupChat` | **present** | AAR supports |
 | TG-GROUP-03 | Join by invite link | `JoinChatByInviteLink, CheckChatInviteLink, JoinChat` | **present** |  |
 | TG-GROUP-04 | Leave chat | `LeaveChat` | **present** |  |
-| TG-GROUP-05 | Add / ban members, admin rights | `AddChatMembers, BanChatMember, SetChatMemberStatus, GetChatAdministrators` | **missing** | Admin suite |
+| TG-GROUP-05 | Add / ban members, admin rights | `AddChatMembers, BanChatMember, SetChatMemberStatus, GetChatAdministrators` | **present** | Admin suite |
 | TG-GROUP-06 | Chat title / description / photo | `SetChatTitle, SetChatDescription, SetChatPhoto` | **present** |  |
 | TG-CHANNEL-01 | Channel posts receive | `UpdateNewMessage + ChatTypeChannel / isChannelPost` | **partial** | Synced as chats; no channel-specific UX |
-| TG-CHANNEL-02 | Channel discuss / comments | `GetMessageThreadHistory, MessageTopic` | **missing** |  |
+| TG-CHANNEL-02 | Channel discuss / comments | `GetMessageThreadHistory, MessageTopic` | **present** |  |
 | TG-SECRET-01 | Secret chats E2EE | `CreateNewSecretChat, *, useSecretChats` | **blocked** | Policy useSecretChats=false — fail-closed |
 | TG-MSG-TEXT | Send / receive text | `SendMessage(InputMessageText), MessageText` | **present** |  |
 | TG-MSG-PHOTO | Photo send/receive | `InputMessagePhoto, MessagePhoto, DownloadFile` | **present** |  |
@@ -44,14 +44,14 @@ Status legend: `present` · `partial` · `missing` · `blocked`
 | TG-MSG-VIDEONOTE | Video notes (round) | `InputMessageVideoNote, MessageVideoNote` | **present** | Receive mapped; send missing |
 | TG-MSG-GIF | GIF / animation | `InputMessageAnimation, MessageAnimation` | **present** |  |
 | TG-MSG-STICKER | Stickers send + catalog | `InputMessageSticker, GetStickers, GetInstalledStickerSets` | **present** | listStickers |
-| TG-MSG-LOCATION | Static + live location | `InputMessageLocation, InputMessageLiveLocation, EditMessageLiveLocation` | **partial** | Send/receive OK; live edit missing |
+| TG-MSG-LOCATION | Static + live location | `InputMessageLocation, InputMessageLiveLocation, EditMessageLiveLocation` | **present** | Send/receive OK; live edit missing |
 | TG-MSG-CONTACT | Contact card | `InputMessageContact, MessageContact` | **present** |  |
 | TG-MSG-POLL | Polls send + vote | `InputMessagePoll, SetPollAnswer, MessagePoll` | **present** | votePoll |
 | TG-MSG-POLL-STOP | Stop poll | `StopPoll` | **present** |  |
 | TG-MSG-DICE | Dice / animated emoji | `MessageDice, MessageAnimatedEmoji` | **present** | Body fallback only |
 | TG-MSG-GAME | Games | `MessageGame, SendMessage(InputMessageGame)` | **missing** | Low priority |
 | TG-MSG-INVOICE | Invoices / payments content | `MessageInvoice, *Payment*` | **blocked** | Premium/payments fail-closed |
-| TG-MSG-ALBUM | Media albums | `SendMessageAlbum, mediaAlbumId` | **missing** |  |
+| TG-MSG-ALBUM | Media albums | `SendMessageAlbum, mediaAlbumId` | **present** |  |
 | TG-MSG-SYSTEM | Service messages | `MessageChat*, MessagePinMessage, MessageCall, …` | **partial** | Subset mapped to SYSTEM |
 | TG-MSG-EDIT | Edit text | `EditMessageText` | **present** | editMessage |
 | TG-MSG-EDIT-CAPTION | Edit caption / media | `EditMessageCaption, EditMessageMedia` | **present** |  |
@@ -83,16 +83,16 @@ Status legend: `present` · `partial` · `missing` · `blocked`
 | TG-FOLDER-02 | Create / edit / delete folder | `CreateChatFolder, EditChatFolder, DeleteChatFolder, ReorderChatFolders` | **partial** |  |
 | TG-FOLDER-03 | Folder chat membership | `GetChats(ChatListFolder), AddChatToList` | **present** |  |
 | TG-TOPIC-01 | Forum topics list | `GetForumTopics, ForumTopic` | **present** |  |
-| TG-TOPIC-02 | Create / edit / delete topic | `CreateForumTopic, EditForumTopic, DeleteForumTopic` | **partial** |  |
+| TG-TOPIC-02 | Create / edit / delete topic | `CreateForumTopic, EditForumTopic, DeleteForumTopic` | **present** |  |
 | TG-TOPIC-03 | Send in topic | `SendMessage.topicId=MessageTopicForum` | **present** | topicId always null |
 | TG-BOT-01 | Start bot deep-link | `SendBotStartMessage` | **present** |  |
-| TG-BOT-02 | Inline bots / queries | `GetInlineQueryResults, SendInlineQueryResultMessage` | **missing** |  |
+| TG-BOT-02 | Inline bots / queries | `GetInlineQueryResults, SendInlineQueryResultMessage` | **present** |  |
 | TG-BOT-03 | Callback query buttons | `GetCallbackQueryAnswer, UpdateNewCallbackQuery, ReplyMarkup*` | **present** | replyMarkup ignored |
-| TG-BOT-04 | Web Apps / Mini Apps | `OpenWebApp, CloseWebApp, …` | **missing** |  |
+| TG-BOT-04 | Web Apps / Mini Apps | `OpenWebApp, CloseWebApp, …` | **present** |  |
 | TG-PROFILE-01 | Get / update name + bio | `GetMe, GetUserFullInfo, SetName, SetBio` | **present** |  |
 | TG-PROFILE-02 | Set profile photo | `SetProfilePhoto` | **present** |  |
-| TG-PROFILE-03 | Username / privacy / emoji status | `SetUsername, SetUserPrivacySettingRules, SetEmojiStatus` | **missing** |  |
-| TG-STICKER-CUSTOM | Custom emoji / favorite stickers | `GetCustomEmoji*, AddFavoriteSticker, GetFavoriteStickers` | **missing** |  |
+| TG-PROFILE-03 | Username / privacy / emoji status | `SetUsername, SetUserPrivacySettingRules, SetEmojiStatus` | **partial** |  |
+| TG-STICKER-CUSTOM | Custom emoji / favorite stickers | `GetCustomEmoji*, AddFavoriteSticker, GetFavoriteStickers` | **partial** |  |
 | TG-BACKUP | Local JSON backup export | `exportBackup (app-level)` | **present** | Not TDLib cloud backup |
 | TG-VOIP-01 | 1:1 VoIP calls | `CreateCall, AcceptCall, DiscardCall, SendCall* + tgcalls native` | **blocked** | No tgcalls natives in AAR/app |
 | TG-VOIP-02 | Group calls / video chats | `CreateVideoChat, JoinGroupCall, …` | **blocked** | Requires VoIP stack |
@@ -101,9 +101,9 @@ Status legend: `present` · `partial` · `missing` · `blocked`
 | TG-PUSH | Push / device registration | `RegisterDevice, ProcessPushNotification` | **missing** | App is Tor/foreground-first; document |
 
 ## Coverage summary
-- **present**: 58
+- **present**: 65
 - **partial**: 10
-- **missing**: 9
+- **missing**: 2
 - **blocked**: 5
 
 ## Implementation order (missing → present)
@@ -117,3 +117,4 @@ TG-SECRET-01, TG-MSG-INVOICE, TG-VOIP-01, TG-VOIP-02, TG-PREMIUM-01
 Protocol APIs in `TdLibFacade` / `TelegramProtocol` + native reply UI wire-up.
 IDs moved toward present: TG-AUTH-04, TG-BOT-01, TG-BOT-03, TG-CHAT-DRAFT, TG-CHAT-MARK-UNREAD, TG-CHAT-PIN-MSG, TG-DM-03, TG-FOLDER-01, TG-FOLDER-02, TG-FOLDER-03, TG-GROUP-02, TG-GROUP-03, TG-GROUP-04, TG-GROUP-06, TG-MSG-DICE, TG-MSG-EDIT-CAPTION, TG-MSG-LOCATION, TG-MSG-POLL-STOP, TG-MSG-REPLY, TG-MSG-SCHEDULE, TG-MSG-SILENT, TG-MSG-SPOILER, TG-MSG-VIDEONOTE, TG-REACT-REMOVE, TG-REACT-SYNC, TG-SEARCH-CHAT, TG-SEARCH-GLOBAL, TG-STORIES-01, TG-TOPIC-01, TG-TOPIC-02, TG-TOPIC-03
 
+- Batch 2: albums, live-location edit, group admin add/ban, inline bots, WebApp open, favorites, thread history, username, forum edit/delete.

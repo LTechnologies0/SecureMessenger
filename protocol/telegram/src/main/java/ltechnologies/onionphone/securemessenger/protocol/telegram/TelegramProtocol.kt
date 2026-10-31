@@ -1899,6 +1899,244 @@ class TelegramProtocol @Inject constructor(
         }
     }
 
+    suspend fun sendAlbum(
+        conversationId: String,
+        files: List<Pair<String, String>>,
+        caption: String? = null,
+        options: TelegramSendOptions = TelegramSendOptions(),
+        accountId: String? = null,
+    ): SendResult {
+        if (files.size < 2) return SendResult.Failure("Un album nécessite au moins 2 fichiers")
+        val accId = accountId
+            ?: TdLibMapper.accountIdFromConversation(conversationId)
+            ?: return SendResult.Failure("Invalid conversation")
+        val session = sessions[accId] ?: return SendResult.Failure("Telegram not connected")
+        if (!session.nativeAvailable) return SendResult.Failure("Telegram not connected")
+        val chatId = TdLibMapper.chatIdFromConversation(conversationId)
+            ?: return SendResult.Failure("Invalid conversation")
+        return withContext(session.dispatcher) {
+            try {
+                networkGuard.assertNetworkAllowed()
+                val messages = session.facade.sendMessageAlbum(chatId, files, caption, options)
+                    ?: return@withContext SendResult.Failure("Envoi album échoué")
+                messages.forEach { msg ->
+                    withContext(Dispatchers.IO) {
+                        repository.upsertMessage(TdLibMapper.toMessage(accId, msg))
+                    }
+                }
+                val first = messages.firstOrNull()
+                    ?: return@withContext SendResult.Failure("Album vide")
+                SendResult.Success(TdLibMapper.messageId(conversationId, first.id))
+            } catch (e: NetworkBlockedException) {
+                SendResult.Failure(e.message ?: "Réseau indisponible")
+            }
+        }
+    }
+
+    suspend fun editLiveLocation(
+        conversationId: String,
+        messageId: String,
+        latitude: Double,
+        longitude: Double,
+        livePeriodSec: Int,
+    ): Result<Unit> = tdMessageOp(conversationId, messageId) { facade, chatId, tdId ->
+        facade.editMessageLiveLocation(chatId, tdId, latitude, longitude, livePeriodSec)
+    }
+
+    suspend fun editForumTopic(
+        conversationId: String,
+        topicId: Int,
+        name: String,
+    ): Result<Unit> {
+        val session = sessionForConversation(conversationId)
+            ?: return Result.failure(IllegalStateException("Telegram non connecté"))
+        val chatId = TdLibMapper.chatIdFromConversation(conversationId)
+            ?: return Result.failure(IllegalStateException("Conversation invalide"))
+        return withContext(session.dispatcher) {
+            runCatching {
+                networkGuard.assertNetworkAllowed()
+                session.facade.editForumTopic(chatId, topicId, name)
+                    ?.let { throw IllegalStateException(it) }
+                Unit
+            }
+        }
+    }
+
+    suspend fun deleteForumTopic(conversationId: String, topicId: Int): Result<Unit> {
+        val session = sessionForConversation(conversationId)
+            ?: return Result.failure(IllegalStateException("Telegram non connecté"))
+        val chatId = TdLibMapper.chatIdFromConversation(conversationId)
+            ?: return Result.failure(IllegalStateException("Conversation invalide"))
+        return withContext(session.dispatcher) {
+            runCatching {
+                networkGuard.assertNetworkAllowed()
+                session.facade.deleteForumTopic(chatId, topicId)
+                    ?.let { throw IllegalStateException(it) }
+                Unit
+            }
+        }
+    }
+
+    suspend fun setUsername(accountId: String, username: String): Result<Unit> {
+        val session = sessions[accountId]
+            ?: return Result.failure(IllegalStateException("Telegram non connecté"))
+        return withContext(session.dispatcher) {
+            runCatching {
+                networkGuard.assertNetworkAllowed()
+                session.facade.setUsername(username)?.let { throw IllegalStateException(it) }
+                Unit
+            }
+        }
+    }
+
+    suspend fun addMembers(conversationId: String, userIds: LongArray): Result<Unit> {
+        val session = sessionForConversation(conversationId)
+            ?: return Result.failure(IllegalStateException("Telegram non connecté"))
+        val chatId = TdLibMapper.chatIdFromConversation(conversationId)
+            ?: return Result.failure(IllegalStateException("Conversation invalide"))
+        return withContext(session.dispatcher) {
+            runCatching {
+                networkGuard.assertNetworkAllowed()
+                session.facade.addChatMembers(chatId, userIds)
+                    ?.let { throw IllegalStateException(it) }
+                Unit
+            }
+        }
+    }
+
+    suspend fun banMember(
+        conversationId: String,
+        userId: Long,
+        bannedUntilDate: Int = 0,
+        revokeMessages: Boolean = false,
+    ): Result<Unit> {
+        val session = sessionForConversation(conversationId)
+            ?: return Result.failure(IllegalStateException("Telegram non connecté"))
+        val chatId = TdLibMapper.chatIdFromConversation(conversationId)
+            ?: return Result.failure(IllegalStateException("Conversation invalide"))
+        return withContext(session.dispatcher) {
+            runCatching {
+                networkGuard.assertNetworkAllowed()
+                session.facade.banChatMember(chatId, userId, bannedUntilDate, revokeMessages)
+                    ?.let { throw IllegalStateException(it) }
+                Unit
+            }
+        }
+    }
+
+    data class InlineBotHit(val queryId: Long, val resultId: String, val title: String)
+
+    suspend fun queryInlineBot(
+        conversationId: String,
+        botUserId: Long,
+        query: String,
+    ): Result<List<InlineBotHit>> {
+        val session = sessionForConversation(conversationId)
+            ?: return Result.failure(IllegalStateException("Telegram non connecté"))
+        val chatId = TdLibMapper.chatIdFromConversation(conversationId)
+            ?: return Result.failure(IllegalStateException("Conversation invalide"))
+        return withContext(session.dispatcher) {
+            runCatching {
+                networkGuard.assertNetworkAllowed()
+                val results = session.facade.getInlineQueryResults(botUserId, chatId, query)
+                    ?: throw IllegalStateException("Inline query échouée")
+                results.results?.mapNotNull { item ->
+                    val id = runCatching {
+                        item.javaClass.getField("id").get(item) as? String
+                    }.getOrNull() ?: return@mapNotNull null
+                    val title = runCatching {
+                        item.javaClass.getField("title").get(item) as? String
+                    }.getOrNull().orEmpty().ifBlank { id }
+                    InlineBotHit(results.inlineQueryId, id, title)
+                }.orEmpty()
+            }
+        }
+    }
+
+    suspend fun sendInlineBotResult(
+        conversationId: String,
+        queryId: Long,
+        resultId: String,
+        accountId: String? = null,
+    ): SendResult = sendViaFacade(conversationId, accountId) { facade, chatId ->
+        facade.sendInlineQueryResult(chatId, queryId, resultId)
+    }
+
+    suspend fun listFavoriteStickers(accountId: String): List<TelegramSticker> {
+        val session = sessions[accountId] ?: return emptyList()
+        return withContext(session.dispatcher) {
+            runCatching {
+                networkGuard.assertNetworkAllowed()
+                session.facade.getFavoriteStickers().map { sticker ->
+                    val file = sticker.sticker
+                    var localPath = file?.local?.path?.takeIf { it.isNotBlank() }
+                    if (localPath == null && file != null) {
+                        localPath = session.facade.downloadFile(file.id)?.local?.path
+                            ?.takeIf { it.isNotBlank() }
+                    }
+                    TelegramSticker(
+                        id = sticker.id,
+                        emoji = sticker.emoji.orEmpty().ifBlank { "⭐" },
+                        localPath = localPath,
+                    )
+                }
+            }.getOrElse { emptyList() }
+        }
+    }
+
+    suspend fun addFavoriteSticker(accountId: String, fileId: Int): Result<Unit> {
+        val session = sessions[accountId]
+            ?: return Result.failure(IllegalStateException("Telegram non connecté"))
+        return withContext(session.dispatcher) {
+            runCatching {
+                networkGuard.assertNetworkAllowed()
+                session.facade.addFavoriteSticker(fileId)?.let { throw IllegalStateException(it) }
+                Unit
+            }
+        }
+    }
+
+    suspend fun loadMessageThread(
+        conversationId: String,
+        messageId: String,
+        limit: Int = 50,
+    ): Result<List<Message>> {
+        val session = sessionForConversation(conversationId)
+            ?: return Result.failure(IllegalStateException("Telegram non connecté"))
+        val chatId = TdLibMapper.chatIdFromConversation(conversationId)
+            ?: return Result.failure(IllegalStateException("Conversation invalide"))
+        val accId = TdLibMapper.accountIdFromConversation(conversationId)
+            ?: return Result.failure(IllegalStateException("Compte invalide"))
+        val tdId = messageId.substringAfterLast('_').toLongOrNull()
+            ?: return Result.failure(IllegalStateException("Message invalide"))
+        return withContext(session.dispatcher) {
+            runCatching {
+                networkGuard.assertNetworkAllowed()
+                val msgs = session.facade.getMessageThreadHistory(chatId, tdId, limit = limit)
+                    ?: throw IllegalStateException("Thread introuvable")
+                msgs.map { TdLibMapper.toMessage(accId, it) }
+            }
+        }
+    }
+
+    suspend fun openBotWebApp(
+        conversationId: String,
+        botUserId: Long,
+        url: String,
+    ): Result<Pair<Long, String>> {
+        val session = sessionForConversation(conversationId)
+            ?: return Result.failure(IllegalStateException("Telegram non connecté"))
+        val chatId = TdLibMapper.chatIdFromConversation(conversationId)
+            ?: return Result.failure(IllegalStateException("Conversation invalide"))
+        return withContext(session.dispatcher) {
+            runCatching {
+                networkGuard.assertNetworkAllowed()
+                session.facade.openWebApp(chatId, botUserId, url)
+                    ?: throw IllegalStateException("Ouverture WebApp échouée")
+            }
+        }
+    }
+
     private suspend fun tdMessageOp(
         conversationId: String,
         messageId: String,
