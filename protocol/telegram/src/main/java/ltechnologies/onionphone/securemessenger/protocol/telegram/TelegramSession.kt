@@ -37,10 +37,15 @@ internal class TelegramSession(
     /** Maps TDLib file id → message/attachment ids for [TdApi.UpdateFile] progress. */
     val fileDownloads = ConcurrentHashMap<Int, FileDownloadTarget>()
 
+    /** Latest chat folders from [org.drinkless.tdlib.TdApi.UpdateChatFolders]. */
+    @Volatile
+    var chatFolders: List<TelegramChatFolder> = emptyList()
+
     fun close() {
         facade.disableProxy()
         facade.close()
         fileDownloads.clear()
+        chatFolders = emptyList()
         runCatching { dispatcher.close() }
         runCatching { executor.shutdown() }
     }

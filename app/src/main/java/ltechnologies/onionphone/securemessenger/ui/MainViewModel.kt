@@ -140,6 +140,42 @@ class MainViewModel @Inject constructor(
         }
     }
 
+    /** Telegram native reply via [TdApi.InputMessageReplyToMessage]. */
+    fun sendTelegramReply(
+        conversationId: String,
+        body: String,
+        replyToMessageId: String,
+        silent: Boolean = false,
+        scheduleAtUnixSec: Int? = null,
+        onResult: (ok: Boolean, reason: String?, remappedConversationId: String?) -> Unit,
+    ) {
+        viewModelScope.launch {
+            val tg = telegramProtocol() ?: run {
+                onResult(false, "Telegram indisponible", null)
+                return@launch
+            }
+            val tdReplyId = replyToMessageId.substringAfterLast('_').toLongOrNull()
+            if (tdReplyId == null) {
+                onResult(false, "Message de réponse invalide", null)
+                return@launch
+            }
+            when (
+                val result = tg.sendTextAdvanced(
+                    conversationId = conversationId,
+                    text = body,
+                    options = ltechnologies.onionphone.securemessenger.protocol.telegram.TelegramSendOptions(
+                        replyToMessageId = tdReplyId,
+                        silent = silent,
+                        scheduleAtUnixSec = scheduleAtUnixSec,
+                    ),
+                )
+            ) {
+                is SendResult.Success -> onResult(true, null, result.conversationId)
+                is SendResult.Failure -> onResult(false, result.reason, null)
+            }
+        }
+    }
+
     fun exportBackup(
         accountId: String,
         destinationPath: String,

@@ -113,9 +113,48 @@ object TdLibMapper {
             senderDisplayName = senderLabel(msg.senderId),
             attachments = attachmentsFromContent(msg.content, msgKey),
             kind = kind,
-            payloadJson = payloadJson(msg.content),
+            payloadJson = enrichPayload(msg),
             expireSeconds = expire,
         )
+    }
+
+    /** Content payload + reply / reactions / schedule metadata for UI chips. */
+    fun enrichPayload(msg: TdApi.Message): String? {
+        val base = payloadJson(msg.content)?.let { JSONObject(it) } ?: JSONObject()
+        when (val reply = msg.replyTo) {
+            is TdApi.MessageReplyToMessage -> {
+                base.put("replyToMessageId", reply.messageId)
+                base.put("replyToChatId", reply.chatId)
+            }
+            else -> Unit
+        }
+        msg.schedulingState?.let { base.put("scheduled", true) }
+        if (msg.isPinned) base.put("pinned", true)
+        msg.topicId?.let { topic ->
+            if (topic is TdApi.MessageTopicForum) {
+                base.put("forumTopicId", topic.forumTopicId)
+            }
+        }
+        mergeReactions(base, msg.interactionInfo)
+        return if (base.length() == 0) null else base.toString()
+    }
+
+    fun mergeReactions(json: JSONObject, info: TdApi.MessageInteractionInfo?) {
+        val reactions = info?.reactions?.reactions ?: return
+        val arr = JSONArray()
+        reactions.forEach { reaction ->
+            val emoji = (reaction.type as? TdApi.ReactionTypeEmoji)?.emoji ?: return@forEach
+            arr.put(
+                JSONObject().apply {
+                    put("emoji", emoji)
+                    put("count", reaction.totalCount)
+                    put("chosen", reaction.isChosen)
+                },
+            )
+        }
+        json.put("reactions", arr)
+        info.viewCount.takeIf { it > 0 }?.let { json.put("viewCount", it) }
+        info.forwardCount.takeIf { it > 0 }?.let { json.put("forwardCount", it) }
     }
 
     fun messageKind(content: TdApi.MessageContent): MessageKind = when (content) {
@@ -129,6 +168,7 @@ object TdLibMapper {
         is TdApi.MessageLocation, is TdApi.MessageLiveLocation -> MessageKind.LOCATION
         is TdApi.MessagePoll -> MessageKind.POLL
         is TdApi.MessageContact -> MessageKind.CONTACT
+        is TdApi.MessageDice, is TdApi.MessageAnimatedEmoji -> MessageKind.STICKER
         is TdApi.MessageChatChangeTitle,
         is TdApi.MessageChatAddMembers,
         is TdApi.MessageChatDeleteMember,
@@ -257,6 +297,8 @@ object TdLibMapper {
         is TdApi.MessageVoiceNote -> "[Message vocal]"
         is TdApi.MessageVideoNote -> "[Vidéo ronde]"
         is TdApi.MessageSticker -> content.sticker.emoji.ifBlank { "[Sticker]" }
+        is TdApi.MessageDice -> content.emoji.ifBlank { "🎲" }
+        is TdApi.MessageAnimatedEmoji -> content.emoji.ifBlank { "[Emoji]" }
         is TdApi.MessageAnimation -> content.caption.text.ifBlank { "[GIF]" }
         is TdApi.MessageLocation -> "[Position]"
         is TdApi.MessageLiveLocation -> "[Position en direct]"
