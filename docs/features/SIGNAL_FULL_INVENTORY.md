@@ -116,7 +116,7 @@ Capabilities (`baseSignalCapabilities`): DM/group/media/typing/receipts/E2EE/con
 | SIG-TYP-01 | Typing indicators | `sendTyping` / `sendGroupTyping` | **done** | 1:1 + GV2 |
 | SIG-RCPT-01 | Read receipts outbound | `sendReceipt` | **partial** | 1:1; groups local-only |
 | SIG-RCPT-02 | Delivery receipts inbound | receiptMessage | **done** | |
-| SIG-SEAL-01 | Sealed sender 1:1 | `SealedSenderAccess.forIndividual` + sender cert | **partial** | Needs peer profile key; else identified |
+| SIG-SEAL-01 | Sealed sender 1:1 | `SealedSenderAccess.forIndividual` + sender cert | **partial** | Reads Storage-synced peer keys; one ProfileApi refresh/drop on sealed failure then identified retry |
 | SIG-SEAL-02 | Group send endorsements | `forFanOutGroupSend` / endorsements | **partial** | Fallback fan-out when fetch fails |
 | SIG-STICK-01 | Stickers send | DataMessage.sticker / image | **done** | Cap true |
 | SIG-STICK-02 | Sticker pack CDN fetch/install | `retrieveSticker(Manifest)` | **missing** | No pack browser |

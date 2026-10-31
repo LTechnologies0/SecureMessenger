@@ -17,7 +17,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import org.signal.network.NetworkResult
 import java.io.File
 import java.io.FileInputStream
 import java.util.Optional
@@ -1761,8 +1763,8 @@ class SignalProtocol @Inject constructor(
         }
         configure(builder)
         val dataMessage = builder.build()
-        val sealed = resolveSealedSenderAccess(activeSession, recipient)
-        val result = activeSession.messageSender.sendDataMessage(
+        var sealed = resolveSealedSenderAccess(activeSession, recipient)
+        var result = activeSession.messageSender.sendDataMessage(
             recipient,
             sealed,
             ContentHint.DEFAULT,
@@ -1771,6 +1773,20 @@ class SignalProtocol @Inject constructor(
             true,
             false,
         )
+        // SIG-SEAL-01: one retry after peer profile-key refresh when sealed send fails.
+        if (!result.isSuccess && sealed != SealedSenderAccess.NONE) {
+            noteSealedSenderFailure(recipient.identifier)
+            sealed = resolveSealedSenderAccess(activeSession, recipient)
+            result = activeSession.messageSender.sendDataMessage(
+                recipient,
+                sealed,
+                ContentHint.DEFAULT,
+                dataMessage,
+                SignalServiceMessageSender.IndividualSendEvents.EMPTY,
+                true,
+                false,
+            )
+        }
         if (!result.isSuccess) {
             return SendResult.Failure("Envoi Signal échoué")
         }
@@ -2481,7 +2497,10 @@ class SignalProtocol @Inject constructor(
     }
 
     /**
-     * Uses peer profile key from Storage Service when available; otherwise falls back to identified send.
+     * Uses peer profile key from Storage Service ([SignalStorageSync] → credentialStore)
+     * when available; otherwise falls back to identified send ([SealedSenderAccess.NONE]).
+     * After a sealed-send failure, [noteSealedSenderFailure] triggers one ProfileApi
+     * validation; a stale key is dropped so the next resolve uses identified send.
      */
     private fun resolveSealedSenderAccess(
         activeSession: SignalSessionContext,
@@ -2504,15 +2523,47 @@ class SignalProtocol @Inject constructor(
             )
     }
 
+    /** ACIs whose sealed send failed once — validate/drop stored profile key on next resolve. */
+    private val sealedSenderRefreshNeeded = ConcurrentHashMap.newKeySet<String>()
+
+    private fun noteSealedSenderFailure(aci: String) {
+        sealedSenderRefreshNeeded.add(aci)
+    }
+
     private fun resolveUnidentifiedAccess(
         activeSession: SignalSessionContext,
         recipient: SignalServiceAddress,
         unrestrictedForStory: Boolean,
     ): org.whispersystems.signalservice.api.crypto.UnidentifiedAccess? {
+        val accId = accountId ?: return null
         val aci = recipient.identifier
-        val encoded = credentialStore.get(accountId ?: return null, SignalCredentialKeys.peerProfileKey(aci))
+        val encoded = credentialStore.get(accId, SignalCredentialKeys.peerProfileKey(aci))
             ?: return null
         val profileKey = SignalFeatureHelpers.decodeProfileKey(encoded) ?: return null
+        if (sealedSenderRefreshNeeded.remove(aci)) {
+            val stillValid = runCatching {
+                val peerAci = org.signal.core.models.ServiceId.ACI.parseOrThrow(aci)
+                runBlocking {
+                    when (
+                        val result = activeSession.profileApi.getVersionedProfile(
+                            peerAci,
+                            profileKey,
+                            /* sealedSenderAccess = */ null,
+                        )
+                    ) {
+                        is NetworkResult.Success -> true
+                        else -> {
+                            Timber.d("SIG-SEAL-01 peer profile key stale for %s: %s", aci, result)
+                            false
+                        }
+                    }
+                }
+            }.getOrDefault(false)
+            if (!stillValid) {
+                credentialStore.put(accId, SignalCredentialKeys.peerProfileKey(aci), "")
+                return null
+            }
+        }
         return try {
             val certBytes = activeSession.pushServiceSocket.senderCertificate
             val accessKey = org.whispersystems.signalservice.api.crypto.UnidentifiedAccess.deriveAccessKeyFrom(profileKey)
