@@ -138,6 +138,7 @@ fun ChatScreen(
     var stickerLoading by remember { mutableStateOf(false) }
     var stickerChoices by remember { mutableStateOf<List<TelegramSticker>>(emptyList()) }
     var actionMessage by remember { mutableStateOf<Message?>(null) }
+    var replyToMessage by remember(conversationId) { mutableStateOf<Message?>(null) }
     var editDraft by remember { mutableStateOf("") }
     val allConversations by viewModel.conversations.collectAsState()
     val signalLinkSync = protocol == ProtocolId.SIGNAL &&
@@ -514,34 +515,66 @@ fun ChatScreen(
                             Icon(Icons.Default.Add, contentDescription = "Joindre")
                         }
                     }
-                    OutlinedTextField(
-                        value = draft,
-                        onValueChange = { draft = it },
-                        modifier = Modifier.weight(1f),
-                        placeholder = { Text(chatComposerPlaceholder(protocol)) },
-                        shape = MaterialTheme.shapes.large,
-                        maxLines = 4,
-                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        replyToMessage?.let { reply ->
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Text(
+                                    text = "↩ ${reply.body.take(80)}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                TextButton(onClick = { replyToMessage = null }) {
+                                    Text("Annuler")
+                                }
+                            }
+                        }
+                        OutlinedTextField(
+                            value = draft,
+                            onValueChange = { draft = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            placeholder = { Text(chatComposerPlaceholder(protocol)) },
+                            shape = MaterialTheme.shapes.large,
+                            maxLines = 4,
+                        )
+                    }
                     FilledIconButton(
                         onClick = {
                             if (draft.isNotBlank()) {
-                                viewModel.sendContent(
-                                    conversationId,
-                                    protocol,
-                                    OutgoingContent.Text(
-                                        body = MessageSanitizer.sanitize(draft),
-                                        subject = emailSubject.trim().takeIf { it.isNotEmpty() },
-                                        cc = emailCc.trim().takeIf { it.isNotEmpty() },
-                                        bcc = emailBcc.trim().takeIf { it.isNotEmpty() },
-                                    ),
-                                ) { ok, reason, remapped ->
+                                val replyTarget = replyToMessage
+                                val body = MessageSanitizer.sanitize(draft)
+                                val onDone: (Boolean, String?, String?) -> Unit = { ok, reason, remapped ->
                                     if (ok) {
                                         draft = ""
+                                        replyToMessage = null
                                         sendError = null
                                         remapped?.let(onConversationRemapped)
                                     } else {
                                         sendError = reason?.takeIf { it.isNotBlank() } ?: "Envoi échoué"
                                     }
+                                }
+                                if (protocol == ProtocolId.TELEGRAM && replyTarget != null) {
+                                    viewModel.sendTelegramReply(
+                                        conversationId = conversationId,
+                                        body = body.value,
+                                        replyToMessageId = replyTarget.id,
+                                        onResult = onDone,
+                                    )
+                                } else {
+                                    viewModel.sendContent(
+                                        conversationId,
+                                        protocol,
+                                        OutgoingContent.Text(
+                                            body = body,
+                                            subject = emailSubject.trim().takeIf { it.isNotEmpty() },
+                                            cc = emailCc.trim().takeIf { it.isNotEmpty() },
+                                            bcc = emailBcc.trim().takeIf { it.isNotEmpty() },
+                                        ),
+                                        onResult = onDone,
+                                    )
                                 }
                             }
                         },
@@ -759,17 +792,29 @@ fun ChatScreen(
                             if (capabilities.messageReply) {
                                 TextButton(
                                     onClick = {
-                                        draft = buildString {
-                                            if (msg.body.isNotBlank()) {
-                                                append("> ")
-                                                append(msg.body.lines().joinToString("\n> "))
-                                                append("\n\n")
-                                            }
-                                        } + draft
+                                        if (protocol == ProtocolId.TELEGRAM) {
+                                            replyToMessage = msg
+                                        } else {
+                                            draft = buildString {
+                                                if (msg.body.isNotBlank()) {
+                                                    append("> ")
+                                                    append(msg.body.lines().joinToString("\n> "))
+                                                    append("\n\n")
+                                                }
+                                            } + draft
+                                        }
                                         dialog = ComposerDialog.NONE
                                         actionMessage = null
                                     },
-                                ) { Text("Répondre (citation)") }
+                                ) {
+                                    Text(
+                                        if (protocol == ProtocolId.TELEGRAM) {
+                                            "Répondre"
+                                        } else {
+                                            "Répondre (citation)"
+                                        },
+                                    )
+                                }
                             }
                             if (capabilities.messageForward) {
                                 TextButton(onClick = {
