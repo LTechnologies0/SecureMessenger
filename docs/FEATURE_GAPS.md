@@ -62,9 +62,13 @@
 | ID | Prio | État | Note |
 |----|------|------|------|
 | XP-01 | P2 | **Fait** 1.0.17 | Fingerprint OMEMO |
-| XP-04/05 | P2 | Absent | XEP-0308 / XEP-0444 |
-| XP-07 | P3 | Absent | Jingle |
-| XP-02/03/08–11 | P2 | Absent | MUC config, bookmarks UI, block, avatar, MAM controls |
+| XP-04/05 | P2 | **Fait** parity-xmpp | XEP-0308 edit + XEP-0444 reactions (DM) |
+| XP-DEL | P2 | **Fait** parity-xmpp | XEP-0424 retraction (DM) |
+| XP-07 | P3 | **Blocked** | Jingle / WebRTC |
+| XP-02 | P2 | Partiel | MUC subject/leave/invite/kick/ban API ; config form UI absent |
+| XP-03/08/09 | P2 | **Fait** proto | Bookmarks add/remove, XEP-0191 block, vCard avatar |
+| XP-10/11 | P2 | Partiel | MAM catch-up OK ; prefs UI / presence UI thin |
+| Inventaire | — | `docs/features/XMPP_FULL_INVENTORY.md` | |
 
 ### Email
 | ID | Prio | État | Note |

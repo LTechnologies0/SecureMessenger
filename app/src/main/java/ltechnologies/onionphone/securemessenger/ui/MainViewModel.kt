@@ -227,6 +227,10 @@ class MainViewModel @Inject constructor(
         connectionManager.protocolFor(ProtocolId.MATRIX)
             as? ltechnologies.onionphone.securemessenger.protocol.matrix.MatrixProtocol
 
+    fun xmppProtocol(): ltechnologies.onionphone.securemessenger.protocol.xmpp.XmppProtocol? =
+        connectionManager.protocolFor(ProtocolId.XMPP)
+            as? ltechnologies.onionphone.securemessenger.protocol.xmpp.XmppProtocol
+
     fun votePoll(
         conversationId: String,
         messageId: String,
@@ -254,6 +258,8 @@ class MainViewModel @Inject constructor(
                     matrixProtocol()?.addReaction(conversationId, messageId, emoji)?.isSuccess == true
                 ProtocolId.SIGNAL ->
                     signalProtocol()?.addReaction(conversationId, messageId, emoji)?.isSuccess == true
+                ProtocolId.XMPP ->
+                    xmppProtocol()?.addReaction(conversationId, messageId, emoji)?.isSuccess == true
                 else -> false
             }
             onResult(ok)
@@ -273,6 +279,8 @@ class MainViewModel @Inject constructor(
                     matrixProtocol()?.editMessage(conversationId, messageId, newBody)?.isSuccess == true
                 ProtocolId.TELEGRAM ->
                     telegramProtocol()?.editMessage(conversationId, messageId, newBody)?.isSuccess == true
+                ProtocolId.XMPP ->
+                    xmppProtocol()?.editMessage(conversationId, messageId, newBody)?.isSuccess == true
                 else -> false
             }
             onResult(ok)
@@ -301,6 +309,8 @@ class MainViewModel @Inject constructor(
                     telegramProtocol()?.deleteMessages(conversationId, listOf(messageId))?.isSuccess == true
                 ProtocolId.SIGNAL ->
                     signalProtocol()?.deleteMessage(conversationId, messageId)?.isSuccess == true
+                ProtocolId.XMPP ->
+                    xmppProtocol()?.deleteMessage(conversationId, messageId)?.isSuccess == true
                 else -> false
             }
             onResult(ok)

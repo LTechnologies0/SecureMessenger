@@ -20,10 +20,12 @@ import org.jivesoftware.smack.SmackException
 import org.jivesoftware.smack.chat2.Chat
 import org.jivesoftware.smack.chat2.ChatManager
 import org.jivesoftware.smack.packet.Message as SmackMessage
+import org.jivesoftware.smack.packet.Presence
 import org.jivesoftware.smack.roster.Roster
 import org.jivesoftware.smack.roster.RosterEntry
 import org.jivesoftware.smack.tcp.XMPPTCPConnection
 import org.jivesoftware.smack.tcp.XMPPTCPConnectionConfiguration
+import org.jivesoftware.smackx.blocking.BlockingCommandManager
 import org.jivesoftware.smackx.bookmarks.BookmarkManager
 import org.jivesoftware.smackx.bookmarks.BookmarkedConference
 import org.jivesoftware.smackx.carbons.CarbonManager
@@ -34,12 +36,18 @@ import org.jivesoftware.smackx.chatstates.ChatState
 import org.jivesoftware.smackx.chatstates.ChatStateListener
 import org.jivesoftware.smackx.chatstates.ChatStateManager
 import org.jivesoftware.smackx.delay.packet.DelayInformation
+import org.jivesoftware.smackx.disco.ServiceDiscoveryManager
 import org.jivesoftware.smackx.filetransfer.FileTransferManager
 import org.jivesoftware.smackx.geoloc.GeoLocationManager
 import org.jivesoftware.smackx.geoloc.packet.GeoLocation
 import org.jivesoftware.smackx.httpfileupload.HttpFileUploadManager
 import org.jivesoftware.smackx.httpfileupload.element.Slot
+import org.jivesoftware.smackx.iqlast.LastActivityManager
 import org.jivesoftware.smackx.mam.MamManager
+import org.jivesoftware.smackx.message_correct.element.MessageCorrectExtension
+import org.jivesoftware.smackx.message_fastening.element.FasteningElement
+import org.jivesoftware.smackx.message_retraction.MessageRetractionManager
+import org.jivesoftware.smackx.message_retraction.element.RetractElement
 import org.jivesoftware.smackx.muc.MultiUserChat
 import org.jivesoftware.smackx.muc.MultiUserChatManager
 import org.jivesoftware.smackx.omemo.OmemoManager
@@ -48,6 +56,7 @@ import org.jivesoftware.smackx.ping.PingManager
 import org.jivesoftware.smackx.receipts.DeliveryReceiptManager
 import org.jivesoftware.smackx.receipts.DeliveryReceiptRequest
 import org.jivesoftware.smackx.receipts.ReceiptReceivedListener
+import org.jivesoftware.smackx.sid.element.OriginIdElement
 import org.jivesoftware.smackx.vcardtemp.VCardManager
 import org.jivesoftware.smackx.vcardtemp.packet.VCard
 import org.jxmpp.jid.EntityBareJid
@@ -59,7 +68,8 @@ import ltechnologies.onionphone.securemessenger.core.proxy.SocksEndpointResolver
 /**
  * Smack SDK facade — RFC 6120 JID parsing, RFC 6121 roster, XEP-0313 MAM, XEP-0384 OMEMO,
  * XEP-0045 MUC, XEP-0363 HTTP File Upload, XEP-0085 chat states, XEP-0184 receipts,
- * XEP-0333 chat markers, XEP-0054 vCard, XEP-0080 geolocation.
+ * XEP-0333 chat markers, XEP-0054 vCard, XEP-0080 geolocation, XEP-0308 correction,
+ * XEP-0444 reactions, XEP-0424 retraction, XEP-0191 blocking, XEP-0048 bookmarks.
  */
 class SmackClientFacade(
     private val context: Context,
@@ -119,6 +129,15 @@ class SmackClientFacade(
 
     val geoLocationManager: GeoLocationManager?
         get() = connection?.let { GeoLocationManager.getInstanceFor(it) }
+
+    val blockingManager: BlockingCommandManager?
+        get() = connection?.let { BlockingCommandManager.getInstanceFor(it) }
+
+    val lastActivityManager: LastActivityManager?
+        get() = connection?.let { LastActivityManager.getInstanceFor(it) }
+
+    val messageRetractionManager: MessageRetractionManager?
+        get() = connection?.let { MessageRetractionManager.getInstanceFor(it) }
 
     var omemoHelper: OmemoHelper? = null
         private set
@@ -221,6 +240,16 @@ class SmackClientFacade(
 
         PingManager.getInstanceFor(conn).pingInterval = 60
         ReconnectionManager.getInstanceFor(conn).enableAutomaticReconnection()
+
+        XmppReactionExtension.ensureProviderRegistered()
+        try {
+            val disco = ServiceDiscoveryManager.getInstanceFor(conn)
+            disco.addFeature(MessageCorrectExtension.NAMESPACE)
+            disco.addFeature(XmppReactionExtension.NAMESPACE)
+            disco.addFeature("urn:xmpp:message-retract:0")
+            MessageRetractionManager.getInstanceFor(conn).announceSupport()
+        } catch (_: Exception) {
+        }
 
         try {
             CarbonManager.getInstanceFor(conn).enableCarbons()
@@ -350,6 +379,7 @@ class SmackClientFacade(
                 if (requestReceipts) {
                     attachReceiptExtensions(encrypted)
                 }
+                attachOriginId(encrypted)
                 chat.send(encrypted)
                 return encrypted.stanzaId.orEmpty()
             }
@@ -364,9 +394,218 @@ class SmackClientFacade(
             DeliveryReceiptRequest.addTo(builder)
             builder.addExtension(ChatMarkersElements.MarkableExtension.INSTANCE)
         }
+        OriginIdElement.addTo(builder)
         val message = builder.build()
         chat.send(message)
         return message.stanzaId.orEmpty()
+    }
+
+    /**
+     * XEP-0308 Last Message Correction. Encrypts when OMEMO is required for the peer.
+     * @return stanza id of the correction message
+     */
+    fun sendMessageCorrection(remoteJid: String, originalStanzaId: String, newBody: String): String {
+        val conn = connection ?: throw SmackException.NotConnectedException()
+        require(originalStanzaId.isNotBlank()) { "originalStanzaId blank" }
+        val jid: EntityBareJid = JidCreate.entityBareFrom(remoteJid)
+        val chat = ChatManager.getInstanceFor(conn).chatWith(jid)
+        val correction = MessageCorrectExtension(originalStanzaId)
+        val helper = omemoHelper
+        when (
+            OmemoHelper.decideSend(
+                helperPresent = helper != null,
+                helperReady = helper?.ready == true,
+                peerSupports = helper?.contactSupportsOmemo(remoteJid),
+            )
+        ) {
+            OmemoSendDecision.ENCRYPT -> {
+                val encrypted = helper!!.sendEncrypted(remoteJid, newBody)
+                encrypted.addExtension(correction)
+                attachOriginId(encrypted)
+                chat.send(encrypted)
+                return encrypted.stanzaId.orEmpty()
+            }
+            OmemoSendDecision.BLOCK ->
+                throw IllegalStateException("OMEMO indisponible — correction refusée en clair")
+            OmemoSendDecision.PLAINTEXT -> Unit
+        }
+        val builder = conn.stanzaFactory.buildMessageStanza()
+            .setBody(newBody)
+            .addExtension(correction)
+        OriginIdElement.addTo(builder)
+        val message = builder.build()
+        chat.send(message)
+        return message.stanzaId.orEmpty()
+    }
+
+    /**
+     * XEP-0444 reactions. Sent as a lightweight chat stanza (empty body) even on OMEMO chats —
+     * reactions are metadata, not message content (matches Conversations interoperability).
+     */
+    fun sendReaction(remoteJid: String, targetStanzaId: String, emoji: String): String {
+        val conn = connection ?: throw SmackException.NotConnectedException()
+        require(targetStanzaId.isNotBlank()) { "targetStanzaId blank" }
+        val trimmed = emoji.trim()
+        require(trimmed.isNotEmpty()) { "emoji blank" }
+        XmppReactionExtension.ensureProviderRegistered()
+        val builder = conn.stanzaFactory.buildMessageStanza()
+            .to(JidCreate.entityBareFrom(remoteJid))
+            .ofType(SmackMessage.Type.chat)
+            .addExtension(XmppReactionExtension(targetStanzaId, listOf(trimmed)))
+        OriginIdElement.addTo(builder)
+        val message = builder.build()
+        conn.sendStanza(message)
+        return message.stanzaId.orEmpty()
+    }
+
+    /** XEP-0424 Message Retraction addressed to [remoteJid] (Smack's manager omits `to`). */
+    fun retractMessage(remoteJid: String, originId: String) {
+        val conn = connection ?: throw SmackException.NotConnectedException()
+        require(originId.isNotBlank()) { "originId blank" }
+        val builder = conn.stanzaFactory.buildMessageStanza()
+            .to(JidCreate.entityBareFrom(remoteJid))
+            .ofType(SmackMessage.Type.chat)
+        MessageRetractionManager.addRetractionElementToMessage(OriginIdElement(originId), builder)
+        conn.sendStanza(builder.build())
+    }
+
+    fun blockJids(jids: List<String>) {
+        val manager = blockingManager ?: throw SmackException.NotConnectedException()
+        if (!manager.isSupportedByServer) error("XEP-0191 non supporté par le serveur")
+        manager.blockContacts(jids.map { JidCreate.from(it) })
+    }
+
+    fun unblockJids(jids: List<String>) {
+        val manager = blockingManager ?: throw SmackException.NotConnectedException()
+        if (!manager.isSupportedByServer) error("XEP-0191 non supporté par le serveur")
+        manager.unblockContacts(jids.map { JidCreate.from(it) })
+    }
+
+    fun blockList(): List<String> {
+        val manager = blockingManager ?: return emptyList()
+        if (!manager.isSupportedByServer) return emptyList()
+        return manager.blockList.map { it.toString() }
+    }
+
+    fun addRosterContact(jid: String, name: String?) {
+        val r = roster ?: throw SmackException.NotConnectedException()
+        r.createItemAndRequestSubscription(
+            JidCreate.bareFrom(jid),
+            name?.takeIf { it.isNotBlank() },
+            emptyArray(),
+        )
+    }
+
+    fun removeRosterContact(jid: String) {
+        val r = roster ?: throw SmackException.NotConnectedException()
+        val entry = r.getEntry(JidCreate.bareFrom(jid)) ?: return
+        r.removeEntry(entry)
+    }
+
+    fun peerPresence(jid: String): Presence? =
+        roster?.getPresence(JidCreate.bareFrom(jid))
+
+    fun queryLastActivitySeconds(jid: String): Long? {
+        val manager = lastActivityManager ?: return null
+        return runCatching {
+            manager.getLastActivity(JidCreate.from(jid)).lastActivity
+        }.getOrNull()
+    }
+
+    fun addBookmarkedConference(
+        roomJid: String,
+        name: String?,
+        nickname: String,
+        autoJoin: Boolean = true,
+        password: String? = null,
+    ) {
+        val manager = bookmarkManager ?: throw SmackException.NotConnectedException()
+        manager.addBookmarkedConference(
+            name?.takeIf { it.isNotBlank() } ?: roomJid,
+            JidCreate.entityBareFrom(roomJid),
+            autoJoin,
+            Resourcepart.from(nickname),
+            password,
+        )
+    }
+
+    fun removeBookmarkedConference(roomJid: String) {
+        val manager = bookmarkManager ?: throw SmackException.NotConnectedException()
+        manager.removeBookmarkedConference(JidCreate.entityBareFrom(roomJid))
+    }
+
+    fun loadPeerVCard(jid: String): VCard {
+        val manager = vCardManager ?: throw SmackException.NotConnectedException()
+        return manager.loadVCard(JidCreate.entityBareFrom(jid))
+    }
+
+    fun saveOwnAvatar(jpegOrPngBytes: ByteArray, mimeType: String = "image/jpeg") {
+        val manager = vCardManager ?: throw SmackException.NotConnectedException()
+        val existing = runCatching { manager.loadVCard() }.getOrElse { VCard() }
+        existing.setAvatar(jpegOrPngBytes, mimeType)
+        myBareJid()?.let { existing.setJabberId(it) }
+        manager.saveVCard(existing)
+    }
+
+    fun loadOwnAvatarBytes(): ByteArray? =
+        runCatching { loadOwnVCard().avatar }.getOrNull()
+
+    fun loadPeerAvatarBytes(jid: String): ByteArray? =
+        runCatching { loadPeerVCard(jid).avatar }.getOrNull()
+
+    fun leaveMuc(roomJid: String) {
+        val muc = joinedMucs.remove(roomJid) ?: run {
+            val conn = connection ?: throw SmackException.NotConnectedException()
+            MultiUserChatManager.getInstanceFor(conn)
+                .getMultiUserChat(JidCreate.entityBareFrom(roomJid))
+        }
+        mucMessageListeners.remove(roomJid)?.let { listener ->
+            runCatching { muc.removeMessageListener(listener) }
+        }
+        if (muc.isJoined) {
+            muc.leave()
+        }
+    }
+
+    fun changeMucSubject(roomJid: String, subject: String) {
+        val muc = requireJoinedMuc(roomJid)
+        muc.changeSubject(subject)
+    }
+
+    fun inviteToMuc(roomJid: String, inviteeJid: String, reason: String? = null) {
+        val muc = requireJoinedMuc(roomJid)
+        muc.invite(JidCreate.entityBareFrom(inviteeJid), reason.orEmpty())
+    }
+
+    fun mucOccupantJids(roomJid: String): List<String> {
+        val muc = joinedMucs[roomJid] ?: return emptyList()
+        return muc.occupants.map { it.toString() }
+    }
+
+    fun createOrJoinMuc(roomJid: String, nickname: String) {
+        val conn = connection ?: throw SmackException.NotConnectedException()
+        val muc = MultiUserChatManager.getInstanceFor(conn)
+            .getMultiUserChat(JidCreate.entityBareFrom(roomJid))
+        muc.createOrJoin(Resourcepart.from(nickname))
+        joinedMucs[roomJid] = muc
+    }
+
+    fun kickMucParticipant(roomJid: String, nick: String, reason: String? = null) {
+        requireJoinedMuc(roomJid).kickParticipant(Resourcepart.from(nick), reason.orEmpty())
+    }
+
+    fun banMucUser(roomJid: String, bareJid: String, reason: String? = null) {
+        requireJoinedMuc(roomJid).banUser(JidCreate.bareFrom(bareJid), reason.orEmpty())
+    }
+
+    private fun requireJoinedMuc(roomJid: String): MultiUserChat {
+        joinedMucs[roomJid]?.let { return it }
+        val conn = connection ?: throw SmackException.NotConnectedException()
+        val muc = MultiUserChatManager.getInstanceFor(conn)
+            .getMultiUserChat(JidCreate.entityBareFrom(roomJid))
+        if (!muc.isJoined) error("MUC non rejoint: $roomJid")
+        joinedMucs[roomJid] = muc
+        return muc
     }
 
     fun sendMucMessage(roomJid: String, body: String): String {
@@ -385,6 +624,7 @@ class SmackClientFacade(
         ) {
             OmemoSendDecision.ENCRYPT -> {
                 val encrypted = helper!!.encryptMuc(muc, body)
+                attachOriginId(encrypted)
                 muc.sendMessage(encrypted.asBuilder())
                 return encrypted.stanzaId.orEmpty()
             }
@@ -395,7 +635,9 @@ class SmackClientFacade(
             OmemoSendDecision.PLAINTEXT -> Unit
         }
         val conn = connection ?: throw SmackException.NotConnectedException()
-        val message = conn.stanzaFactory.buildMessageStanza().setBody(body).build()
+        val builder = conn.stanzaFactory.buildMessageStanza().setBody(body)
+        OriginIdElement.addTo(builder)
+        val message = builder.build()
         muc.sendMessage(message.asBuilder())
         return message.stanzaId.orEmpty()
     }
@@ -606,6 +848,21 @@ class SmackClientFacade(
         if (ChatMarkersElements.MarkableExtension.from(message) == null) {
             message.addExtension(ChatMarkersElements.MarkableExtension.INSTANCE)
         }
+    }
+
+    private fun attachOriginId(message: SmackMessage) {
+        if (OriginIdElement.hasOriginId(message)) return
+        val id = message.stanzaId?.takeIf { it.isNotBlank() } ?: return
+        message.addExtension(OriginIdElement(id))
+    }
+
+    /** XEP-0424: fastening that wraps a retract for [originId], if present. */
+    fun extractRetractionOriginId(message: SmackMessage): String? {
+        if (!FasteningElement.hasFasteningElement(message)) return null
+        val fastening = message.getExtension(FasteningElement::class.java) ?: return null
+        val hasRetract = fastening.wrappedPayloads.any { it is RetractElement }
+        if (!hasRetract) return null
+        return fastening.referencedStanzasOriginId?.id?.takeIf { it.isNotBlank() }
     }
 
     companion object {
