@@ -36,6 +36,41 @@ class EmailAddressTest {
     }
 
     @Test
+    fun specialFolderCandidatesCoverK9Roles() {
+        assertTrue(ImapFolderNames.DRAFTS_CANDIDATES.contains("Drafts"))
+        assertTrue(ImapFolderNames.TRASH_CANDIDATES.contains("Trash"))
+        assertTrue(ImapFolderNames.ARCHIVE_CANDIDATES.contains("Archive"))
+        assertTrue(ImapFolderNames.JUNK_CANDIDATES.contains("Junk"))
+        assertEquals(ImapFolderNames.Role.SENT, ImapFolderNames.roleFromName("[Gmail]/Sent Mail"))
+        assertEquals(ImapFolderNames.Role.DRAFTS, ImapFolderNames.roleFromName("Drafts"))
+        assertEquals(ImapFolderNames.Role.TRASH, ImapFolderNames.roleFromName("INBOX.Trash"))
+    }
+
+    @Test
+    fun accountConfigPersistsIdentityAndSpecialFolders() {
+        val cfg = EmailAccountConfig(
+            email = "a@example.com",
+            password = "x",
+            storeKind = EmailStoreKind.IMAP,
+            fromDisplayName = "Alice",
+            draftsFolder = "Drafts",
+            trashFolder = "Trash",
+            imapHost = "imap.example.com",
+            smtpHost = "smtp.example.com",
+        )
+        val secrets = cfg.toSecrets()
+        val roundTrip = EmailAccountConfig.fromSecrets(secrets)!!
+        assertEquals("Alice", roundTrip.fromDisplayName)
+        assertEquals("Drafts", roundTrip.draftsFolder)
+        assertEquals("Trash", roundTrip.trashFolder)
+    }
+
+    @Test
+    fun stripHtmlRemovesTags() {
+        assertEquals("Hello world", MimeMapper.stripHtml("<b>Hello</b> <i>world</i>"))
+    }
+
+    @Test
     fun parseListSplitsCc() {
         assertEquals(
             listOf("a@example.com", "b@example.org"),

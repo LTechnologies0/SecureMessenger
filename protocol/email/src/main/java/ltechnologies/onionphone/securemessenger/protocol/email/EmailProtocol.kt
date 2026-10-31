@@ -105,6 +105,107 @@ class EmailProtocol @Inject constructor(
     fun hasImapSentFolder(accountId: String): Boolean =
         credentialStore.get(accountId, EmailCredentialKeys.SENT_FOLDER)?.isNotBlank() == true
 
+    fun hasImapDraftsFolder(accountId: String): Boolean =
+        credentialStore.get(accountId, EmailCredentialKeys.DRAFTS_FOLDER)?.isNotBlank() == true
+
+    fun hasImapTrashFolder(accountId: String): Boolean =
+        credentialStore.get(accountId, EmailCredentialKeys.TRASH_FOLDER)?.isNotBlank() == true
+
+    /** EM-FLD-02: list IMAP mailboxes with SPECIAL-USE / heuristic roles. */
+    suspend fun listMailboxes(accountId: String): List<ImapFolderNames.MailboxInfo> =
+        withContext(Dispatchers.IO) {
+            val session = sessions[accountId] ?: return@withContext emptyList()
+            if (session.config.storeKind != EmailStoreKind.IMAP) return@withContext emptyList()
+            imapEngines[accountId]?.listMailboxes(session).orEmpty()
+        }
+
+    /** EM-SYNC-04: bounded progressive older IMAP backfill (chunk, not full archive). */
+    suspend fun backfillOlder(accountId: String, chunkSize: Int = 50): Int =
+        withContext(Dispatchers.IO) {
+            val session = sessions[accountId] ?: return@withContext 0
+            if (session.config.storeKind != EmailStoreKind.IMAP) return@withContext 0
+            imapEngines[accountId]?.backfillOlder(session, chunkSize.coerceIn(10, 100)) ?: 0
+        }
+
+    /** EM-CMP-12: APPEND draft to Drafts. */
+    suspend fun saveDraft(
+        accountId: String,
+        to: List<String>,
+        subject: String,
+        body: String,
+        cc: List<String> = emptyList(),
+        bcc: List<String> = emptyList(),
+    ): Boolean = withContext(Dispatchers.IO) {
+        val session = sessions[accountId] ?: return@withContext false
+        if (session.config.storeKind != EmailStoreKind.IMAP) return@withContext false
+        val angus = session.angusSession ?: return@withContext false
+        val mime = MimeMapper.buildMime(
+            session = angus,
+            from = session.config.email,
+            to = to.map { EmailAddress.requireValid(it) },
+            subject = subject,
+            body = body,
+            cc = cc.map { EmailAddress.requireValid(it) },
+            bcc = bcc.map { EmailAddress.requireValid(it) },
+            fromPersonal = session.config.fromDisplayName,
+            draft = true,
+        )
+        imapEngines[accountId]?.saveDraft(session, mime) == true
+    }
+
+    /** EM-FLD-06 / EM-MISC-04: move messages to Trash by Message-ID. */
+    suspend fun trashMessages(accountId: String, messageIds: Collection<String>): Int =
+        withContext(Dispatchers.IO) {
+            val session = sessions[accountId] ?: return@withContext 0
+            when (session.config.storeKind) {
+                EmailStoreKind.IMAP -> imapEngines[accountId]?.trashMessages(session, messageIds) ?: 0
+                EmailStoreKind.JMAP -> session.jmapClient?.trashByMessageIds(messageIds) ?: 0
+                EmailStoreKind.POP3 -> 0
+            }
+        }
+
+    /** EM-MISC-04: move to an arbitrary IMAP folder (e.g. Archive). */
+    suspend fun moveMessages(
+        accountId: String,
+        messageIds: Collection<String>,
+        destFolder: String,
+    ): Int = withContext(Dispatchers.IO) {
+        val session = sessions[accountId] ?: return@withContext 0
+        if (session.config.storeKind != EmailStoreKind.IMAP) return@withContext 0
+        imapEngines[accountId]?.moveMessages(session, messageIds, destFolder) ?: 0
+    }
+
+    /** EM-FLAG-02 */
+    suspend fun setFlagged(accountId: String, messageIds: Collection<String>, flagged: Boolean): Int =
+        withContext(Dispatchers.IO) {
+            val session = sessions[accountId] ?: return@withContext 0
+            if (session.config.storeKind != EmailStoreKind.IMAP) return@withContext 0
+            imapEngines[accountId]?.setFlagged(session, messageIds, flagged) ?: 0
+        }
+
+    /** EM-SRCH-02 / EM-SRCH-03 */
+    suspend fun searchMailbox(
+        accountId: String,
+        query: String,
+        limit: Int = 50,
+    ): List<ImapMailboxOps.SearchHit> = withContext(Dispatchers.IO) {
+        val session = sessions[accountId] ?: return@withContext emptyList()
+        when (session.config.storeKind) {
+            EmailStoreKind.IMAP ->
+                imapEngines[accountId]?.search(session, query, limit = limit).orEmpty()
+            EmailStoreKind.JMAP ->
+                session.jmapClient?.search(query, limit).orEmpty().map {
+                    ImapMailboxOps.SearchHit(
+                        uid = null,
+                        messageId = it,
+                        subject = null,
+                        from = null,
+                    )
+                }
+            EmailStoreKind.POP3 -> emptyList()
+        }
+    }
+
     override fun capabilitiesFor(accountId: String?): ProtocolCapabilities {
         if (accountId == null) return capabilities
         val session = sessions[accountId] ?: return baseCapabilities.copy(mediaSend = false)
@@ -395,6 +496,16 @@ class EmailProtocol @Inject constructor(
             }
         }
 
+        // EM-FLAG-04: best-effort \Answered on the replied-to message.
+        if (result is SendResult.Success &&
+            session.config.storeKind == EmailStoreKind.IMAP &&
+            !inReplyTo.isNullOrBlank()
+        ) {
+            runCatching {
+                imapEngines[session.accountId]?.markAnswered(session, listOf(inReplyTo))
+            }
+        }
+
         if (result is SendResult.Success) {
             val messageId = result.messageId
             val root = inReplyTo ?: messageId
@@ -529,7 +640,11 @@ class EmailProtocol @Inject constructor(
         )
         return try {
             when (session.config.storeKind) {
-                EmailStoreKind.IMAP -> imapEngines[accountId]?.syncFolder(session)
+                EmailStoreKind.IMAP -> {
+                    // Incremental new mail, then one bounded older chunk (not full archive).
+                    imapEngines[accountId]?.syncFolder(session)
+                    imapEngines[accountId]?.backfillOlder(session, chunkSize = 50)
+                }
                 EmailStoreKind.POP3 -> pop3Engines[accountId]?.sync(session)
                 EmailStoreKind.JMAP -> syncJmap(session)
             }

@@ -125,6 +125,93 @@ class JmapClient(
         }
     }
 
+    /** EM-SRCH-03: Email/query text filter; returns Message-ID header values when present. */
+    fun search(query: String, limit: Int = 50): List<String> {
+        val s = session ?: return emptyList()
+        val q = query.trim()
+        if (q.isEmpty()) return emptyList()
+        val mailboxId = s.inboxId ?: return emptyList()
+        val call = jmapEnvelope(
+            method = "Email/query",
+            args = buildJsonObject {
+                put("accountId", s.accountId)
+                put(
+                    "filter",
+                    buildJsonObject {
+                        put("inMailbox", mailboxId)
+                        put("text", q)
+                    },
+                )
+                put(
+                    "sort",
+                    buildJsonArray {
+                        add(buildJsonObject {
+                            put("property", "receivedAt")
+                            put("isAscending", false)
+                        })
+                    },
+                )
+                put("limit", limit)
+            },
+            usingSubmission = false,
+        )
+        val payload = firstMethodPayload(postApi(s.apiUrl, call)) ?: return emptyList()
+        val ids = payload["ids"]?.jsonArray
+            ?.mapNotNull { it.jsonPrimitive.contentOrNull }
+            .orEmpty()
+        return getEmails(ids).mapNotNull { it.messageId?.firstOrNull() ?: it.id }
+    }
+
+    /** Move emails into Trash by matching Message-ID headers in a recent inbox window. */
+    fun trashByMessageIds(messageIds: Collection<String>): Int {
+        if (messageIds.isEmpty()) return 0
+        val s = session ?: return 0
+        val trashId = s.trashId ?: return 0
+        val inboxId = s.inboxId
+        val want = messageIds.map { EmailThreading.normalizeMessageId(it) }.toSet()
+        val recent = listRecentEmailIds(100)
+        val emails = getEmails(recent)
+        val targets = emails.filter { email ->
+            email.messageId.orEmpty().any { mid ->
+                EmailThreading.normalizeMessageId(mid) in want
+            }
+        }
+        if (targets.isEmpty()) return 0
+        val call = jmapEnvelope(
+            method = "Email/set",
+            args = buildJsonObject {
+                put("accountId", s.accountId)
+                put(
+                    "update",
+                    buildJsonObject {
+                        targets.forEach { email ->
+                            put(
+                                email.id,
+                                buildJsonObject {
+                                    put(
+                                        "mailboxIds",
+                                        buildJsonObject {
+                                            put(trashId, true)
+                                            if (inboxId != null) put(inboxId, false)
+                                        },
+                                    )
+                                },
+                            )
+                        }
+                    },
+                )
+            },
+            usingSubmission = false,
+        )
+        return try {
+            jmapBatchFailure(postApi(s.apiUrl, call))?.let { return 0 }
+            targets.size
+        } catch (e: Exception) {
+            Timber.w(e, "JMAP trash failed")
+            0
+        }
+    }
+
     fun submit(
         to: List<String>,
         subject: String,
@@ -344,6 +431,10 @@ class JmapClient(
             when (role) {
                 "inbox" -> state.inboxId = id
                 "drafts" -> state.draftsId = id
+                "sent" -> state.sentId = id
+                "trash" -> state.trashId = id
+                "archive" -> state.archiveId = id
+                "junk" -> state.junkId = id
             }
         }
         if (state.inboxId == null) {
@@ -433,6 +524,10 @@ private data class JmapSessionState(
     val accountId: String,
     var inboxId: String? = null,
     var draftsId: String? = null,
+    var sentId: String? = null,
+    var trashId: String? = null,
+    var archiveId: String? = null,
+    var junkId: String? = null,
     var identityId: String? = null,
 )
 

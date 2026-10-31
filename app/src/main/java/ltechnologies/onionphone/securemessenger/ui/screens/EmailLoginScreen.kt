@@ -18,6 +18,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -26,6 +27,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -63,6 +65,7 @@ fun EmailLoginScreen(
     var smtpSecurity by remember { mutableStateOf(MailSecurity.SSL) }
     var jmapSessionUrl by remember { mutableStateOf("") }
     var folder by remember { mutableStateOf("INBOX") }
+    var pop3LeaveOnServer by remember { mutableStateOf(true) }
 
     var status by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
@@ -176,6 +179,17 @@ fun EmailLoginScreen(
                 OutlinedTextField(pop3Host, { pop3Host = it }, label = { Text("Hôte POP3") }, modifier = Modifier.fillMaxWidth())
                 OutlinedTextField(pop3Port, { pop3Port = it }, label = { Text("Port POP3") }, modifier = Modifier.fillMaxWidth())
                 SecurityChips("Sécurité POP3", pop3Security) { pop3Security = it }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("Laisser sur le serveur", style = MaterialTheme.typography.bodyMedium)
+                    Switch(
+                        checked = pop3LeaveOnServer,
+                        onCheckedChange = { pop3LeaveOnServer = it },
+                    )
+                }
             }
             EmailStoreKind.JMAP -> {
                 OutlinedTextField(
@@ -211,6 +225,9 @@ fun EmailLoginScreen(
                     put(EmailCredentialKeys.PASSWORD, password)
                     put(EmailCredentialKeys.STORE_KIND, storeKind.name)
                     put(EmailCredentialKeys.FOLDER, folder.ifBlank { "INBOX" })
+                    if (displayName.isNotBlank()) {
+                        put(EmailCredentialKeys.FROM_DISPLAY_NAME, displayName.trim())
+                    }
                     when (storeKind) {
                         EmailStoreKind.IMAP -> {
                             put(EmailCredentialKeys.IMAP_HOST, imapHost.trim())
@@ -221,7 +238,10 @@ fun EmailLoginScreen(
                             put(EmailCredentialKeys.POP3_HOST, pop3Host.trim())
                             put(EmailCredentialKeys.POP3_PORT, pop3Port.trim())
                             put(EmailCredentialKeys.POP3_SECURITY, pop3Security.name)
-                            put(EmailCredentialKeys.POP3_LEAVE_ON_SERVER, "true")
+                            put(
+                                EmailCredentialKeys.POP3_LEAVE_ON_SERVER,
+                                pop3LeaveOnServer.toString(),
+                            )
                         }
                         EmailStoreKind.JMAP -> {
                             put(EmailCredentialKeys.JMAP_SESSION_URL, jmapSessionUrl.trim())

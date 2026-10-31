@@ -38,6 +38,7 @@ class SmtpSender {
                 inReplyTo = inReplyTo,
                 references = references,
                 attachments = attachments,
+                fromPersonal = session.config.fromDisplayName,
             )
             if (!session.smtpAuthenticated && !session.reconnectSmtp()) {
                 return SendResult.Failure("SMTP non connecté (réessayez ou vérifiez le serveur sortant)")
@@ -45,6 +46,16 @@ class SmtpSender {
             transport.sendMessage(mime, mime.allRecipients)
             val messageId = mime.messageID?.let { EmailThreading.normalizeMessageId(it) }
                 ?: "sent-${System.currentTimeMillis()}"
+            // K-9 / Thunderbird: upload a copy to Sent when IMAP (best-effort).
+            if (session.config.storeKind == EmailStoreKind.IMAP) {
+                runCatching {
+                    val sent = session.config.sentFolder
+                        ?: ImapFolderNames.detectSentFolder(session.store ?: return@runCatching)
+                    if (sent != null) {
+                        ImapMailboxOps.appendMime(session, sent, mime)
+                    }
+                }.onFailure { Timber.d(it, "APPEND Sent skipped") }
+            }
             SendResult.Success(messageId)
         } catch (e: IllegalArgumentException) {
             SendResult.Failure(e.message ?: "Invalid recipient")
