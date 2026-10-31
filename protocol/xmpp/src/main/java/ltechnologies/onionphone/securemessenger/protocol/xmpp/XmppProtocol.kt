@@ -47,6 +47,7 @@ import org.jivesoftware.smackx.chat_markers.ChatMarkersState
 import org.jivesoftware.smackx.chat_markers.element.ChatMarkersElements
 import org.jivesoftware.smackx.chatstates.ChatState
 import org.jivesoftware.smackx.geoloc.packet.GeoLocation
+import org.jivesoftware.smackx.message_correct.element.MessageCorrectExtension
 import org.jxmpp.jid.Jid
 import org.json.JSONObject
 import timber.log.Timber
@@ -79,9 +80,9 @@ class XmppProtocol @Inject constructor(
         ephemeralMessages = false,
         messageHistory = true,
         backupExport = true,
-        reactions = false,
-        messageEdit = false,
-        messageDelete = false,
+        reactions = true,
+        messageEdit = true,
+        messageDelete = true,
         messageForward = false,
         messageReply = true,
         localChatListControls = true,
@@ -394,6 +395,31 @@ class XmppProtocol @Inject constructor(
         remoteJid: String,
         smackMessage: SmackMessage,
     ) {
+        XmppReactionExtension.ensureProviderRegistered()
+        val reaction = XmppReactionExtension.from(smackMessage)
+        if (reaction != null && reaction.targetId.isNotBlank() && reaction.reactions.isNotEmpty()) {
+            applyInboundReaction(accId, remoteJid, reaction)
+            return
+        }
+        val retractOrigin = smack.extractRetractionOriginId(smackMessage)
+        if (!retractOrigin.isNullOrBlank()) {
+            applyInboundRetraction(accId, remoteJid, retractOrigin)
+            return
+        }
+        val correction = MessageCorrectExtension.from(smackMessage)
+        if (correction != null) {
+            val newBody = smackMessage.body?.takeIf { it.isNotBlank() }
+                ?: OmemoHelper.unwrapChatBody(
+                    smack.omemoHelper,
+                    remoteJid,
+                    smackMessage,
+                    decryptOmemo = smack.omemoHelper?.ready == true,
+                )
+            if (!newBody.isNullOrBlank()) {
+                applyInboundCorrection(accId, remoteJid, correction.idInitialMessage, newBody)
+                return
+            }
+        }
         val geo = GeoLocation.from(smackMessage)
         if (geo != null && geo.lat != null && geo.lon != null) {
             persistStructuredIncoming(
@@ -446,6 +472,23 @@ class XmppProtocol @Inject constructor(
         body: String,
         outgoing: Boolean,
     ) {
+        XmppReactionExtension.ensureProviderRegistered()
+        // OMEMO live path decrypts first then lands here — still apply XEP-0308 / 0444 / 0424.
+        val reaction = XmppReactionExtension.from(smackMessage)
+        if (reaction != null && reaction.targetId.isNotBlank() && reaction.reactions.isNotEmpty()) {
+            applyInboundReaction(accId, remoteJid, reaction)
+            return
+        }
+        val retractOrigin = smack.extractRetractionOriginId(smackMessage)
+        if (!retractOrigin.isNullOrBlank()) {
+            applyInboundRetraction(accId, remoteJid, retractOrigin)
+            return
+        }
+        val correction = MessageCorrectExtension.from(smackMessage)
+        if (correction != null && body.isNotBlank()) {
+            applyInboundCorrection(accId, remoteJid, correction.idInitialMessage, body)
+            return
+        }
         val convId = conversationId(accId, remoteJid)
         val ts = SmackClientFacade.extractDelayTimestamp(smackMessage) ?: System.currentTimeMillis()
         val myJid = smack.myBareJid()
@@ -539,6 +582,293 @@ class XmppProtocol @Inject constructor(
             if (!helper.ready) error("OMEMO pas prêt")
             helper.fingerprintSummary(conv.remoteId)
         }
+    }
+
+    /** XEP-0308 Last Message Correction. */
+    suspend fun editMessage(
+        conversationId: String,
+        messageId: String,
+        newBody: String,
+        accountId: String? = null,
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            networkGuard.assertNetworkAllowed()
+            val (accId, smack, remoteJid) = resolveSession(conversationId, accountId)
+            val original = repository.getMessage(messageId) ?: error("Message introuvable")
+            val stanzaId = stanzaIdFromMessageKey(conversationId, messageId)
+                ?: error("Identifiant stanza manquant")
+            if (smack.isMucRoom(remoteJid)) {
+                error("Correction XEP-0308 supportée en DM uniquement pour l’instant")
+            }
+            smack.sendMessageCorrection(remoteJid, stanzaId, newBody)
+            val payload = runCatching { JSONObject(original.payloadJson ?: "{}") }
+                .getOrElse { JSONObject() }
+                .put("edited", true)
+                .put("correctedStanzaId", stanzaId)
+            repository.upsertMessage(
+                original.copy(body = newBody, payloadJson = payload.toString()),
+            )
+        }
+    }
+
+    /** XEP-0444 Message Reactions. */
+    suspend fun addReaction(
+        conversationId: String,
+        messageId: String,
+        emoji: String,
+        accountId: String? = null,
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            networkGuard.assertNetworkAllowed()
+            val (accId, smack, remoteJid) = resolveSession(conversationId, accountId)
+            val stanzaId = stanzaIdFromMessageKey(conversationId, messageId)
+                ?: error("Identifiant stanza manquant")
+            if (smack.isMucRoom(remoteJid)) {
+                error("Réactions XMPP supportées en DM uniquement pour l’instant")
+            }
+            smack.sendReaction(remoteJid, stanzaId, emoji)
+            mergeReactionPayload(messageId, emoji.trim())
+        }
+    }
+
+    /** XEP-0424 Message Retraction. */
+    suspend fun deleteMessage(
+        conversationId: String,
+        messageId: String,
+        accountId: String? = null,
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            networkGuard.assertNetworkAllowed()
+            val (_, smack, remoteJid) = resolveSession(conversationId, accountId)
+            val originId = stanzaIdFromMessageKey(conversationId, messageId)
+                ?: error("Identifiant stanza manquant")
+            if (smack.isMucRoom(remoteJid)) {
+                error("Rétraction XMPP supportée en DM uniquement pour l’instant")
+            }
+            smack.retractMessage(remoteJid, originId)
+            repository.deleteMessages(listOf(messageId))
+        }
+    }
+
+    suspend fun blockContact(accountId: String, jid: String): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                networkGuard.assertNetworkAllowed()
+                val smack = sessions[accountId] ?: error("XMPP non connecté")
+                smack.blockJids(listOf(jid))
+            }
+        }
+
+    suspend fun unblockContact(accountId: String, jid: String): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                networkGuard.assertNetworkAllowed()
+                val smack = sessions[accountId] ?: error("XMPP non connecté")
+                smack.unblockJids(listOf(jid))
+            }
+        }
+
+    suspend fun listBlocked(accountId: String): Result<List<String>> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val smack = sessions[accountId] ?: error("XMPP non connecté")
+                smack.blockList()
+            }
+        }
+
+    suspend fun addContact(accountId: String, jid: String, name: String?): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                networkGuard.assertNetworkAllowed()
+                val smack = sessions[accountId] ?: error("XMPP non connecté")
+                smack.addRosterContact(jid, name)
+                syncRoster(accountId, smack)
+            }
+        }
+
+    suspend fun removeContact(accountId: String, jid: String): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                networkGuard.assertNetworkAllowed()
+                val smack = sessions[accountId] ?: error("XMPP non connecté")
+                smack.removeRosterContact(jid)
+                syncRoster(accountId, smack)
+            }
+        }
+
+    suspend fun bookmarkMuc(
+        accountId: String,
+        roomJid: String,
+        name: String? = null,
+        autoJoin: Boolean = true,
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            networkGuard.assertNetworkAllowed()
+            val smack = sessions[accountId] ?: error("XMPP non connecté")
+            val nick = smack.myBareJid()?.substringBefore('@') ?: "SecureMessenger"
+            smack.addBookmarkedConference(roomJid, name, nick, autoJoin)
+            if (autoJoin) {
+                smack.joinMuc(roomJid, nick) { message ->
+                    scope.launch { handleIncoming(accountId, smack, roomJid, message) }
+                }
+            }
+            syncRoster(accountId, smack)
+        }
+    }
+
+    suspend fun unbookmarkMuc(accountId: String, roomJid: String): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                networkGuard.assertNetworkAllowed()
+                val smack = sessions[accountId] ?: error("XMPP non connecté")
+                smack.removeBookmarkedConference(roomJid)
+            }
+        }
+
+    suspend fun saveAvatar(accountId: String, bytes: ByteArray, mimeType: String = "image/jpeg"): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                networkGuard.assertNetworkAllowed()
+                val smack = sessions[accountId] ?: error("XMPP non connecté")
+                smack.saveOwnAvatar(bytes, mimeType)
+            }
+        }
+
+    suspend fun fetchPeerAvatar(accountId: String, jid: String): Result<String?> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                networkGuard.assertNetworkAllowed()
+                val smack = sessions[accountId] ?: error("XMPP non connecté")
+                val bytes = smack.loadPeerAvatarBytes(jid) ?: return@runCatching null
+                val dir = java.io.File(context.filesDir, "xmpp_avatars/$accountId")
+                dir.mkdirs()
+                val dest = java.io.File(dir, "${jid.hashCode()}.bin")
+                dest.writeBytes(bytes)
+                val contacts = repository.observeContacts(accountId).first()
+                contacts.firstOrNull { it.remoteId == jid }?.let { contact ->
+                    repository.replaceContacts(
+                        accountId,
+                        contacts.map {
+                            if (it.remoteId == jid) it.copy(avatarLocalPath = dest.absolutePath) else it
+                        },
+                    )
+                }
+                dest.absolutePath
+            }
+        }
+
+    suspend fun changeMucSubject(conversationId: String, subject: String, accountId: String? = null): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                networkGuard.assertNetworkAllowed()
+                val (_, smack, remoteJid) = resolveSession(conversationId, accountId)
+                smack.changeMucSubject(remoteJid, subject)
+            }
+        }
+
+    suspend fun leaveMuc(conversationId: String, accountId: String? = null): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                networkGuard.assertNetworkAllowed()
+                val (accId, smack, remoteJid) = resolveSession(conversationId, accountId)
+                smack.leaveMuc(remoteJid)
+                runCatching { smack.removeBookmarkedConference(remoteJid) }
+                accId
+            }.map { }
+        }
+
+    suspend fun inviteToMuc(
+        conversationId: String,
+        inviteeJid: String,
+        reason: String? = null,
+        accountId: String? = null,
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            networkGuard.assertNetworkAllowed()
+            val (_, smack, remoteJid) = resolveSession(conversationId, accountId)
+            smack.inviteToMuc(remoteJid, inviteeJid, reason)
+        }
+    }
+
+    private suspend fun applyInboundReaction(
+        accId: String,
+        remoteJid: String,
+        reaction: XmppReactionExtension,
+    ) {
+        val convId = conversationId(accId, remoteJid)
+        val target = findStoredMessage(convId, reaction.targetId) ?: return
+        reaction.reactions.forEach { mergeReactionPayload(target.id, it) }
+    }
+
+    private suspend fun applyInboundCorrection(
+        accId: String,
+        remoteJid: String,
+        originalStanzaId: String,
+        newBody: String,
+    ) {
+        val convId = conversationId(accId, remoteJid)
+        val target = findStoredMessage(convId, originalStanzaId) ?: return
+        val payload = runCatching { JSONObject(target.payloadJson ?: "{}") }
+            .getOrElse { JSONObject() }
+            .put("edited", true)
+        repository.upsertMessage(target.copy(body = newBody, payloadJson = payload.toString()))
+    }
+
+    private suspend fun applyInboundRetraction(
+        accId: String,
+        remoteJid: String,
+        originId: String,
+    ) {
+        val convId = conversationId(accId, remoteJid)
+        val target = findStoredMessage(convId, originId) ?: return
+        repository.deleteMessages(listOf(target.id))
+    }
+
+    private suspend fun findStoredMessage(conversationId: String, stanzaId: String): Message? {
+        if (stanzaId.isBlank()) return null
+        return repository.getMessage("${conversationId}_$stanzaId")
+            ?: repository.getMessage("${conversationId}_mam_$stanzaId")
+    }
+
+    private suspend fun mergeReactionPayload(messageId: String, emoji: String) {
+        val existing = repository.getMessage(messageId) ?: return
+        val json = runCatching { JSONObject(existing.payloadJson ?: "{}") }
+            .getOrElse { JSONObject() }
+        val arr = json.optJSONArray("reactions") ?: org.json.JSONArray()
+        var found = false
+        for (i in 0 until arr.length()) {
+            if (arr.optString(i) == emoji) {
+                found = true
+                break
+            }
+        }
+        if (!found) arr.put(emoji)
+        json.put("reactions", arr)
+        repository.upsertMessage(existing.copy(payloadJson = json.toString()))
+    }
+
+    private fun stanzaIdFromMessageKey(conversationId: String, messageId: String): String? {
+        val stripped = when {
+            messageId.startsWith("${conversationId}_mam_") ->
+                messageId.removePrefix("${conversationId}_mam_")
+            messageId.startsWith("${conversationId}_") ->
+                messageId.removePrefix("${conversationId}_")
+            else -> messageId.substringAfterLast('_')
+        }
+        return stripped.takeIf { it.isNotBlank() }
+    }
+
+    private fun resolveSession(
+        conversationId: String,
+        accountId: String?,
+    ): Triple<String, SmackClientFacade, String> {
+        val accId = accountId
+            ?: ConversationIds.accountId(conversationId)
+            ?: error("accountId manquant")
+        val smack = sessions[accId] ?: error("XMPP non connecté")
+        val remoteJid = ConversationIds.remoteId(conversationId)
+            ?: error("remoteId manquant")
+        return Triple(accId, smack, remoteJid)
     }
 
     /** Fail-closed like outbound [OmemoHelper.decideSend]: no cleartext when OMEMO is expected. */
