@@ -98,19 +98,19 @@ Status legend: `present` · `partial` · `missing` · `blocked`
 | TG-VOIP-02 | Group calls / video chats | `CreateVideoChat, JoinGroupCall, …` | **blocked** | Requires VoIP stack |
 | TG-STORIES-01 | Stories receive / send | `LoadActiveStories, SendStory, GetStory, …` | **partial** | LoadActiveStories/GetChatActiveStories; stories cap still false |
 | TG-PREMIUM-01 | Premium / Stars / payments | `Buy*, GetPaymentForm, Gift*, Boost*, …` | **blocked** | Premium payments fail-closed by policy |
-| TG-PUSH | Push / device registration | `RegisterDevice, ProcessPushNotification` | **missing** | App is Tor/foreground-first; document |
+| TG-PUSH | Push / device registration | `RegisterDevice, ProcessPushNotification` | **blocked** | Tor/foreground-only client — no FCM RegisterDevice by policy |
 
 ## Coverage summary
 - **present**: 65
 - **partial**: 10
-- **missing**: 2
-- **blocked**: 5
+- **missing**: 1
+- **blocked**: 6
 
 ## Implementation order (missing → present)
 TG-AUTH-04, TG-DM-03, TG-GROUP-02, TG-GROUP-03, TG-GROUP-04, TG-GROUP-05, TG-GROUP-06, TG-CHANNEL-01, TG-CHANNEL-02, TG-MSG-VIDEONOTE, TG-MSG-LOCATION, TG-MSG-POLL-STOP, TG-MSG-DICE, TG-MSG-GAME, TG-MSG-ALBUM, TG-MSG-SYSTEM, TG-MSG-EDIT-CAPTION, TG-MSG-REPLY, TG-MSG-SILENT, TG-MSG-SCHEDULE, TG-MSG-SPOILER, TG-MSG-TTL, TG-MSG-SELFDESTRUCT, TG-REACT-REMOVE, TG-REACT-SYNC, TG-CHAT-PIN-MSG, TG-CHAT-DRAFT, TG-CHAT-MARK-UNREAD, TG-SEARCH-CHAT, TG-SEARCH-GLOBAL, TG-SEARCH-CHATS, TG-FOLDER-01, TG-FOLDER-02, TG-FOLDER-03, TG-TOPIC-01, TG-TOPIC-02, TG-TOPIC-03, TG-BOT-01, TG-BOT-02, TG-BOT-03, TG-BOT-04, TG-PROFILE-03, TG-STICKER-CUSTOM, TG-STORIES-01, TG-PUSH
 
 ## Blocked IDs
-TG-SECRET-01, TG-MSG-INVOICE, TG-VOIP-01, TG-VOIP-02, TG-PREMIUM-01
+TG-SECRET-01, TG-MSG-INVOICE, TG-VOIP-01, TG-VOIP-02, TG-PREMIUM-01, TG-PUSH
 
 
 ## Implemented on `feat/parity-telegram` (batch 1)
