@@ -161,7 +161,7 @@ Capabilities (`baseSignalCapabilities`): DM/group/media/typing/receipts/E2EE/con
 | SIG-STOR-03 | Story lists / folders / call-link records | storage record types | **missing** | Ignored |
 | SIG-SYNC-01 | Inbound multi-device sync | SyncMessage handlers | **partial** | Core done; some types log-only |
 | SIG-SYNC-02 | Outbound sync (verified, settings…) | `sendSyncMessage` | **partial** | Mostly receive |
-| SIG-BLOCK-01 | Block list inbound | blocked sync | **partial** | Persisted; no outbound block sync |
+| SIG-BLOCK-01 | Block list inbound | blocked sync | **partial** | Inbound persist + outbound `setBlockedList` / `syncBlockedList` via `forBlocked`; no block UX |
 | SIG-MUTE-01 | Mute/pin/archive | — | **partial** | Local caps only (`localChatListControls`) |
 
 ### Stories, calls, payments (mostly blocked / fail-closed)

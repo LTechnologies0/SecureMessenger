@@ -216,6 +216,93 @@ class SignalProtocol @Inject constructor(
     }
 
     /**
+     * SIG-BLOCK-01: persist blocked peers/groups and push SyncMessage.forBlocked to linked devices.
+     * Empty collections clear that category in the stored list before syncing.
+     */
+    suspend fun setBlockedList(
+        acis: Collection<String> = emptyList(),
+        e164s: Collection<String> = emptyList(),
+        groupIdsBase64: Collection<String> = emptyList(),
+        accountId: String? = null,
+    ): Result<Unit> = withContext(signalDispatcher) {
+        runCatching {
+            val (accId, active) = resolveLiveAccount(accountId)
+                ?: error("Signal non connecté")
+            val json = org.json.JSONObject()
+            json.put("numbers", org.json.JSONArray(e164s.map { it.trim() }.filter { it.isNotEmpty() }))
+            json.put("acis", org.json.JSONArray(acis.map { it.trim() }.filter { it.isNotEmpty() }))
+            json.put(
+                "groupIds",
+                org.json.JSONArray(groupIdsBase64.map { it.trim() }.filter { it.isNotEmpty() }),
+            )
+            credentialStore.put(accId, SignalCredentialKeys.BLOCKED_LIST, json.toString())
+            pushBlockedSync(active, accId)
+        }
+    }
+
+    /** SIG-BLOCK-01: re-send the locally persisted blocked list to linked devices. */
+    suspend fun syncBlockedList(accountId: String? = null): Result<Unit> =
+        withContext(signalDispatcher) {
+            runCatching {
+                val (accId, active) = resolveLiveAccount(accountId)
+                    ?: error("Signal non connecté")
+                pushBlockedSync(active, accId)
+            }
+        }
+
+    private fun pushBlockedSync(active: SignalSessionContext, accId: String) {
+        val raw = credentialStore.get(accId, SignalCredentialKeys.BLOCKED_LIST).orEmpty()
+        val json = if (raw.isBlank()) {
+            org.json.JSONObject()
+        } else {
+            runCatching { org.json.JSONObject(raw) }.getOrElse { org.json.JSONObject() }
+        }
+        fun stringList(key: String): List<String> {
+            val arr = json.optJSONArray(key) ?: return emptyList()
+            return buildList {
+                for (i in 0 until arr.length()) {
+                    arr.optString(i)?.trim()?.takeIf { it.isNotEmpty() }?.let { add(it) }
+                }
+            }
+        }
+        val numbers = stringList("numbers")
+        val acis = stringList("acis")
+        val groupIds = stringList("groupIds").mapNotNull { encoded ->
+            runCatching {
+                android.util.Base64.decode(encoded, android.util.Base64.NO_WRAP)
+            }.getOrNull()?.takeIf { it.isNotEmpty() }
+        }
+        val individuals = buildList {
+            for (aci in acis) {
+                runCatching {
+                    add(
+                        org.whispersystems.signalservice.api.messages.multidevice.BlockedListMessage.Individual(
+                            org.signal.core.models.ServiceId.ACI.parseOrThrow(aci),
+                            /* e164 = */ null,
+                        ),
+                    )
+                }
+            }
+            for (e164 in numbers) {
+                add(
+                    org.whispersystems.signalservice.api.messages.multidevice.BlockedListMessage.Individual(
+                        /* aci = */ null,
+                        e164,
+                    ),
+                )
+            }
+        }
+        active.messageSender.sendSyncMessage(
+            org.whispersystems.signalservice.api.messages.multidevice.SignalServiceSyncMessage.forBlocked(
+                org.whispersystems.signalservice.api.messages.multidevice.BlockedListMessage(
+                    individuals,
+                    groupIds,
+                ),
+            ),
+        )
+    }
+
+    /**
      * Reserves and confirms a Signal username via [AccountApi] (nickname or nickname.discriminator).
      * Persists the confirmed username under [SignalCredentialKeys.USERNAME].
      */
