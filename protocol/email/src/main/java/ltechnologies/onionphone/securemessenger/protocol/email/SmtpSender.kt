@@ -13,6 +13,7 @@ class SmtpSender {
         subject: String,
         body: String,
         cc: List<String> = emptyList(),
+        bcc: List<String> = emptyList(),
         inReplyTo: String? = null,
         references: String? = null,
         attachments: List<Attachment> = emptyList(),
@@ -25,6 +26,7 @@ class SmtpSender {
             val recipients = to.map { EmailAddress.requireValid(it) }
             if (recipients.isEmpty()) return SendResult.Failure("No recipients")
             val ccRecipients = cc.map { EmailAddress.requireValid(it) }
+            val bccRecipients = bcc.map { EmailAddress.requireValid(it) }
             val mime: MimeMessage = MimeMapper.buildMime(
                 session = angus,
                 from = session.config.email,
@@ -32,6 +34,7 @@ class SmtpSender {
                 subject = subject,
                 body = body,
                 cc = ccRecipients,
+                bcc = bccRecipients,
                 inReplyTo = inReplyTo,
                 references = references,
                 attachments = attachments,

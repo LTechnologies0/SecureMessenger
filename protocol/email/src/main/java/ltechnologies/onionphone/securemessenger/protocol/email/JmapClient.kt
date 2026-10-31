@@ -130,12 +130,14 @@ class JmapClient(
         subject: String,
         body: String,
         cc: List<String> = emptyList(),
+        bcc: List<String> = emptyList(),
         inReplyTo: String? = null,
     ): SendResult {
         val s = session ?: return SendResult.Failure("JMAP not connected")
         return try {
             val recipients = to.map { EmailAddress.requireValid(it) }
             val ccRecipients = cc.map { EmailAddress.requireValid(it) }
+            val bccRecipients = bcc.map { EmailAddress.requireValid(it) }
             val identityId = s.identityId
                 ?: return SendResult.Failure("No JMAP identity — configure provider identity")
             val draftMailbox = s.draftsId ?: s.inboxId
@@ -188,6 +190,16 @@ class JmapClient(
                                                                 "cc",
                                                                 buildJsonArray {
                                                                     ccRecipients.forEach { addr ->
+                                                                        add(buildJsonObject { put("email", addr) })
+                                                                    }
+                                                                },
+                                                            )
+                                                        }
+                                                        if (bccRecipients.isNotEmpty()) {
+                                                            put(
+                                                                "bcc",
+                                                                buildJsonArray {
+                                                                    bccRecipients.forEach { addr ->
                                                                         add(buildJsonObject { put("email", addr) })
                                                                     }
                                                                 },

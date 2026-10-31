@@ -83,10 +83,20 @@ class IrcProtocol @Inject constructor(
         typingIndicators = false,
         readReceipts = false,
         endToEndEncryption = false,
+        // NAMES list, not an address book — UI labels this "Nicks".
         contacts = true,
         profileEdit = false,
         messageHistory = false,
         backupExport = true,
+        reactions = false,
+        messageEdit = false,
+        messageDelete = false,
+        messageForward = false,
+        messageReply = true,
+        localChatListControls = true,
+        voiceCalls = false,
+        videoCalls = false,
+        stories = false,
     )
 
     override fun capabilitiesFor(accountId: String?): ProtocolCapabilities {
@@ -415,7 +425,17 @@ class IrcProtocol @Inject constructor(
                 val text = body.value
                 if (text.isBlank()) return@withContext SendResult.Failure("Empty message")
 
-                session.client.sendMultiLineMessage(remote, text)
+                // `/me action` → CTCP ACTION (IRCv3 / classic clients).
+                val actionMatch = Regex("^/me\\s+(.+)$", RegexOption.IGNORE_CASE).matchEntire(text.trim())
+                val displayBody: String
+                if (actionMatch != null) {
+                    val action = actionMatch.groupValues[1]
+                    session.client.sendCtcpMessage(remote, "ACTION $action")
+                    displayBody = "* ${session.effectiveNick} $action"
+                } else {
+                    session.client.sendMultiLineMessage(remote, text)
+                    displayBody = text
+                }
 
                 val localId = "${conversationId}_${UUID.randomUUID()}"
                 val now = System.currentTimeMillis()
@@ -424,7 +444,7 @@ class IrcProtocol @Inject constructor(
                         id = localId,
                         conversationId = conversationId,
                         protocol = ProtocolId.IRC,
-                        body = text,
+                        body = displayBody,
                         timestamp = now,
                         direction = MessageDirection.OUTGOING,
                         deliveryState = DeliveryState.SENT,
@@ -432,7 +452,7 @@ class IrcProtocol @Inject constructor(
                         kind = MessageKind.TEXT,
                     ),
                 )
-                touchConversation(accId, remote, text, now)
+                touchConversation(accId, remote, displayBody, now)
                 SendResult.Success(localId)
             } catch (e: Exception) {
                 Timber.w(e, "IRC send failed")

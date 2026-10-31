@@ -532,6 +532,19 @@ class TdLibFacade(private val client: TdLibClient) {
         )
     }
 
+    suspend fun editMessageText(chatId: Long, messageId: Long, text: String): String? = awaitResult {
+        val content = TdApi.InputMessageText().apply {
+            this.text = TdApi.FormattedText(text, emptyArray())
+            clearDraft = false
+        }
+        client.send(TdApi.EditMessageText(chatId, messageId, null, content), it)
+    }
+
+    suspend fun deleteMessages(chatId: Long, messageIds: LongArray, revoke: Boolean = true): String? =
+        awaitResult {
+            client.send(TdApi.DeleteMessages(chatId, messageIds, revoke), it)
+        }
+
     suspend fun setChatNotificationMute(chatId: Long, muteForSeconds: Int): String? {
         val chat = getChat(chatId) ?: return "Chat introuvable"
         val settings = chat.notificationSettings ?: TdApi.ChatNotificationSettings()

@@ -81,6 +81,15 @@ class EmailProtocol @Inject constructor(
         // Recent window only (IMAP ~100 / POP3~50 / JMAP~50), not full archive backfill.
         messageHistory = true,
         backupExport = true,
+        reactions = false,
+        messageEdit = false,
+        messageDelete = false,
+        messageForward = false,
+        messageReply = true,
+        localChatListControls = true,
+        voiceCalls = false,
+        videoCalls = false,
+        stories = false,
     )
 
     /**
@@ -314,6 +323,7 @@ class EmailProtocol @Inject constructor(
                     accountId,
                     subjectOverride = content.subject?.trim()?.takeIf { it.isNotEmpty() } ?: parsedSubject,
                     cc = EmailAddress.parseList(content.cc.orEmpty()),
+                    bcc = EmailAddress.parseList(content.bcc.orEmpty()),
                 )
             }
             is OutgoingContent.Media -> sendMedia(
@@ -333,6 +343,7 @@ class EmailProtocol @Inject constructor(
         accountId: String?,
         subjectOverride: String? = null,
         cc: List<String> = emptyList(),
+        bcc: List<String> = emptyList(),
     ): SendResult {
         val conversation = repository.getConversation(conversationId)
             ?: return SendResult.Failure("Conversation introuvable")
@@ -366,7 +377,7 @@ class EmailProtocol @Inject constructor(
                         "Pièces jointes JMAP non supportées — utilisez IMAP/SMTP",
                     )
                 }
-                session.jmapClient?.submit(to, subject, body, cc, inReplyTo)
+                session.jmapClient?.submit(to, subject, body, cc, bcc, inReplyTo)
                     ?: SendResult.Failure("Client JMAP manquant")
             }
             EmailStoreKind.IMAP, EmailStoreKind.POP3 -> {
@@ -376,6 +387,7 @@ class EmailProtocol @Inject constructor(
                     subject = subject,
                     body = body,
                     cc = cc,
+                    bcc = bcc,
                     inReplyTo = inReplyTo,
                     references = references,
                     attachments = attachments,

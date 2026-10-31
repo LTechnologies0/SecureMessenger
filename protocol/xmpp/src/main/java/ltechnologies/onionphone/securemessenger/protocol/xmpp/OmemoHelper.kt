@@ -168,6 +168,37 @@ class OmemoHelper(
         null
     }
 
+    /**
+     * Human-readable fingerprints for our device + known peer devices (TOFU store).
+     * Used by the chat E2EE chip (parity with Signal safety numbers).
+     */
+    fun fingerprintSummary(remoteJid: String): String {
+        val our = runCatching {
+            val fp = omemoManager.ownFingerprint
+            val deviceId = omemoManager.deviceId
+            "Nous ($deviceId): $fp"
+        }.getOrNull()
+        val peerLines = runCatching {
+            val bare = JidCreate.bareFrom(remoteJid)
+            omemoManager.getActiveFingerprints(bare).entries.map { (device, fp) ->
+                "Contact (${device.deviceId}): $fp"
+            }
+        }.getOrElse {
+            trustedFingerprints.entries
+                .filter { it.key.startsWith("$remoteJid|") || it.key.startsWith("${remoteJid.lowercase()}|") }
+                .map { (key, fp) ->
+                    val deviceId = key.substringAfterLast('|')
+                    "Contact ($deviceId): $fp"
+                }
+        }
+        return buildList {
+            if (our != null) add(our)
+            addAll(peerLines)
+        }.joinToString("\n").ifBlank {
+            "Aucune empreinte OMEMO connue pour $remoteJid — échangez un message chiffré d’abord."
+        }
+    }
+
     companion object {
         /**
          * Honest E2EE: refuse send without OMEMO. No plaintext fallback.

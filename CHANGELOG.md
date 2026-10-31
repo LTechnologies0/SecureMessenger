@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.0.17
+
+### Honesty & capability contract
+- `ProtocolCapabilities` : `reactions`, `messageEdit`, `messageDelete`, `messageForward`, `messageReply`, `localChatListControls`
+- UI long-press / attach gated by capabilities (plus de hardcode TG/Matrix seul)
+- Signal : `stickers=true` ; `stories` gardé false avec fail-closed ; réactions + remote-delete DM
+- Telegram : édition / suppression TDLib ; ephemeral fail-closed si flag false
+- Email : **Bcc** SMTP/JMAP ; honesty JMAP sans pièces jointes
+- Inbox : pin/mute/archive **local** pour tous les protocoles (TDLib pour Telegram)
+- XMPP : empreintes OMEMO via puce E2EE
+- IRC : `/me` → CTCP ACTION ; onglet Contacts → « Nicks »
+- Affichage réactions depuis `payloadJson.reactions`
+
+### Still P3 / volontaire
+RingRTC, SVR2/reg lock, Matrix QR cross-signing, secret chats TG, OpenPGP, archive IMAP complète, stories UI.
+
 ## 1.0.16
 
 ### UX / feature parity (deferred pass 2)

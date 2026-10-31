@@ -85,7 +85,8 @@ fun InboxScreen(
     var query by rememberSaveable { mutableStateOf("") }
     var searchExpanded by rememberSaveable { mutableStateOf(false) }
     var showTelegramArchive by rememberSaveable { mutableStateOf(false) }
-    var telegramMenuConv by remember { mutableStateOf<Conversation?>(null) }
+    var showArchived by rememberSaveable { mutableStateOf(false) }
+    var listMenuConv by remember { mutableStateOf<Conversation?>(null) }
 
     val filtered = remember(conversations, query) {
         val q = query.trim()
@@ -100,12 +101,15 @@ fun InboxScreen(
         }
     }
 
-    val displayList = remember(filtered, inboxProtocol, showTelegramArchive) {
+    val displayList = remember(filtered, inboxProtocol, showTelegramArchive, showArchived) {
         filtered
             .filter { conv ->
-                inboxProtocol != ProtocolId.TELEGRAM ||
-                    showTelegramArchive ||
-                    !conv.isArchived
+                val showArchive = if (inboxProtocol == ProtocolId.TELEGRAM) {
+                    showTelegramArchive
+                } else {
+                    showArchived
+                }
+                showArchive || !conv.isArchived
             }
             .sortedWith(
                 compareByDescending<Conversation> { it.isPinned }
@@ -143,6 +147,23 @@ fun InboxScreen(
                     )
                     TextButton(onClick = { showTelegramArchive = !showTelegramArchive }) {
                         Text(if (showTelegramArchive) "Retour aux chats" else "Voir archives")
+                    }
+                }
+            } else if (inboxProtocol != null) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        if (showArchived) "Archives locales" else "Boîte",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    TextButton(onClick = { showArchived = !showArchived }) {
+                        Text(if (showArchived) "Retour" else "Voir archives")
                     }
                 }
             }
@@ -213,11 +234,7 @@ fun InboxScreen(
                             onClick = {
                                 onConversationClick(conv.id, conv.title, conv.protocol)
                             },
-                            onLongClick = {
-                                if (conv.protocol == ProtocolId.TELEGRAM) {
-                                    telegramMenuConv = conv
-                                }
-                            },
+                            onLongClick = { listMenuConv = conv },
                         )
                         HorizontalDivider(
                             modifier = Modifier.padding(start = 72.dp),
@@ -229,33 +246,39 @@ fun InboxScreen(
         }
     }
 
-    telegramMenuConv?.let { conv ->
+    listMenuConv?.let { conv ->
         AlertDialog(
-            onDismissRequest = { telegramMenuConv = null },
+            onDismissRequest = { listMenuConv = null },
             title = { Text(conv.title) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     TextButton(onClick = {
-                        viewModel.setTelegramChatPinned(conv.id, !conv.isPinned) {
-                            telegramMenuConv = null
-                        }
+                        viewModel.setConversationListFlags(
+                            conv.id,
+                            conv.protocol,
+                            pinned = !conv.isPinned,
+                        ) { listMenuConv = null }
                     }) {
                         Icon(Icons.Default.PushPin, contentDescription = null)
                         Text(if (conv.isPinned) "Désépingler" else "Épingler")
                     }
                     TextButton(onClick = {
                         val mute = if (conv.isMuted) 0 else 365 * 24 * 3600
-                        viewModel.setTelegramChatMuted(conv.id, mute) {
-                            telegramMenuConv = null
-                        }
+                        viewModel.setConversationListFlags(
+                            conv.id,
+                            conv.protocol,
+                            mutedSeconds = mute,
+                        ) { listMenuConv = null }
                     }) {
                         Icon(Icons.Default.NotificationsOff, contentDescription = null)
                         Text(if (conv.isMuted) "Activer notifications" else "Couper notifications (1 an)")
                     }
                     TextButton(onClick = {
-                        viewModel.setTelegramChatArchived(conv.id, !conv.isArchived) {
-                            telegramMenuConv = null
-                        }
+                        viewModel.setConversationListFlags(
+                            conv.id,
+                            conv.protocol,
+                            archived = !conv.isArchived,
+                        ) { listMenuConv = null }
                     }) {
                         Icon(Icons.Default.Archive, contentDescription = null)
                         Text(if (conv.isArchived) "Désarchiver" else "Archiver")
@@ -264,7 +287,7 @@ fun InboxScreen(
             },
             confirmButton = {},
             dismissButton = {
-                TextButton(onClick = { telegramMenuConv = null }) { Text("Fermer") }
+                TextButton(onClick = { listMenuConv = null }) { Text("Fermer") }
             },
         )
     }

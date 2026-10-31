@@ -79,6 +79,15 @@ class XmppProtocol @Inject constructor(
         ephemeralMessages = false,
         messageHistory = true,
         backupExport = true,
+        reactions = false,
+        messageEdit = false,
+        messageDelete = false,
+        messageForward = false,
+        messageReply = true,
+        localChatListControls = true,
+        voiceCalls = false,
+        videoCalls = false,
+        stories = false,
     )
 
     override val capabilities: ProtocolCapabilities
@@ -511,6 +520,25 @@ class XmppProtocol @Inject constructor(
         val myJid = smack.myBareJid()
         return SmackClientFacade.isCarbonSent(smackMessage) ||
             smackMessage.from?.asBareJid()?.toString() == myJid
+    }
+
+    /** OMEMO fingerprints for the peer (TOFU) — shown from the chat E2EE chip. */
+    suspend fun omemoFingerprintForConversation(
+        conversationId: String,
+        accountId: String? = null,
+    ): Result<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            val conv = repository.getConversation(conversationId)
+                ?: error("Conversation introuvable")
+            val accId = accountId ?: conv.accountId
+            val smack = sessions[accId] ?: error("XMPP non connecté")
+            val helper = smack.omemoHelper ?: error("OMEMO non initialisé")
+            if (!helper.ready) {
+                helper.initialize()
+            }
+            if (!helper.ready) error("OMEMO pas prêt")
+            helper.fingerprintSummary(conv.remoteId)
+        }
     }
 
     /** Fail-closed like outbound [OmemoHelper.decideSend]: no cleartext when OMEMO is expected. */
