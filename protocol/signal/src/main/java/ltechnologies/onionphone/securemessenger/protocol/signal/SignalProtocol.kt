@@ -216,6 +216,50 @@ class SignalProtocol @Inject constructor(
     }
 
     /**
+     * Reserves and confirms a Signal username via [AccountApi] (nickname or nickname.discriminator).
+     * Persists the confirmed username under [SignalCredentialKeys.USERNAME].
+     */
+    suspend fun setUsername(
+        accountId: String,
+        username: String,
+    ): Result<Unit> = withContext(signalDispatcher) {
+        runCatching {
+            val (_, active) = resolveLiveAccount(accountId)
+                ?: error(liveAccountFailure(accountId).reason)
+            val trimmed = username.trim()
+            if (trimmed.isEmpty()) error("Nom d'utilisateur vide")
+            val candidates = if (trimmed.contains('.')) {
+                listOf(org.signal.libsignal.usernames.Username(trimmed))
+            } else {
+                org.signal.libsignal.usernames.Username.candidatesFrom(trimmed, 3, 32)
+            }
+            if (candidates.isEmpty()) error("Aucun candidat de nom d'utilisateur")
+            val hashes = candidates.map { org.signal.core.util.Base64.encodeUrlSafeWithoutPadding(it.hash) }
+            val reserved = active.accountApi.reserveUsername(hashes).successOrThrow()
+            val reservedHash = reserved.usernameHash
+                ?: error("Réservation username sans hash")
+            val chosen = candidates.firstOrNull {
+                org.signal.core.util.Base64.encodeUrlSafeWithoutPadding(it.hash) == reservedHash
+            } ?: error("Hash réservé introuvable parmi les candidats")
+            val link = chosen.generateLink()
+            active.accountApi.confirmUsername(chosen, link).successOrThrow()
+            credentialStore.put(accountId, SignalCredentialKeys.USERNAME, chosen.username)
+            Unit
+        }
+    }
+
+    /** Deletes the Signal username via [AccountApi.deleteUsername] and clears local credentials. */
+    suspend fun clearUsername(accountId: String): Result<Unit> = withContext(signalDispatcher) {
+        runCatching {
+            val (_, active) = resolveLiveAccount(accountId)
+                ?: error(liveAccountFailure(accountId).reason)
+            active.accountApi.deleteUsername().successOrThrow()
+            credentialStore.put(accountId, SignalCredentialKeys.USERNAME, "")
+            Unit
+        }
+    }
+
+    /**
      * Sends a reaction to [messageId] (`${conversationId}_$sentTimestamp`).
      * DM uses [deliverMessage]; GV2 (`gv2:`) uses [deliverGroupMessage] fan-out.
      */
@@ -2878,6 +2922,8 @@ class SignalProtocol @Inject constructor(
     override suspend fun getAccountProfile(accountId: String): AccountProfile? = withContext(signalDispatcher) {
         val storedName = credentialStore.get(accountId, SignalCredentialKeys.PROFILE_NAME)
         val storedAbout = credentialStore.get(accountId, SignalCredentialKeys.PROFILE_ABOUT)
+        val storedUsername = credentialStore.get(accountId, SignalCredentialKeys.USERNAME)
+            ?.takeIf { it.isNotBlank() }
         val live = resolveLiveAccount(accountId)
         if (live != null) {
             val (_, activeSession) = live
@@ -2896,6 +2942,7 @@ class SignalProtocol @Inject constructor(
                         accountId = accountId,
                         protocol = ProtocolId.SIGNAL,
                         displayName = name ?: storedName ?: activeSession.e164,
+                        handle = storedUsername,
                         phone = activeSession.e164,
                         bio = about ?: storedAbout,
                     )
@@ -2905,6 +2952,7 @@ class SignalProtocol @Inject constructor(
                 accountId = accountId,
                 protocol = ProtocolId.SIGNAL,
                 displayName = storedName ?: activeSession.e164,
+                handle = storedUsername,
                 phone = activeSession.e164,
                 bio = storedAbout,
             )
@@ -2914,6 +2962,7 @@ class SignalProtocol @Inject constructor(
             accountId = accountId,
             protocol = ProtocolId.SIGNAL,
             displayName = storedName ?: accountId,
+            handle = storedUsername,
             phone = credentialStore.get(accountId, SignalCredentialKeys.E164),
             bio = storedAbout,
         )

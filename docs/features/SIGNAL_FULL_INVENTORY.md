@@ -80,7 +80,7 @@ Capabilities (`baseSignalCapabilities`): DM/group/media/typing/receipts/E2EE/con
 | SIG-ACCT-01 | WhoAmI / attributes at register | `AccountApi` | **partial** | Set at register; no full mgmt UI |
 | SIG-ACCT-02 | Change number / delete / data report | `AccountApi` | **missing** | |
 | SIG-ACCT-03 | FCM token set/clear | GCM endpoints | **missing** | Tor/foreground design by choice |
-| SIG-USER-01 | Username reserve/confirm/delete + link | `AccountApi` username* | **missing** | Sync `usernameChange` logged only |
+| SIG-USER-01 | Username reserve/confirm/delete + link | `AccountApi` username* | **partial** | `setUsername`/`clearUsername` reserve+confirm+delete; link create/update UI not wired; sync inbound still log-only |
 | SIG-USER-02 | Phone number discoverability privacy | account attributes | **partial** | Hardwired `discoverableByPhoneNumber=true` |
 
 ### Linking & backup
@@ -203,7 +203,7 @@ Priority order for atomic commits on this branch (excludes blocked):
 3. **SIG-GV2-04** — title/desc/add/remove members (minimal admin)
 4. **SIG-EPH-01** — conversation timer update message
 5. ~~**SIG-SAFE-02** — mark verified + sync outbound~~ (1:1 done; group SN still open)
-6. **SIG-USER-01** — username set (API)
+6. ~~**SIG-USER-01** — username set (API)~~ (reserve/confirm/delete done; link UI open)
 7. **SIG-PROF-02** — profile avatar upload
 8. **SIG-SEAL-01** — fetch peer profile key for sealed sender
 9. **SIG-POLL-02** — poll vote
