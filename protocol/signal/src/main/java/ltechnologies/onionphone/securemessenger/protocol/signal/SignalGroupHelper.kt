@@ -2,17 +2,21 @@ package ltechnologies.onionphone.securemessenger.protocol.signal
 
 import android.content.Context
 import android.util.Base64
+import java.security.SecureRandom
 import java.util.Optional
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.runBlocking
 import ltechnologies.onionphone.securemessenger.core.security.EncryptedCredentialStore
+import okio.ByteString.Companion.toByteString
 import org.signal.core.models.ServiceId.ACI
 import org.signal.libsignal.metadata.certificate.SenderCertificate
 import org.signal.libsignal.zkgroup.groups.GroupMasterKey
 import org.signal.libsignal.zkgroup.groups.GroupSecretParams
 import org.signal.libsignal.zkgroup.profiles.ExpiringProfileKeyCredential
 import org.signal.network.NetworkResult
+import org.signal.storageservice.storage.protos.groups.AccessControl
+import org.signal.storageservice.storage.protos.groups.GroupInviteLink
 import org.signal.storageservice.storage.protos.groups.Member
 import org.whispersystems.signalservice.api.crypto.UnidentifiedAccess
 import org.whispersystems.signalservice.api.groupsv2.GroupCandidate
@@ -91,6 +95,364 @@ internal class SignalGroupHelper(
      * Creates a GV2 group. Returns master-key bytes on success, or null on failure
      * (including missing self profile-key credential).
      */
+    /**
+     * Leaves a GV2 group (self-remove via [GroupsV2Operations.GroupOperations.createRemoveMembersChange]).
+     * Returns true after a successful [GroupsV2Api.patchGroup].
+     */
+    fun leaveGroup(session: SignalSessionContext, masterKeyBytes: ByteArray): Boolean {
+        val masterKey = GroupMasterKey(masterKeyBytes)
+        val secretParams = GroupSecretParams.deriveFromMasterKey(masterKey)
+        val fetched = fetchGroupState(session, masterKeyBytes, secretParams)
+            ?: run {
+                Timber.w("Signal leaveGroup: cannot fetch group state")
+                return false
+            }
+        val authString = groupsV2AuthString(session, secretParams) ?: run {
+            Timber.w("Signal leaveGroup: GV2 auth unavailable")
+            return false
+        }
+        return try {
+            val ops = session.groupsV2Operations.forGroup(secretParams)
+            val change = ops.createRemoveMembersChange(
+                setOf(session.aci),
+                /* alsoBan = */ false,
+                emptyList(),
+            )
+                .sourceUserId(ops.encryptServiceId(session.aci))
+                .version(fetched.revision + 1)
+                .build()
+            session.accountManager.groupsV2Api.patchGroup(
+                change,
+                authString,
+                Optional.empty(),
+            )
+            clearLocalCache(masterKeyBytes)
+            true
+        } catch (e: Exception) {
+            Timber.e(e, "Signal GV2 leaveGroup failed")
+            false
+        }
+    }
+
+    /**
+     * Minimal GV2 admin (SIG-GV2-04): change group title via
+     * [GroupsV2Operations.GroupOperations.createModifyGroupTitle].
+     */
+    fun updateGroupTitle(
+        session: SignalSessionContext,
+        masterKeyBytes: ByteArray,
+        title: String,
+    ): Boolean {
+        val trimmed = title.trim()
+        if (trimmed.isEmpty()) return false
+        return patchGroupChange(session, masterKeyBytes, "updateGroupTitle") { ops, fetched ->
+            ops.createModifyGroupTitle(trimmed)
+                .sourceUserId(ops.encryptServiceId(session.aci))
+                .version(fetched.revision + 1)
+                .build()
+        }.also { ok ->
+            if (ok) rememberTitle(masterKeyBytes, trimmed)
+        }
+    }
+
+    /**
+     * Add / invite members (SIG-GV2-04). Without peer profile-key credentials,
+     * [createModifyGroupMembershipChange] emits pending-profile-key invites.
+     */
+    fun addGroupMembers(
+        session: SignalSessionContext,
+        masterKeyBytes: ByteArray,
+        memberAcis: Set<String>,
+    ): Boolean {
+        if (memberAcis.isEmpty()) return false
+        val candidates = memberAcis.mapNotNull { aciString ->
+            runCatching {
+                GroupCandidate(ACI.parseOrThrow(aciString), Optional.empty())
+            }.getOrNull()
+        }.toSet()
+        if (candidates.isEmpty()) return false
+        return patchGroupChange(session, masterKeyBytes, "addGroupMembers") { ops, fetched ->
+            ops.createModifyGroupMembershipChange(
+                candidates,
+                /* bannedMembers = */ emptySet(),
+                session.aci,
+            )
+                .sourceUserId(ops.encryptServiceId(session.aci))
+                .version(fetched.revision + 1)
+                .build()
+        }.also { ok ->
+            if (ok) {
+                rememberMembers(masterKeyBytes, cachedMembers(masterKeyBytes) + memberAcis)
+            }
+        }
+    }
+
+    /**
+     * Remove members (SIG-GV2-04). Same builder path as [leaveGroup]
+     * ([createRemoveMembersChange]) without clearing local group cache.
+     */
+    fun removeGroupMembers(
+        session: SignalSessionContext,
+        masterKeyBytes: ByteArray,
+        memberAcis: Set<String>,
+    ): Boolean {
+        if (memberAcis.isEmpty()) return false
+        val toRemove = memberAcis.mapNotNull { aciString ->
+            runCatching { ACI.parseOrThrow(aciString) }.getOrNull()
+        }.toSet()
+        if (toRemove.isEmpty()) return false
+        return patchGroupChange(session, masterKeyBytes, "removeGroupMembers") { ops, fetched ->
+            ops.createRemoveMembersChange(
+                toRemove,
+                /* alsoBan = */ false,
+                emptyList(),
+            )
+                .sourceUserId(ops.encryptServiceId(session.aci))
+                .version(fetched.revision + 1)
+                .build()
+        }.also { ok ->
+            if (ok) {
+                val remaining = cachedMembers(masterKeyBytes) - memberAcis
+                credentialStore.put(accountId, membersKey(masterKeyBytes), remaining.joinToString(","))
+            }
+        }
+    }
+
+    /**
+     * SIG-GV2-05: enable or reset the GV2 invite link password and return the share URL.
+     * Uses [GroupsV2Operations.GroupOperations.createModifyGroupLinkPasswordAndRightsChange].
+     */
+    fun enableOrResetInviteLink(
+        session: SignalSessionContext,
+        masterKeyBytes: ByteArray,
+        requireAdminApproval: Boolean = false,
+    ): String? {
+        val password = ByteArray(INVITE_LINK_PASSWORD_SIZE).also { SecureRandom().nextBytes(it) }
+        val rights = if (requireAdminApproval) {
+            AccessControl.AccessRequired.ADMINISTRATOR
+        } else {
+            AccessControl.AccessRequired.ANY
+        }
+        val ok = patchGroupChange(session, masterKeyBytes, "enableOrResetInviteLink") { ops, fetched ->
+            ops.createModifyGroupLinkPasswordAndRightsChange(password, rights)
+                .sourceUserId(ops.encryptServiceId(session.aci))
+                .version(fetched.revision + 1)
+                .build()
+        }
+        if (!ok) return null
+        rememberInviteLinkPassword(masterKeyBytes, password)
+        return encodeInviteLinkUrl(masterKeyBytes, password)
+    }
+
+    /**
+     * Rebuilds the invite URL from the cached or network password without rotating it.
+     */
+    fun currentInviteLinkUrl(
+        session: SignalSessionContext,
+        masterKeyBytes: ByteArray,
+    ): String? {
+        val password = cachedInviteLinkPassword(masterKeyBytes)
+            ?: run {
+                val masterKey = GroupMasterKey(masterKeyBytes)
+                val secretParams = GroupSecretParams.deriveFromMasterKey(masterKey)
+                val fetched = fetchGroupState(session, masterKeyBytes, secretParams) ?: return null
+                val bytes = fetched.decryptedGroup.inviteLinkPassword.toByteArray()
+                if (bytes.isEmpty()) return null
+                rememberInviteLinkPassword(masterKeyBytes, bytes)
+                bytes
+            }
+        return encodeInviteLinkUrl(masterKeyBytes, password)
+    }
+
+    /** Disable join-by-link (access = UNSATISFIABLE). */
+    fun disableInviteLink(
+        session: SignalSessionContext,
+        masterKeyBytes: ByteArray,
+    ): Boolean {
+        val ok = patchGroupChange(session, masterKeyBytes, "disableInviteLink") { ops, fetched ->
+            ops.createChangeJoinByLinkRights(AccessControl.AccessRequired.UNSATISFIABLE)
+                .sourceUserId(ops.encryptServiceId(session.aci))
+                .version(fetched.revision + 1)
+                .build()
+        }
+        if (ok) {
+            runCatching { credentialStore.put(accountId, linkPwKey(masterKeyBytes), "") }
+        }
+        return ok
+    }
+
+    /**
+     * Fetches decrypted join info for a `https://signal.group/#…` (or fragment) invite link.
+     */
+    fun fetchJoinInfoByLink(
+        session: SignalSessionContext,
+        urlOrFragment: String,
+    ): GroupInviteJoinPreview? {
+        val parsed = parseInviteLink(urlOrFragment) ?: return null
+        val secretParams = GroupSecretParams.deriveFromMasterKey(GroupMasterKey(parsed.masterKeyBytes))
+        val authString = groupsV2AuthString(session, secretParams) ?: run {
+            Timber.w("Signal fetchJoinInfoByLink: GV2 auth unavailable")
+            return null
+        }
+        return try {
+            val joinInfo = session.accountManager.groupsV2Api.getGroupJoinInfo(
+                secretParams,
+                Optional.of(parsed.password),
+                authString,
+            )
+            GroupInviteJoinPreview(
+                masterKeyBytes = parsed.masterKeyBytes,
+                password = parsed.password,
+                url = encodeInviteLinkUrl(parsed.masterKeyBytes, parsed.password),
+                title = joinInfo.title.takeIf { it.isNotBlank() },
+                memberCount = joinInfo.memberCount,
+                requiresAdminApproval =
+                    joinInfo.addFromInviteLink == AccessControl.AccessRequired.ADMINISTRATOR,
+                revision = joinInfo.revision,
+            )
+        } catch (e: Exception) {
+            Timber.e(e, "Signal GV2 fetchJoinInfoByLink failed")
+            null
+        }
+    }
+
+    /**
+     * Joins (or requests to join) a GV2 group via invite link URL / fragment.
+     * Returns master-key bytes on success.
+     */
+    fun joinByInviteLink(
+        session: SignalSessionContext,
+        urlOrFragment: String,
+    ): ByteArray? {
+        val preview = fetchJoinInfoByLink(session, urlOrFragment) ?: return null
+        val credential = fetchSelfExpiringCredential(session) ?: run {
+            Timber.w("Signal joinByInviteLink: no ExpiringProfileKeyCredential for self")
+            return null
+        }
+        val masterKeyBytes = preview.masterKeyBytes
+        val secretParams = GroupSecretParams.deriveFromMasterKey(GroupMasterKey(masterKeyBytes))
+        val authString = groupsV2AuthString(session, secretParams) ?: return null
+        return try {
+            val ops = session.groupsV2Operations.forGroup(secretParams)
+            val changeBuilder = if (preview.requiresAdminApproval) {
+                ops.createGroupJoinRequest(credential)
+            } else {
+                ops.createGroupJoinDirect(credential)
+            }
+            val change = changeBuilder
+                .sourceUserId(ops.encryptServiceId(session.aci))
+                .version(preview.revision + 1)
+                .build()
+            session.accountManager.groupsV2Api.patchGroup(
+                change,
+                authString,
+                Optional.of(preview.password),
+            )
+            rememberInviteLinkPassword(masterKeyBytes, preview.password)
+            rememberRevision(masterKeyBytes, preview.revision + 1)
+            preview.title?.let { rememberTitle(masterKeyBytes, it) }
+            masterKeyBytes
+        } catch (e: Exception) {
+            Timber.e(e, "Signal GV2 joinByInviteLink failed")
+            null
+        }
+    }
+
+    data class GroupInviteJoinPreview(
+        val masterKeyBytes: ByteArray,
+        val password: ByteArray,
+        val url: String,
+        val title: String?,
+        val memberCount: Int,
+        val requiresAdminApproval: Boolean,
+        val revision: Int,
+    )
+
+    private fun rememberInviteLinkPassword(masterKeyBytes: ByteArray, password: ByteArray) {
+        credentialStore.put(
+            accountId,
+            linkPwKey(masterKeyBytes),
+            Base64.encodeToString(password, Base64.NO_WRAP),
+        )
+    }
+
+    private fun cachedInviteLinkPassword(masterKeyBytes: ByteArray): ByteArray? {
+        val encoded = credentialStore.get(accountId, linkPwKey(masterKeyBytes)) ?: return null
+        if (encoded.isBlank()) return null
+        return runCatching {
+            Base64.decode(encoded, Base64.NO_WRAP)
+        }.getOrNull()?.takeIf { it.isNotEmpty() }
+    }
+
+    private fun fetchSelfExpiringCredential(
+        session: SignalSessionContext,
+    ): ExpiringProfileKeyCredential? {
+        val profileKey = session.profileKey ?: return null
+        return runBlocking {
+            when (
+                val result = session.profileApi.getVersionedProfileAndCredential(
+                    session.aci,
+                    profileKey,
+                    null,
+                )
+            ) {
+                is NetworkResult.Success -> result.result.second
+                else -> {
+                    Timber.w("Signal GV2 self credential fetch failed: %s", result)
+                    null
+                }
+            }
+        }
+    }
+
+    private fun patchGroupChange(
+        session: SignalSessionContext,
+        masterKeyBytes: ByteArray,
+        label: String,
+        build: (
+            org.whispersystems.signalservice.api.groupsv2.GroupsV2Operations.GroupOperations,
+            FetchedGroup,
+        ) -> org.signal.storageservice.storage.protos.groups.GroupChange.Actions,
+    ): Boolean {
+        val masterKey = GroupMasterKey(masterKeyBytes)
+        val secretParams = GroupSecretParams.deriveFromMasterKey(masterKey)
+        val fetched = fetchGroupState(session, masterKeyBytes, secretParams)
+            ?: run {
+                Timber.w("Signal %s: cannot fetch group state", label)
+                return false
+            }
+        val authString = groupsV2AuthString(session, secretParams) ?: run {
+            Timber.w("Signal %s: GV2 auth unavailable", label)
+            return false
+        }
+        return try {
+            val ops = session.groupsV2Operations.forGroup(secretParams)
+            val change = build(ops, fetched)
+            session.accountManager.groupsV2Api.patchGroup(
+                change,
+                authString,
+                Optional.empty(),
+            )
+            rememberRevision(masterKeyBytes, fetched.revision + 1)
+            true
+        } catch (e: Exception) {
+            Timber.e(e, "Signal GV2 %s failed", label)
+            false
+        }
+    }
+
+    private fun clearLocalCache(masterKeyBytes: ByteArray) {
+        listOf(
+            membersKey(masterKeyBytes),
+            revKey(masterKeyBytes),
+            titleKey(masterKeyBytes),
+            distKey(masterKeyBytes),
+            linkPwKey(masterKeyBytes),
+        ).forEach { key ->
+            runCatching { credentialStore.put(accountId, key, "") }
+        }
+    }
+
     fun createGroup(
         session: SignalSessionContext,
         title: String,
@@ -334,6 +696,11 @@ internal class SignalGroupHelper(
     }
 
     companion object {
+        private const val INVITE_LINK_PASSWORD_SIZE = 16
+        private const val INVITE_LINK_HOST_PRIMARY = "signal.group"
+        private const val INVITE_LINK_HOST_LEGACY = "group.signal.org"
+        private const val INVITE_LINK_PREFIX = "https://$INVITE_LINK_HOST_PRIMARY/#"
+
         fun parseMasterKey(remoteId: String): ByteArray? {
             if (!remoteId.startsWith("gv2:")) return null
             return try {
@@ -347,6 +714,74 @@ internal class SignalGroupHelper(
             }
         }
 
+        data class ParsedInviteLink(
+            val masterKeyBytes: ByteArray,
+            val password: ByteArray,
+        )
+
+        fun encodeInviteLinkUrl(masterKeyBytes: ByteArray, password: ByteArray): String {
+            val proto = GroupInviteLink(
+                contentsV1 = GroupInviteLink.GroupInviteLinkContentsV1(
+                    groupMasterKey = masterKeyBytes.toByteString(),
+                    inviteLinkPassword = password.toByteString(),
+                ),
+            )
+            // java.util Base64 so unit tests need no android.util mock.
+            val encoded = java.util.Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(proto.encode())
+            return INVITE_LINK_PREFIX + encoded
+        }
+
+        /**
+         * Accepts a full `https://signal.group/#…` / legacy `group.signal.org` URL,
+         * or just the base64url fragment / protobuf payload.
+         */
+        fun parseInviteLink(urlOrFragment: String): ParsedInviteLink? {
+            val trimmed = urlOrFragment.trim()
+            if (trimmed.isEmpty()) return null
+            val fragment = when {
+                trimmed.contains('#') -> trimmed.substringAfterLast('#').trim()
+                else -> trimmed
+            }
+            if (fragment.isEmpty()) return null
+            if (trimmed.contains("://")) {
+                val host = runCatching {
+                    java.net.URI(trimmed.substringBefore('#')).host
+                }.getOrNull()?.lowercase()
+                if (host != null &&
+                    host != INVITE_LINK_HOST_PRIMARY &&
+                    host != INVITE_LINK_HOST_LEGACY
+                ) {
+                    return null
+                }
+            }
+            val bytes = decodeBase64UrlPaddingAgnostic(fragment) ?: return null
+            return try {
+                val link = GroupInviteLink.ADAPTER.decode(bytes)
+                val contents = link.contentsV1 ?: return null
+                val masterKeyBytes = contents.groupMasterKey.toByteArray()
+                val password = contents.inviteLinkPassword.toByteArray()
+                if (masterKeyBytes.isEmpty() || password.isEmpty()) return null
+                // Validate master-key length via constructor.
+                GroupMasterKey(masterKeyBytes)
+                ParsedInviteLink(masterKeyBytes, password)
+            } catch (e: Exception) {
+                Timber.w(e, "Failed to parse Signal group invite link")
+                null
+            }
+        }
+
+        private fun decodeBase64UrlPaddingAgnostic(encoded: String): ByteArray? {
+            val padded = when (encoded.length % 4) {
+                2 -> "$encoded=="
+                3 -> "$encoded="
+                else -> encoded
+            }
+            return runCatching {
+                java.util.Base64.getUrlDecoder().decode(padded)
+            }.getOrNull()
+        }
+
         private fun mk(masterKeyBytes: ByteArray): String =
             Base64.encodeToString(masterKeyBytes, Base64.NO_WRAP)
 
@@ -354,5 +789,6 @@ internal class SignalGroupHelper(
         private fun revKey(masterKeyBytes: ByteArray): String = "gv2:rev:${mk(masterKeyBytes)}"
         private fun titleKey(masterKeyBytes: ByteArray): String = "gv2:title:${mk(masterKeyBytes)}"
         private fun distKey(masterKeyBytes: ByteArray): String = "gv2:dist:${mk(masterKeyBytes)}"
+        private fun linkPwKey(masterKeyBytes: ByteArray): String = "gv2:linkPw:${mk(masterKeyBytes)}"
     }
 }

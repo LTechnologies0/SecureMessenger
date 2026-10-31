@@ -631,6 +631,22 @@ internal class SignalMessageHandler(
             dataMessage.groupV2?.revision?.let { groupHelper.rememberRevision(groupMasterKey.toByteArray(), it) }
         }
 
+        // Wire proto field is `delete` (SignalServiceDataMessage.remoteDelete).
+        val remoteDeleteTs = dataMessage.delete?.targetSentTimestamp
+        if (remoteDeleteTs != null) {
+            val conversationId = signalConversationId(accountId, remoteId)
+            val ids = linkedSetOf("${conversationId}_$remoteDeleteTs")
+            ids.addAll(repository.listMessagesByTimestamp(conversationId, remoteDeleteTs).map { it.id })
+            repository.deleteMessages(ids.toList())
+            Timber.i(
+                "Signal remote-delete applied targetTs=%d conversation=%s ids=%d",
+                remoteDeleteTs,
+                conversationId,
+                ids.size,
+            )
+            return
+        }
+
         val attachmentPointers = dataMessage.attachments.toMutableList()
         dataMessage.sticker?.data_?.let { attachmentPointers.add(it) }
         val downloaded = downloadAttachments(attachmentPointers, envelope.serverGuid)

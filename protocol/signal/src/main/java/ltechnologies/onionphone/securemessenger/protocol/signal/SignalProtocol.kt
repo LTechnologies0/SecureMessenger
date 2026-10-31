@@ -17,7 +17,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import org.signal.network.NetworkResult
 import java.io.File
 import java.io.FileInputStream
 import java.util.Optional
@@ -42,6 +44,7 @@ import ltechnologies.onionphone.securemessenger.core.model.ProxyConfig
 import ltechnologies.onionphone.securemessenger.core.model.SanitizedText
 import ltechnologies.onionphone.securemessenger.core.model.SendResult
 import ltechnologies.onionphone.securemessenger.core.security.EncryptedCredentialStore
+import ltechnologies.onionphone.securemessenger.core.security.MessageSanitizer
 import ltechnologies.onionphone.securemessenger.data.MessengerRepository
 import ltechnologies.onionphone.securemessenger.protocol.api.MessengerProtocol
 import ltechnologies.onionphone.securemessenger.protocol.api.ProtocolNotEnabledException
@@ -103,7 +106,7 @@ class SignalProtocol @Inject constructor(
         // sendStory exists but has no UI — keep false until a story surface ships.
         stories = false,
         reactions = true,
-        messageEdit = false, // inbound edit handled; outbound EditMessage not wired yet
+        messageEdit = true,
         messageDelete = true,
         messageForward = false,
         messageReply = true,
@@ -151,8 +154,201 @@ class SignalProtocol @Inject constructor(
     }
 
     /**
-     * Sends a reaction to [messageId] (`${conversationId}_$sentTimestamp` for 1:1).
-     * Groups: not supported yet (needs GV2 reaction fan-out).
+     * Marks a 1:1 peer identity verified/unverified (credential `verified:$aci`) and
+     * syncs via SyncMessage.forVerified to linked devices.
+     * Group safety numbers remain out of scope.
+     */
+    suspend fun markIdentityVerified(
+        conversationId: String,
+        verified: Boolean,
+        accountId: String? = null,
+    ): Result<Unit> = withContext(signalDispatcher) {
+        runCatching {
+            val accId = accountId ?: ConversationIds.accountId(conversationId)
+                ?: error("Compte Signal introuvable")
+            val active = resolveLiveAccount(accId)?.second ?: error("Signal non connecté")
+            val remoteId = ConversationIds.remoteId(conversationId)
+                ?: conversationId.removePrefix("${accId}_").takeIf { it != conversationId }
+                ?: error("Conversation Signal invalide")
+            if (remoteId.startsWith("gv2:")) {
+                error("Vérification disponible seulement en conversation directe")
+            }
+            val remoteAddress = resolveSignalAddress(remoteId)
+            val aci = org.signal.core.models.ServiceId.ACI.parseOrThrow(remoteAddress.identifier).toString()
+            val protocolAddress = org.signal.libsignal.protocol.SignalProtocolAddress(
+                aci,
+                SignalServiceAddress.DEFAULT_DEVICE_ID,
+            )
+            val aciStore = active.protocolStore.aciAccountStore()
+            val identity = aciStore.getIdentity(protocolAddress)
+                ?: aciStore.getIdentity(
+                    org.signal.libsignal.protocol.SignalProtocolAddress(
+                        remoteAddress.identifier,
+                        SignalServiceAddress.DEFAULT_DEVICE_ID,
+                    ),
+                )
+                ?: error("Pas encore de session chiffrée avec ce contact")
+            active.protocolStore.aci().saveIdentity(protocolAddress, identity)
+            val stateValue = if (verified) {
+                org.whispersystems.signalservice.internal.push.Verified.State.VERIFIED.value
+            } else {
+                org.whispersystems.signalservice.internal.push.Verified.State.UNVERIFIED.value
+            }
+            credentialStore.put(accId, "verified:$aci", stateValue.toString())
+            val verifiedState = if (verified) {
+                org.whispersystems.signalservice.api.messages.multidevice.VerifiedMessage.VerifiedState.VERIFIED
+            } else {
+                org.whispersystems.signalservice.api.messages.multidevice.VerifiedMessage.VerifiedState.UNVERIFIED
+            }
+            val verifiedMessage = org.whispersystems.signalservice.api.messages.multidevice.VerifiedMessage(
+                SignalServiceAddress(org.signal.core.models.ServiceId.ACI.parseOrThrow(aci)),
+                identity,
+                verifiedState,
+                System.currentTimeMillis(),
+            )
+            active.messageSender.sendSyncMessage(
+                org.whispersystems.signalservice.api.messages.multidevice.SignalServiceSyncMessage.forVerified(
+                    verifiedMessage,
+                ),
+            )
+            Unit
+        }
+    }
+
+    /**
+     * SIG-BLOCK-01: persist blocked peers/groups and push SyncMessage.forBlocked to linked devices.
+     * Empty collections clear that category in the stored list before syncing.
+     */
+    suspend fun setBlockedList(
+        acis: Collection<String> = emptyList(),
+        e164s: Collection<String> = emptyList(),
+        groupIdsBase64: Collection<String> = emptyList(),
+        accountId: String? = null,
+    ): Result<Unit> = withContext(signalDispatcher) {
+        runCatching {
+            val (accId, active) = resolveLiveAccount(accountId)
+                ?: error("Signal non connecté")
+            val json = org.json.JSONObject()
+            json.put("numbers", org.json.JSONArray(e164s.map { it.trim() }.filter { it.isNotEmpty() }))
+            json.put("acis", org.json.JSONArray(acis.map { it.trim() }.filter { it.isNotEmpty() }))
+            json.put(
+                "groupIds",
+                org.json.JSONArray(groupIdsBase64.map { it.trim() }.filter { it.isNotEmpty() }),
+            )
+            credentialStore.put(accId, SignalCredentialKeys.BLOCKED_LIST, json.toString())
+            pushBlockedSync(active, accId)
+        }
+    }
+
+    /** SIG-BLOCK-01: re-send the locally persisted blocked list to linked devices. */
+    suspend fun syncBlockedList(accountId: String? = null): Result<Unit> =
+        withContext(signalDispatcher) {
+            runCatching {
+                val (accId, active) = resolveLiveAccount(accountId)
+                    ?: error("Signal non connecté")
+                pushBlockedSync(active, accId)
+            }
+        }
+
+    private fun pushBlockedSync(active: SignalSessionContext, accId: String) {
+        val raw = credentialStore.get(accId, SignalCredentialKeys.BLOCKED_LIST).orEmpty()
+        val json = if (raw.isBlank()) {
+            org.json.JSONObject()
+        } else {
+            runCatching { org.json.JSONObject(raw) }.getOrElse { org.json.JSONObject() }
+        }
+        fun stringList(key: String): List<String> {
+            val arr = json.optJSONArray(key) ?: return emptyList()
+            return buildList {
+                for (i in 0 until arr.length()) {
+                    arr.optString(i)?.trim()?.takeIf { it.isNotEmpty() }?.let { add(it) }
+                }
+            }
+        }
+        val numbers = stringList("numbers")
+        val acis = stringList("acis")
+        val groupIds = stringList("groupIds").mapNotNull { encoded ->
+            runCatching {
+                android.util.Base64.decode(encoded, android.util.Base64.NO_WRAP)
+            }.getOrNull()?.takeIf { it.isNotEmpty() }
+        }
+        val individuals = buildList {
+            for (aci in acis) {
+                runCatching {
+                    add(
+                        org.whispersystems.signalservice.api.messages.multidevice.BlockedListMessage.Individual(
+                            org.signal.core.models.ServiceId.ACI.parseOrThrow(aci),
+                            /* e164 = */ null,
+                        ),
+                    )
+                }
+            }
+            for (e164 in numbers) {
+                add(
+                    org.whispersystems.signalservice.api.messages.multidevice.BlockedListMessage.Individual(
+                        /* aci = */ null,
+                        e164,
+                    ),
+                )
+            }
+        }
+        active.messageSender.sendSyncMessage(
+            org.whispersystems.signalservice.api.messages.multidevice.SignalServiceSyncMessage.forBlocked(
+                org.whispersystems.signalservice.api.messages.multidevice.BlockedListMessage(
+                    individuals,
+                    groupIds,
+                ),
+            ),
+        )
+    }
+
+    /**
+     * Reserves and confirms a Signal username via [AccountApi] (nickname or nickname.discriminator).
+     * Persists the confirmed username under [SignalCredentialKeys.USERNAME].
+     */
+    suspend fun setUsername(
+        accountId: String,
+        username: String,
+    ): Result<Unit> = withContext(signalDispatcher) {
+        runCatching {
+            val (_, active) = resolveLiveAccount(accountId)
+                ?: error(liveAccountFailure(accountId).reason)
+            val trimmed = username.trim()
+            if (trimmed.isEmpty()) error("Nom d'utilisateur vide")
+            val candidates = if (trimmed.contains('.')) {
+                listOf(org.signal.libsignal.usernames.Username(trimmed))
+            } else {
+                org.signal.libsignal.usernames.Username.candidatesFrom(trimmed, 3, 32)
+            }
+            if (candidates.isEmpty()) error("Aucun candidat de nom d'utilisateur")
+            val hashes = candidates.map { org.signal.core.util.Base64.encodeUrlSafeWithoutPadding(it.hash) }
+            val reserved = active.accountApi.reserveUsername(hashes).successOrThrow()
+            val reservedHash = reserved.usernameHash
+                ?: error("Réservation username sans hash")
+            val chosen = candidates.firstOrNull {
+                org.signal.core.util.Base64.encodeUrlSafeWithoutPadding(it.hash) == reservedHash
+            } ?: error("Hash réservé introuvable parmi les candidats")
+            val link = chosen.generateLink()
+            active.accountApi.confirmUsername(chosen, link).successOrThrow()
+            credentialStore.put(accountId, SignalCredentialKeys.USERNAME, chosen.username)
+            Unit
+        }
+    }
+
+    /** Deletes the Signal username via [AccountApi.deleteUsername] and clears local credentials. */
+    suspend fun clearUsername(accountId: String): Result<Unit> = withContext(signalDispatcher) {
+        runCatching {
+            val (_, active) = resolveLiveAccount(accountId)
+                ?: error(liveAccountFailure(accountId).reason)
+            active.accountApi.deleteUsername().successOrThrow()
+            credentialStore.put(accountId, SignalCredentialKeys.USERNAME, "")
+            Unit
+        }
+    }
+
+    /**
+     * Sends a reaction to [messageId] (`${conversationId}_$sentTimestamp`).
+     * DM uses [deliverMessage]; GV2 (`gv2:`) uses [deliverGroupMessage] fan-out.
      */
     suspend fun addReaction(
         conversationId: String,
@@ -164,17 +360,25 @@ class SignalProtocol @Inject constructor(
             val (accId, active) = resolveLiveAccount(accountId)
                 ?: error("Signal non connecté")
             val remoteId = conversationId.removePrefix("${accId}_")
-            if (remoteId == conversationId || remoteId.startsWith("gv2:")) {
-                error("Réactions Signal disponibles en DM uniquement pour l’instant")
+            if (remoteId == conversationId) {
+                error("Conversation Signal invalide")
             }
             val targetTs = messageId.substringAfterLast('_').toLongOrNull()
                 ?: error("Message Signal invalide")
             val targetMsg = repository.getMessage(messageId)
-            val address = resolveSignalAddress(remoteId)
+            val masterKey = SignalGroupHelper.parseMasterKey(remoteId)
             val targetAuthor = when (targetMsg?.direction) {
                 ltechnologies.onionphone.securemessenger.core.model.MessageDirection.OUTGOING ->
                     active.localAddress.serviceId
-                else -> address.serviceId
+                else -> {
+                    if (masterKey != null) {
+                        val sender = targetMsg?.senderDisplayName
+                            ?: error("ServiceId auteur introuvable pour la réaction")
+                        resolveSignalAddress(sender).serviceId
+                    } else {
+                        resolveSignalAddress(remoteId).serviceId
+                    }
+                }
             } ?: error("ServiceId auteur introuvable pour la réaction")
             val reaction = SignalServiceDataMessage.Reaction(
                 emoji = emoji,
@@ -182,14 +386,25 @@ class SignalProtocol @Inject constructor(
                 targetAuthor = targetAuthor,
                 targetSentTimestamp = targetTs,
             )
-            val send = deliverMessage(
-                active,
-                conversationId,
-                accId,
-                address,
-                SanitizedText(""),
-                configure = { it.withReaction(reaction).withBody(null) },
-            )
+            val send = if (masterKey != null) {
+                deliverGroupMessage(
+                    activeSession = active,
+                    conversationId = conversationId,
+                    accId = accId,
+                    masterKeyBytes = masterKey,
+                    body = SanitizedText(""),
+                    configure = { it.withReaction(reaction).withBody(null) },
+                )
+            } else {
+                deliverMessage(
+                    active,
+                    conversationId,
+                    accId,
+                    resolveSignalAddress(remoteId),
+                    SanitizedText(""),
+                    configure = { it.withReaction(reaction).withBody(null) },
+                )
+            }
             if (send !is SendResult.Success) {
                 error((send as? SendResult.Failure)?.reason ?: "Réaction Signal échouée")
             }
@@ -197,7 +412,7 @@ class SignalProtocol @Inject constructor(
         }
     }
 
-    /** Remote-delete for everyone (1:1). Removes local row on success. */
+    /** Remote-delete for everyone (DM + GV2). Removes local row on success. */
     suspend fun deleteMessage(
         conversationId: String,
         messageId: String,
@@ -207,26 +422,175 @@ class SignalProtocol @Inject constructor(
             val (accId, active) = resolveLiveAccount(accountId)
                 ?: error("Signal non connecté")
             val remoteId = conversationId.removePrefix("${accId}_")
-            if (remoteId == conversationId || remoteId.startsWith("gv2:")) {
-                error("Suppression Signal disponible en DM uniquement pour l’instant")
+            if (remoteId == conversationId) {
+                error("Conversation Signal invalide")
             }
             val targetTs = messageId.substringAfterLast('_').toLongOrNull()
                 ?: error("Message Signal invalide")
-            val address = resolveSignalAddress(remoteId)
-            val send = deliverMessage(
-                active,
-                conversationId,
-                accId,
-                address,
-                SanitizedText(""),
-                configure = {
-                    it.withRemoteDelete(SignalServiceDataMessage.RemoteDelete(targetTs)).withBody(null)
-                },
-            )
+            val masterKey = SignalGroupHelper.parseMasterKey(remoteId)
+            val configure: (SignalServiceDataMessage.Builder) -> Unit = {
+                it.withRemoteDelete(SignalServiceDataMessage.RemoteDelete(targetTs)).withBody(null)
+            }
+            val send = if (masterKey != null) {
+                deliverGroupMessage(
+                    activeSession = active,
+                    conversationId = conversationId,
+                    accId = accId,
+                    masterKeyBytes = masterKey,
+                    body = SanitizedText(""),
+                    configure = configure,
+                )
+            } else {
+                deliverMessage(
+                    active,
+                    conversationId,
+                    accId,
+                    resolveSignalAddress(remoteId),
+                    SanitizedText(""),
+                    configure = configure,
+                )
+            }
             if (send !is SendResult.Success) {
                 error((send as? SendResult.Failure)?.reason ?: "Suppression Signal échouée")
             }
             repository.deleteMessages(listOf(messageId))
+        }
+    }
+
+    /**
+     * Outbound message edit (SIG-DM-07). DM uses [SignalServiceMessageSender.sendEditMessage];
+     * GV2 uses multi-recipient fan-out edit. Keeps the original local [messageId] on success
+     * (same as inbound [SignalMessageHandler] edit handling).
+     */
+    suspend fun editMessage(
+        conversationId: String,
+        messageId: String,
+        newBody: String,
+        accountId: String? = null,
+    ): Result<Unit> = withContext(signalDispatcher) {
+        runCatching {
+            val (accId, active) = resolveLiveAccount(accountId)
+                ?: error("Signal non connecté")
+            val remoteId = conversationId.removePrefix("${accId}_")
+            if (remoteId == conversationId) {
+                error("Conversation Signal invalide")
+            }
+            val targetTs = if (messageId.startsWith("${conversationId}_")) {
+                messageId.removePrefix("${conversationId}_").toLongOrNull()
+            } else {
+                messageId.substringAfterLast('_').toLongOrNull()
+            } ?: error("Message Signal invalide")
+            val body = MessageSanitizer.sanitize(newBody).value
+            val editTimestamp = System.currentTimeMillis()
+            val masterKey = SignalGroupHelper.parseMasterKey(remoteId)
+            if (masterKey != null) {
+                sendGroupEditMessage(active, accId, masterKey, body, editTimestamp, targetTs)
+            } else {
+                sendDmEditMessage(active, remoteId, body, editTimestamp, targetTs)
+            }
+            applyLocalEdit(conversationId, messageId, targetTs, body, editTimestamp)
+        }
+    }
+
+    private fun sendDmEditMessage(
+        active: SignalSessionContext,
+        remoteId: String,
+        body: String,
+        editTimestamp: Long,
+        targetSentTimestamp: Long,
+    ) {
+        val address = resolveSignalAddress(remoteId)
+        val dataMessage = SignalServiceDataMessage.newBuilder()
+            .withTimestamp(editTimestamp)
+            .withBody(body)
+            .build()
+        val sealed = resolveSealedSenderAccess(active, address)
+        val result = active.messageSender.sendEditMessage(
+            address,
+            sealed,
+            ContentHint.DEFAULT,
+            dataMessage,
+            SignalServiceMessageSender.IndividualSendEvents.EMPTY,
+            true,
+            targetSentTimestamp,
+        )
+        if (!result.isSuccess) {
+            error("Édition Signal échouée")
+        }
+    }
+
+    private fun sendGroupEditMessage(
+        active: SignalSessionContext,
+        accId: String,
+        masterKeyBytes: ByteArray,
+        body: String,
+        editTimestamp: Long,
+        targetSentTimestamp: Long,
+    ) {
+        val helper = groupHelper ?: SignalGroupHelper(context, accId, credentialStore).also { groupHelper = it }
+        val plan = helper.resolveSendTargets(active, masterKeyBytes)
+            ?: error("Membres du groupe Signal inconnus — attendez un message entrant")
+        val dataMessage = SignalServiceDataMessage.newBuilder()
+            .withTimestamp(editTimestamp)
+            .withBody(body)
+            .asGroupMessage(plan.groupContext)
+            .build()
+        val endorsements = plan.groupSendEndorsements
+        val sealed = if (endorsements != null && plan.unidentifiedAccess.size == plan.recipients.size) {
+            SealedSenderAccess.forFanOutGroupSend(
+                endorsements.forIndividuals(plan.recipients),
+                endorsements.sealedSenderCertificate,
+                plan.unidentifiedAccess,
+            )
+        } else {
+            plan.recipients.map { resolveSealedSenderAccess(active, it) }
+        }
+        val results = active.messageSender.sendEditMessage(
+            plan.recipients,
+            sealed,
+            false,
+            ContentHint.DEFAULT,
+            dataMessage,
+            SignalServiceMessageSender.LegacyGroupEvents.EMPTY,
+            null,
+            null,
+            true,
+            targetSentTimestamp,
+        )
+        val delivered = results.filter { it.isSuccess }.map { it.address.serviceId.toString() }.toSet()
+        if (plan.recipients.any { it.serviceId.toString() !in delivered }) {
+            error("Édition Signal groupe échouée")
+        }
+    }
+
+    private suspend fun applyLocalEdit(
+        conversationId: String,
+        messageId: String,
+        targetTs: Long,
+        newBody: String,
+        editTimestamp: Long,
+    ) {
+        val existing = repository.getMessage(messageId)
+            ?: repository.listMessagesByTimestamp(conversationId, targetTs).firstOrNull()
+        if (existing != null) {
+            val editPayload = JSONObject(existing.payloadJson ?: "{}")
+                .put("edited", true)
+                .put("targetSentTimestamp", targetTs)
+                .toString()
+            repository.upsertMessage(
+                existing.copy(
+                    body = newBody,
+                    payloadJson = editPayload,
+                ),
+            )
+        }
+        repository.getConversation(conversationId)?.let { conv ->
+            repository.upsertConversation(
+                conv.copy(
+                    lastMessagePreview = newBody,
+                    lastMessageAt = editTimestamp,
+                ),
+            )
         }
     }
 
@@ -238,6 +602,100 @@ class SignalProtocol @Inject constructor(
         val arr = json.optJSONArray("reactions") ?: org.json.JSONArray()
         arr.put(emoji)
         json.put("reactions", arr)
+        repository.upsertMessage(existing.copy(payloadJson = json.toString()))
+    }
+
+    /**
+     * SIG-POLL-02: send a [SignalServiceDataMessage.PollVote] for [pollMessageId]
+     * (`${conversationId}_$sentTimestamp`). Updates local poll payload `votes` on success.
+     */
+    suspend fun votePoll(
+        conversationId: String,
+        pollMessageId: String,
+        optionIndexes: List<Int>,
+        accountId: String? = null,
+    ): Result<Unit> = withContext(signalDispatcher) {
+        runCatching {
+            val (accId, active) = resolveLiveAccount(accountId)
+                ?: error("Signal non connecté")
+            val remoteId = conversationId.removePrefix("${accId}_")
+            if (remoteId == conversationId) {
+                error("Conversation Signal invalide")
+            }
+            if (optionIndexes.isEmpty()) {
+                error("Au moins une option de sondage est requise")
+            }
+            val targetTs = pollMessageId.substringAfterLast('_').toLongOrNull()
+                ?: error("Message sondage Signal invalide")
+            val targetMsg = repository.getMessage(pollMessageId)
+            val masterKey = SignalGroupHelper.parseMasterKey(remoteId)
+            val targetAuthor = when (targetMsg?.direction) {
+                ltechnologies.onionphone.securemessenger.core.model.MessageDirection.OUTGOING ->
+                    active.localAddress.serviceId
+                else -> {
+                    if (masterKey != null) {
+                        val sender = targetMsg?.senderDisplayName
+                            ?: error("ServiceId auteur introuvable pour le vote")
+                        resolveSignalAddress(sender).serviceId
+                    } else {
+                        resolveSignalAddress(remoteId).serviceId
+                    }
+                }
+            } ?: error("ServiceId auteur introuvable pour le vote")
+            val existingVotes = runCatching {
+                org.json.JSONObject(targetMsg?.payloadJson ?: "{}").optInt("voteCount", 0)
+            }.getOrDefault(0)
+            val vote = SignalServiceDataMessage.PollVote(
+                targetAuthor = targetAuthor,
+                targetSentTimestamp = targetTs,
+                optionIndexes = optionIndexes,
+                voteCount = existingVotes + 1,
+            )
+            val configure: (SignalServiceDataMessage.Builder) -> Unit = {
+                it.withPollVote(vote).withBody(null)
+            }
+            val send = if (masterKey != null) {
+                deliverGroupMessage(
+                    activeSession = active,
+                    conversationId = conversationId,
+                    accId = accId,
+                    masterKeyBytes = masterKey,
+                    body = SanitizedText(""),
+                    configure = configure,
+                )
+            } else {
+                deliverMessage(
+                    active,
+                    conversationId,
+                    accId,
+                    resolveSignalAddress(remoteId),
+                    SanitizedText(""),
+                    configure = configure,
+                )
+            }
+            if (send !is SendResult.Success) {
+                error((send as? SendResult.Failure)?.reason ?: "Vote sondage Signal échoué")
+            }
+            mergePollVotePayload(pollMessageId, optionIndexes, vote.voteCount)
+        }
+    }
+
+    private suspend fun mergePollVotePayload(
+        pollMessageId: String,
+        optionIndexes: List<Int>,
+        voteCount: Int,
+    ) {
+        val existing = repository.getMessage(pollMessageId) ?: return
+        val json = runCatching {
+            org.json.JSONObject(existing.payloadJson ?: "{}")
+        }.getOrElse { org.json.JSONObject() }
+        val votes = json.optJSONArray("votes") ?: org.json.JSONArray()
+        val entry = org.json.JSONObject()
+            .put("optionIndexes", org.json.JSONArray(optionIndexes))
+            .put("voteCount", voteCount)
+        votes.put(entry)
+        json.put("votes", votes)
+        json.put("voteCount", voteCount)
         repository.upsertMessage(existing.copy(payloadJson = json.toString()))
     }
 
@@ -1087,6 +1545,164 @@ class SignalProtocol @Inject constructor(
         }
     }
 
+    /**
+     * Leaves a Signal GV2 group and removes the local conversation row.
+     *
+     * UI note: [MessengerProtocol.closeConversation] is only a chat-screen dispose hook
+     * (see ChatScreen DisposableEffect) — it must not call leave. Call this API from an
+     * explicit “Quitter le groupe” action when one is added.
+     */
+    suspend fun leaveGroup(conversationId: String, accountId: String? = null): Result<Unit> =
+        withContext(signalDispatcher) {
+            runCatching {
+                val (accId, activeSession) = resolveLiveAccount(accountId)
+                    ?: error("Signal non connecté")
+                val remoteId = conversationId.removePrefix("${accId}_")
+                if (remoteId == conversationId) error("Conversation Signal invalide")
+                val masterKey = SignalGroupHelper.parseMasterKey(remoteId)
+                    ?: error("Seul un groupe Signal (gv2:) peut être quitté")
+                val helper = groupHelper
+                    ?: SignalGroupHelper(context, accId, credentialStore).also { groupHelper = it }
+                if (!helper.leaveGroup(activeSession, masterKey)) {
+                    error("Impossible de quitter le groupe Signal")
+                }
+                repository.deleteConversation(conversationId)
+            }
+        }
+
+    /** SIG-GV2-04: rename a GV2 group title. */
+    suspend fun updateGroupTitle(
+        conversationId: String,
+        title: String,
+        accountId: String? = null,
+    ): Result<Unit> = withContext(signalDispatcher) {
+        runCatching {
+            val (accId, activeSession, masterKey, helper) = resolveGv2Admin(conversationId, accountId)
+            if (!helper.updateGroupTitle(activeSession, masterKey, title)) {
+                error("Impossible de renommer le groupe Signal")
+            }
+            repository.getConversation(conversationId)?.let { conv ->
+                repository.upsertConversation(conv.copy(title = title.trim()))
+            }
+            Unit
+        }
+    }
+
+    /** SIG-GV2-04: add/invite members by ACI. */
+    suspend fun addGroupMembers(
+        conversationId: String,
+        acis: Collection<String>,
+        accountId: String? = null,
+    ): Result<Unit> = withContext(signalDispatcher) {
+        runCatching {
+            val (_, activeSession, masterKey, helper) = resolveGv2Admin(conversationId, accountId)
+            if (!helper.addGroupMembers(activeSession, masterKey, acis.toSet())) {
+                error("Impossible d'ajouter des membres au groupe Signal")
+            }
+        }
+    }
+
+    /** SIG-GV2-04: remove members by ACI (same remove builder as leave). */
+    suspend fun removeGroupMembers(
+        conversationId: String,
+        acis: Collection<String>,
+        accountId: String? = null,
+    ): Result<Unit> = withContext(signalDispatcher) {
+        runCatching {
+            val (_, activeSession, masterKey, helper) = resolveGv2Admin(conversationId, accountId)
+            if (!helper.removeGroupMembers(activeSession, masterKey, acis.toSet())) {
+                error("Impossible de retirer des membres du groupe Signal")
+            }
+        }
+    }
+
+    /**
+     * SIG-GV2-05: enable/reset GV2 invite link and return `https://signal.group/#…` URL.
+     * When [reset] is false, returns the current link if a password is already known.
+     */
+    suspend fun createGroupInviteLink(
+        conversationId: String,
+        reset: Boolean = true,
+        requireAdminApproval: Boolean = false,
+        accountId: String? = null,
+    ): Result<String> = withContext(signalDispatcher) {
+        runCatching {
+            val (_, activeSession, masterKey, helper) = resolveGv2Admin(conversationId, accountId)
+            if (!reset) {
+                helper.currentInviteLinkUrl(activeSession, masterKey)?.let { return@runCatching it }
+            }
+            helper.enableOrResetInviteLink(activeSession, masterKey, requireAdminApproval)
+                ?: error("Impossible de créer le lien d'invitation Signal")
+        }
+    }
+
+    /** SIG-GV2-05: disable join-by-link for a GV2 group. */
+    suspend fun disableGroupInviteLink(
+        conversationId: String,
+        accountId: String? = null,
+    ): Result<Unit> = withContext(signalDispatcher) {
+        runCatching {
+            val (_, activeSession, masterKey, helper) = resolveGv2Admin(conversationId, accountId)
+            if (!helper.disableInviteLink(activeSession, masterKey)) {
+                error("Impossible de désactiver le lien d'invitation Signal")
+            }
+        }
+    }
+
+    /**
+     * SIG-GV2-05: join (or request to join) via invite URL / fragment.
+     * Creates/upserts the local conversation and returns its id.
+     */
+    suspend fun joinGroupByLink(
+        urlOrPassword: String,
+        accountId: String? = null,
+    ): Result<String> = withContext(signalDispatcher) {
+        runCatching {
+            val (accId, activeSession) = resolveLiveAccount(accountId)
+                ?: error("Signal non connecté")
+            val helper = groupHelper
+                ?: SignalGroupHelper(context, accId, credentialStore).also { groupHelper = it }
+            val preview = helper.fetchJoinInfoByLink(activeSession, urlOrPassword)
+                ?: error("Lien d'invitation Signal invalide ou inactif")
+            val masterKey = helper.joinByInviteLink(activeSession, urlOrPassword)
+                ?: error("Impossible de rejoindre le groupe via le lien")
+            val gv2Id = "gv2:" + android.util.Base64.encodeToString(masterKey, android.util.Base64.NO_WRAP)
+            val convId = signalConversationId(accId, gv2Id)
+            repository.upsertConversation(
+                Conversation(
+                    id = convId,
+                    protocol = ProtocolId.SIGNAL,
+                    accountId = accId,
+                    remoteId = gv2Id,
+                    title = preview.title ?: "Groupe Signal",
+                ),
+            )
+            convId
+        }
+    }
+
+    private fun resolveGv2Admin(
+        conversationId: String,
+        accountId: String?,
+    ): QuadrupleGv2 {
+        val (accId, activeSession) = resolveLiveAccount(accountId)
+            ?: error("Signal non connecté")
+        val remoteId = conversationId.removePrefix("${accId}_")
+        if (remoteId == conversationId) error("Conversation Signal invalide")
+        val masterKey = SignalGroupHelper.parseMasterKey(remoteId)
+            ?: error("Seul un groupe Signal (gv2:) accepte cette action")
+        val helper = groupHelper
+            ?: SignalGroupHelper(context, accId, credentialStore).also { groupHelper = it }
+        return QuadrupleGv2(accId, activeSession, masterKey, helper)
+    }
+
+    private data class QuadrupleGv2(
+        val accId: String,
+        val session: SignalSessionContext,
+        val masterKey: ByteArray,
+        val helper: SignalGroupHelper,
+    )
+
     /** Parses `Title|+33...,+44...` or `Title|aci,aci`. */
     private fun parseSignalGroupCreate(remoteId: String): Pair<String, List<String>>? {
         val sep = remoteId.indexOf('|')
@@ -1406,8 +2022,8 @@ class SignalProtocol @Inject constructor(
         }
         configure(builder)
         val dataMessage = builder.build()
-        val sealed = resolveSealedSenderAccess(activeSession, recipient)
-        val result = activeSession.messageSender.sendDataMessage(
+        var sealed = resolveSealedSenderAccess(activeSession, recipient)
+        var result = activeSession.messageSender.sendDataMessage(
             recipient,
             sealed,
             ContentHint.DEFAULT,
@@ -1416,6 +2032,20 @@ class SignalProtocol @Inject constructor(
             true,
             false,
         )
+        // SIG-SEAL-01: one retry after peer profile-key refresh when sealed send fails.
+        if (!result.isSuccess && sealed != SealedSenderAccess.NONE) {
+            noteSealedSenderFailure(recipient.identifier)
+            sealed = resolveSealedSenderAccess(activeSession, recipient)
+            result = activeSession.messageSender.sendDataMessage(
+                recipient,
+                sealed,
+                ContentHint.DEFAULT,
+                dataMessage,
+                SignalServiceMessageSender.IndividualSendEvents.EMPTY,
+                true,
+                false,
+            )
+        }
         if (!result.isSuccess) {
             return SendResult.Failure("Envoi Signal échoué")
         }
@@ -1453,7 +2083,7 @@ class SignalProtocol @Inject constructor(
         accountId: String?,
     ): SendResult = withContext(signalDispatcher) {
         when (content) {
-            is OutgoingContent.Text -> sendMessage(conversationId, content.body, accountId)
+            is OutgoingContent.Text -> sendTextContent(conversationId, content, accountId)
             is OutgoingContent.Media -> sendMedia(conversationId, content.attachment, content.caption, accountId)
             is OutgoingContent.Location -> sendLocation(conversationId, content, accountId)
             is OutgoingContent.Ephemeral -> sendEphemeral(conversationId, content, accountId)
@@ -1466,11 +2096,93 @@ class SignalProtocol @Inject constructor(
         }
     }
 
+    /**
+     * Text send with optional Signal quote ([OutgoingContent.Text.replyToMessageId]).
+     */
+    private suspend fun sendTextContent(
+        conversationId: String,
+        content: OutgoingContent.Text,
+        accountId: String?,
+    ): SendResult {
+        val replyId = content.replyToMessageId
+        if (replyId.isNullOrBlank()) {
+            return sendMessage(conversationId, content.body, accountId)
+        }
+        val (accId, activeSession) = resolveLiveAccount(accountId)
+            ?: return liveAccountFailure(accountId)
+        val remoteId = conversationId.removePrefix("${accId}_")
+        if (remoteId == conversationId) {
+            return SendResult.Failure("Conversation Signal invalide")
+        }
+        return try {
+            val quote = buildQuote(activeSession, remoteId, replyId)
+            val configure: (SignalServiceDataMessage.Builder) -> Unit = { builder ->
+                if (quote != null) builder.withQuote(quote)
+            }
+            val masterKey = SignalGroupHelper.parseMasterKey(remoteId)
+            if (masterKey != null) {
+                deliverGroupMessage(
+                    activeSession = activeSession,
+                    conversationId = conversationId,
+                    accId = accId,
+                    masterKeyBytes = masterKey,
+                    body = content.body,
+                    configure = configure,
+                )
+            } else {
+                deliverMessage(
+                    activeSession = activeSession,
+                    conversationId = conversationId,
+                    accId = accId,
+                    recipient = resolveSignalAddress(remoteId),
+                    body = content.body,
+                    configure = configure,
+                )
+            }
+        } catch (e: Exception) {
+            Timber.e(e, "Signal quoted send failed")
+            SendResult.Failure(e.message ?: "Envoi Signal échoué")
+        }
+    }
+
+    private suspend fun buildQuote(
+        activeSession: SignalSessionContext,
+        remoteId: String,
+        replyToMessageId: String,
+    ): SignalServiceDataMessage.Quote? {
+        val target = repository.getMessage(replyToMessageId) ?: return null
+        val author = when (target.direction) {
+            ltechnologies.onionphone.securemessenger.core.model.MessageDirection.OUTGOING ->
+                activeSession.localAddress.serviceId
+            else -> {
+                // Groups store ACI in senderDisplayName; DMs may store e164 — fall back to peer.
+                val fromSender = target.senderDisplayName?.let { name ->
+                    runCatching { org.signal.core.models.ServiceId.ACI.parseOrThrow(name) }.getOrNull()
+                }
+                fromSender
+                    ?: runCatching { resolveSignalAddress(remoteId).serviceId }.getOrNull()
+            }
+        } ?: return null
+        return SignalServiceDataMessage.Quote(
+            id = target.timestamp,
+            author = author,
+            text = target.body,
+            attachments = null,
+            mentions = null,
+            type = SignalServiceDataMessage.Quote.Type.NORMAL,
+            bodyRanges = null,
+        )
+    }
+
     private suspend fun sendEphemeral(
         conversationId: String,
         content: OutgoingContent.Ephemeral,
         accountId: String?,
     ): SendResult {
+        // Blank body → conversation-level timer update (EXPIRATION_TIMER_UPDATE), not a chat bubble.
+        if (content.body.value.isBlank()) {
+            return setDisappearingTimerLocked(conversationId, content.expireSeconds, accountId)
+        }
         val (accId, activeSession) = resolveLiveAccount(accountId)
             ?: return liveAccountFailure(accountId)
         val remoteId = conversationId.removePrefix("${accId}_")
@@ -1491,6 +2203,73 @@ class SignalProtocol @Inject constructor(
         } catch (e: Exception) {
             Timber.e(e, "Signal ephemeral send failed")
             SendResult.Failure(e.message ?: "Envoi éphémère échoué")
+        }
+    }
+
+    /**
+     * Sends a DataMessage with [asExpirationUpdate] + [withExpiration] so peers update the
+     * conversation disappearing timer (0 disables). Used by blank [OutgoingContent.Ephemeral].
+     */
+    suspend fun setDisappearingTimer(
+        conversationId: String,
+        expireSeconds: Int,
+        accountId: String? = null,
+    ): SendResult = withContext(signalDispatcher) {
+        setDisappearingTimerLocked(conversationId, expireSeconds, accountId)
+    }
+
+    private suspend fun setDisappearingTimerLocked(
+        conversationId: String,
+        expireSeconds: Int,
+        accountId: String?,
+    ): SendResult {
+        val (accId, activeSession) = resolveLiveAccount(accountId)
+            ?: return liveAccountFailure(accountId)
+        val remoteId = conversationId.removePrefix("${accId}_")
+        if (remoteId == conversationId) {
+            return SendResult.Failure("Conversation Signal invalide")
+        }
+        val seconds = expireSeconds.coerceAtLeast(0)
+        val body = SanitizedText("")
+        val configure: (SignalServiceDataMessage.Builder) -> Unit = {
+            it.asExpirationUpdate()
+                .withExpiration(seconds)
+                .withBody(null)
+        }
+        val payload = JSONObject()
+            .put("expirationUpdate", true)
+            .put("expireTimer", seconds)
+            .toString()
+        return try {
+            val masterKey = SignalGroupHelper.parseMasterKey(remoteId)
+            if (masterKey != null) {
+                deliverGroupMessage(
+                    activeSession = activeSession,
+                    conversationId = conversationId,
+                    accId = accId,
+                    masterKeyBytes = masterKey,
+                    body = body,
+                    expireSeconds = seconds.takeIf { it > 0 },
+                    kind = MessageKind.SYSTEM,
+                    payloadJson = payload,
+                    configure = configure,
+                )
+            } else {
+                deliverMessage(
+                    activeSession = activeSession,
+                    conversationId = conversationId,
+                    accId = accId,
+                    recipient = resolveSignalAddress(remoteId),
+                    body = body,
+                    expireSeconds = seconds.takeIf { it > 0 },
+                    kind = MessageKind.SYSTEM,
+                    payloadJson = payload,
+                    configure = configure,
+                )
+            }
+        } catch (e: Exception) {
+            Timber.e(e, "Signal expiration timer update failed")
+            SendResult.Failure(e.message ?: "Mise à jour timer éphémère échouée")
         }
     }
 
@@ -1977,7 +2756,10 @@ class SignalProtocol @Inject constructor(
     }
 
     /**
-     * Uses peer profile key from Storage Service when available; otherwise falls back to identified send.
+     * Uses peer profile key from Storage Service ([SignalStorageSync] → credentialStore)
+     * when available; otherwise falls back to identified send ([SealedSenderAccess.NONE]).
+     * After a sealed-send failure, [noteSealedSenderFailure] triggers one ProfileApi
+     * validation; a stale key is dropped so the next resolve uses identified send.
      */
     private fun resolveSealedSenderAccess(
         activeSession: SignalSessionContext,
@@ -2000,15 +2782,47 @@ class SignalProtocol @Inject constructor(
             )
     }
 
+    /** ACIs whose sealed send failed once — validate/drop stored profile key on next resolve. */
+    private val sealedSenderRefreshNeeded = ConcurrentHashMap.newKeySet<String>()
+
+    private fun noteSealedSenderFailure(aci: String) {
+        sealedSenderRefreshNeeded.add(aci)
+    }
+
     private fun resolveUnidentifiedAccess(
         activeSession: SignalSessionContext,
         recipient: SignalServiceAddress,
         unrestrictedForStory: Boolean,
     ): org.whispersystems.signalservice.api.crypto.UnidentifiedAccess? {
+        val accId = accountId ?: return null
         val aci = recipient.identifier
-        val encoded = credentialStore.get(accountId ?: return null, SignalCredentialKeys.peerProfileKey(aci))
+        val encoded = credentialStore.get(accId, SignalCredentialKeys.peerProfileKey(aci))
             ?: return null
         val profileKey = SignalFeatureHelpers.decodeProfileKey(encoded) ?: return null
+        if (sealedSenderRefreshNeeded.remove(aci)) {
+            val stillValid = runCatching {
+                val peerAci = org.signal.core.models.ServiceId.ACI.parseOrThrow(aci)
+                runBlocking {
+                    when (
+                        val result = activeSession.profileApi.getVersionedProfile(
+                            peerAci,
+                            profileKey,
+                            /* sealedSenderAccess = */ null,
+                        )
+                    ) {
+                        is NetworkResult.Success -> true
+                        else -> {
+                            Timber.d("SIG-SEAL-01 peer profile key stale for %s: %s", aci, result)
+                            false
+                        }
+                    }
+                }
+            }.getOrDefault(false)
+            if (!stillValid) {
+                credentialStore.put(accId, SignalCredentialKeys.peerProfileKey(aci), "")
+                return null
+            }
+        }
         return try {
             val certBytes = activeSession.pushServiceSocket.senderCertificate
             val accessKey = org.whispersystems.signalservice.api.crypto.UnidentifiedAccess.deriveAccessKeyFrom(profileKey)
@@ -2260,6 +3074,10 @@ class SignalProtocol @Inject constructor(
     override suspend fun getAccountProfile(accountId: String): AccountProfile? = withContext(signalDispatcher) {
         val storedName = credentialStore.get(accountId, SignalCredentialKeys.PROFILE_NAME)
         val storedAbout = credentialStore.get(accountId, SignalCredentialKeys.PROFILE_ABOUT)
+        val storedUsername = credentialStore.get(accountId, SignalCredentialKeys.USERNAME)
+            ?.takeIf { it.isNotBlank() }
+        val storedAvatar = credentialStore.get(accountId, SignalCredentialKeys.PROFILE_AVATAR_PATH)
+            ?.takeIf { it.isNotBlank() }
         val live = resolveLiveAccount(accountId)
         if (live != null) {
             val (_, activeSession) = live
@@ -2278,8 +3096,10 @@ class SignalProtocol @Inject constructor(
                         accountId = accountId,
                         protocol = ProtocolId.SIGNAL,
                         displayName = name ?: storedName ?: activeSession.e164,
+                        handle = storedUsername,
                         phone = activeSession.e164,
                         bio = about ?: storedAbout,
+                        avatarLocalPath = storedAvatar,
                     )
                 }.onFailure { Timber.d(it, "Signal profile fetch failed") }
             }
@@ -2287,8 +3107,10 @@ class SignalProtocol @Inject constructor(
                 accountId = accountId,
                 protocol = ProtocolId.SIGNAL,
                 displayName = storedName ?: activeSession.e164,
+                handle = storedUsername,
                 phone = activeSession.e164,
                 bio = storedAbout,
+                avatarLocalPath = storedAvatar,
             )
         }
         // Non-live Signal row: local credentials only — never leak the other session's e164/profile.
@@ -2296,8 +3118,10 @@ class SignalProtocol @Inject constructor(
             accountId = accountId,
             protocol = ProtocolId.SIGNAL,
             displayName = storedName ?: accountId,
+            handle = storedUsername,
             phone = credentialStore.get(accountId, SignalCredentialKeys.E164),
             bio = storedAbout,
+            avatarLocalPath = storedAvatar,
         )
     }
 
@@ -2333,6 +3157,73 @@ class SignalProtocol @Inject constructor(
             credentialStore.put(accountId, SignalCredentialKeys.PROFILE_NAME, displayName)
             if (bio != null) {
                 credentialStore.put(accountId, SignalCredentialKeys.PROFILE_ABOUT, bio)
+            }
+            Unit
+        }
+    }
+
+    /**
+     * Uploads or clears the Signal profile avatar (ProfileApi → CDN via Tor SOCKS).
+     * Keeps current name/about from credentials. Pass [localPath]=null to remove the avatar.
+     */
+    suspend fun setProfileAvatar(
+        accountId: String,
+        localPath: String?,
+    ): Result<Unit> = withContext(signalDispatcher) {
+        val live = resolveLiveAccount(accountId)
+            ?: return@withContext Result.failure(
+                IllegalStateException(liveAccountFailure(accountId).reason),
+            )
+        val (_, activeSession) = live
+        runCatching {
+            var profileKey = activeSession.profileKey
+            if (profileKey == null) {
+                profileKey = SignalFeatureHelpers.generateProfileKey()
+                credentialStore.put(
+                    accountId,
+                    SignalCredentialKeys.PROFILE_KEY,
+                    SignalFeatureHelpers.encodeProfileKey(profileKey),
+                )
+            }
+            val displayName = credentialStore.get(accountId, SignalCredentialKeys.PROFILE_NAME)
+            val about = credentialStore.get(accountId, SignalCredentialKeys.PROFILE_ABOUT)
+            val avatarParams = if (localPath == null) {
+                AvatarUploadParams.forAvatar(null)
+            } else {
+                val file = File(localPath)
+                if (!file.isFile) error("Avatar introuvable: $localPath")
+                val mime = when {
+                    localPath.endsWith(".png", ignoreCase = true) -> "image/png"
+                    localPath.endsWith(".webp", ignoreCase = true) -> "image/webp"
+                    localPath.endsWith(".gif", ignoreCase = true) -> "image/gif"
+                    else -> "image/jpeg"
+                }
+                val stream = org.whispersystems.signalservice.api.util.StreamDetails(
+                    FileInputStream(file),
+                    mime,
+                    file.length(),
+                )
+                AvatarUploadParams.forAvatar(stream)
+            }
+            try {
+                activeSession.profileApi.setVersionedProfile(
+                    activeSession.aci,
+                    profileKey!!,
+                    displayName,
+                    about,
+                    null,
+                    null,
+                    avatarParams,
+                    emptyList(),
+                    false,
+                ).successOrThrow()
+            } finally {
+                avatarParams.stream?.close()
+            }
+            if (localPath == null) {
+                credentialStore.put(accountId, SignalCredentialKeys.PROFILE_AVATAR_PATH, "")
+            } else {
+                credentialStore.put(accountId, SignalCredentialKeys.PROFILE_AVATAR_PATH, localPath)
             }
             Unit
         }

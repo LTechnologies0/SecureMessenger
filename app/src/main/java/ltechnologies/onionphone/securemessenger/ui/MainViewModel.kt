@@ -273,6 +273,8 @@ class MainViewModel @Inject constructor(
                     matrixProtocol()?.editMessage(conversationId, messageId, newBody)?.isSuccess == true
                 ProtocolId.TELEGRAM ->
                     telegramProtocol()?.editMessage(conversationId, messageId, newBody)?.isSuccess == true
+                ProtocolId.SIGNAL ->
+                    signalProtocol()?.editMessage(conversationId, messageId, newBody)?.isSuccess == true
                 else -> false
             }
             onResult(ok)

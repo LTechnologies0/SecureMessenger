@@ -80,6 +80,10 @@ internal object SignalCredentialKeys {
     const val CDSI_TOKEN = "cdsiToken"
     const val PROFILE_NAME = "profileName"
     const val PROFILE_ABOUT = "profileAbout"
+    /** Signal username (`nickname.discriminator`) after reserve+confirm. */
+    const val USERNAME = "username"
+    /** Local path of the last uploaded profile avatar (hint for UI). */
+    const val PROFILE_AVATAR_PATH = "profileAvatarPath"
     const val CONFIG_READ_RECEIPTS = "configReadReceipts"
     const val CONFIG_TYPING_INDICATORS = "configTypingIndicators"
     const val CONFIG_LINK_PREVIEWS = "configLinkPreviews"

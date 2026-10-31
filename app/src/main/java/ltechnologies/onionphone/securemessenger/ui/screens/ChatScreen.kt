@@ -138,6 +138,7 @@ fun ChatScreen(
     var stickerLoading by remember { mutableStateOf(false) }
     var stickerChoices by remember { mutableStateOf<List<TelegramSticker>>(emptyList()) }
     var actionMessage by remember { mutableStateOf<Message?>(null) }
+    var replyTarget by remember(conversationId) { mutableStateOf<Message?>(null) }
     var editDraft by remember { mutableStateOf("") }
     val allConversations by viewModel.conversations.collectAsState()
     val signalLinkSync = protocol == ProtocolId.SIGNAL &&
@@ -504,6 +505,23 @@ fun ChatScreen(
                         modifier = Modifier.padding(horizontal = 4.dp),
                     )
                 }
+                replyTarget?.let { target ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 4.dp, vertical = 2.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = "Réponse à : ${target.body.take(80).ifBlank { "message" }}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(onClick = { replyTarget = null }) { Text("Annuler") }
+                    }
+                }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -533,10 +551,12 @@ fun ChatScreen(
                                         subject = emailSubject.trim().takeIf { it.isNotEmpty() },
                                         cc = emailCc.trim().takeIf { it.isNotEmpty() },
                                         bcc = emailBcc.trim().takeIf { it.isNotEmpty() },
+                                        replyToMessageId = replyTarget?.id,
                                     ),
                                 ) { ok, reason, remapped ->
                                     if (ok) {
                                         draft = ""
+                                        replyTarget = null
                                         sendError = null
                                         remapped?.let(onConversationRemapped)
                                     } else {
@@ -759,17 +779,22 @@ fun ChatScreen(
                             if (capabilities.messageReply) {
                                 TextButton(
                                     onClick = {
-                                        draft = buildString {
-                                            if (msg.body.isNotBlank()) {
-                                                append("> ")
-                                                append(msg.body.lines().joinToString("\n> "))
-                                                append("\n\n")
-                                            }
-                                        } + draft
+                                        if (protocol == ProtocolId.SIGNAL) {
+                                            // Structured Signal quote via OutgoingContent.Text.replyToMessageId
+                                            replyTarget = msg
+                                        } else {
+                                            draft = buildString {
+                                                if (msg.body.isNotBlank()) {
+                                                    append("> ")
+                                                    append(msg.body.lines().joinToString("\n> "))
+                                                    append("\n\n")
+                                                }
+                                            } + draft
+                                        }
                                         dialog = ComposerDialog.NONE
                                         actionMessage = null
                                     },
-                                ) { Text("Répondre (citation)") }
+                                ) { Text(if (protocol == ProtocolId.SIGNAL) "Répondre" else "Répondre (citation)") }
                             }
                             if (capabilities.messageForward) {
                                 TextButton(onClick = {

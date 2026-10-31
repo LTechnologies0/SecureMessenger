@@ -44,12 +44,16 @@
 ### Signal
 | ID | Prio | État | Note |
 |----|------|------|------|
-| SG-01 | P3 | Volontaire | RingRTC A/V |
+| SG-01 | P3 | Volontaire | RingRTC A/V — **blocked** |
 | SG-02 | P3 | Proto-only | `sendStory` existant, flag false + fail-closed |
-| SG-04/05 | P3 | Absent | SVR2 / registration lock |
-| SG-06 | P2 | Absent | Safety number groupes + verified persist |
-| SG-08 | P1 | Partiel | Edit outbound non câblé (inbound OK) |
-| SG-10–14 | P2 | Absent | Disappearing UX, CDS, payments, group admin |
+| SG-04/05 | P3 | Absent | SVR2 / registration lock — **blocked** |
+| SG-06 | P2 | Partiel | `markIdentityVerified` + sync; pas de SN groupes |
+| SG-08 | P1 | **Fait** | Edit outbound DM+GV2 (`feat/parity-signal`) |
+| SG-10 | P2 | **Fait** | Timer disparaissant + `setDisappearingTimer` |
+| SG-11 | P2 | **Fait** | CDS/CDSI (déjà) |
+| SG-12 | P3 | Absent | Payments — **blocked** |
+| SG-13/14 | P2 | Partiel | Admin titre/membres/leave + invite links API; roles/ban/QR UI manquent |
+| — | — | Inventaire | Voir `docs/features/SIGNAL_FULL_INVENTORY.md` |
 
 ### Matrix
 | ID | Prio | État | Note |

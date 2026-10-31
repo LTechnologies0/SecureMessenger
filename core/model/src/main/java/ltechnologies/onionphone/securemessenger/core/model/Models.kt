@@ -228,6 +228,11 @@ sealed class OutgoingContent {
         val cc: String? = null,
         /** Optional comma-separated Bcc recipients (email only). */
         val bcc: String? = null,
+        /**
+         * Local message id being replied to (Signal quote / similar).
+         * Ignored by protocols that do not support structured replies.
+         */
+        val replyToMessageId: String? = null,
     ) : OutgoingContent()
 
     data class Media(
