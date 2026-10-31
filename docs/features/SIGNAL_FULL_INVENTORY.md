@@ -136,7 +136,7 @@ Capabilities (`baseSignalCapabilities`): DM/group/media/typing/receipts/E2EE/con
 | SIG-GV2-02 | Send (sender key) | `sendGroupDataMessage` | **done** | + fan-out fallback |
 | SIG-GV2-03 | Refresh group / members | `getGroup` | **partial** | Cache + storage seed; no change-log UI |
 | SIG-GV2-04 | Admin: title/desc/members/roles/ban | `patchGroup` + GroupOperations | **partial** | Title + add/remove members via `SignalGroupHelper` / `SignalProtocol`; roles/ban/link/desc later |
-| SIG-GV2-05 | Invite links / join by link | join info + link password | **missing** | |
+| SIG-GV2-05 | Invite links / join by link | join info + link password | **partial** | `enableOrResetInviteLink` / `createGroupInviteLink` / `joinGroupByLink` / join-info fetch; no QR UI |
 | SIG-GV2-06 | Leave / terminate / announce | leave builders | **partial** | `SignalGroupHelper.leaveGroup` + `SignalProtocol.leaveGroup` (self-remove via `createRemoveMembersChange`/`patchGroup`); no terminate/announce; UI not wired (`closeConversation` is screen dispose only) |
 | SIG-GV2-07 | Group avatar upload | `uploadAvatar` | **missing** | |
 | SIG-GV2-08 | SKDM process | `SignalGroupSessionBuilder` | **done** | Handler |
@@ -207,7 +207,7 @@ Priority order for atomic commits on this branch (excludes blocked):
 7. ~~**SIG-PROF-02** — profile avatar upload~~
 8. **SIG-SEAL-01** — fetch peer profile key for sealed sender
 9. **SIG-POLL-02** — poll vote
-10. **SIG-GV2-05** — invite links (if time)
+10. ~~**SIG-GV2-05** — invite links~~ (enable/reset + join by URL; no QR UI)
 11. **SIG-STOR-02** — storage write-back (if time)
 12. **SIG-STICK-02** — sticker pack retrieve (if time)
 

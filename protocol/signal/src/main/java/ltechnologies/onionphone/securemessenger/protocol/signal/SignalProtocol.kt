@@ -1529,6 +1529,71 @@ class SignalProtocol @Inject constructor(
         }
     }
 
+    /**
+     * SIG-GV2-05: enable/reset GV2 invite link and return `https://signal.group/#…` URL.
+     * When [reset] is false, returns the current link if a password is already known.
+     */
+    suspend fun createGroupInviteLink(
+        conversationId: String,
+        reset: Boolean = true,
+        requireAdminApproval: Boolean = false,
+        accountId: String? = null,
+    ): Result<String> = withContext(signalDispatcher) {
+        runCatching {
+            val (_, activeSession, masterKey, helper) = resolveGv2Admin(conversationId, accountId)
+            if (!reset) {
+                helper.currentInviteLinkUrl(activeSession, masterKey)?.let { return@runCatching it }
+            }
+            helper.enableOrResetInviteLink(activeSession, masterKey, requireAdminApproval)
+                ?: error("Impossible de créer le lien d'invitation Signal")
+        }
+    }
+
+    /** SIG-GV2-05: disable join-by-link for a GV2 group. */
+    suspend fun disableGroupInviteLink(
+        conversationId: String,
+        accountId: String? = null,
+    ): Result<Unit> = withContext(signalDispatcher) {
+        runCatching {
+            val (_, activeSession, masterKey, helper) = resolveGv2Admin(conversationId, accountId)
+            if (!helper.disableInviteLink(activeSession, masterKey)) {
+                error("Impossible de désactiver le lien d'invitation Signal")
+            }
+        }
+    }
+
+    /**
+     * SIG-GV2-05: join (or request to join) via invite URL / fragment.
+     * Creates/upserts the local conversation and returns its id.
+     */
+    suspend fun joinGroupByLink(
+        urlOrPassword: String,
+        accountId: String? = null,
+    ): Result<String> = withContext(signalDispatcher) {
+        runCatching {
+            val (accId, activeSession) = resolveLiveAccount(accountId)
+                ?: error("Signal non connecté")
+            val helper = groupHelper
+                ?: SignalGroupHelper(context, accId, credentialStore).also { groupHelper = it }
+            val preview = helper.fetchJoinInfoByLink(activeSession, urlOrPassword)
+                ?: error("Lien d'invitation Signal invalide ou inactif")
+            val masterKey = helper.joinByInviteLink(activeSession, urlOrPassword)
+                ?: error("Impossible de rejoindre le groupe via le lien")
+            val gv2Id = "gv2:" + android.util.Base64.encodeToString(masterKey, android.util.Base64.NO_WRAP)
+            val convId = signalConversationId(accId, gv2Id)
+            repository.upsertConversation(
+                Conversation(
+                    id = convId,
+                    protocol = ProtocolId.SIGNAL,
+                    accountId = accId,
+                    remoteId = gv2Id,
+                    title = preview.title ?: "Groupe Signal",
+                ),
+            )
+            convId
+        }
+    }
+
     private fun resolveGv2Admin(
         conversationId: String,
         accountId: String?,

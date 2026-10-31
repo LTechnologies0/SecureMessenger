@@ -33,4 +33,34 @@ class SignalGroupHelperTest {
         assertFalse(accessKey.contentEquals(ByteArray(16)))
         assertTrue(accessKey.any { it != 0.toByte() })
     }
+
+    @Test
+    fun inviteLink_roundTripsMasterKeyAndPassword() {
+        val masterKey = ByteArray(32) { (it + 3).toByte() }
+        val password = ByteArray(16) { (it + 9).toByte() }
+        val url = SignalGroupHelper.encodeInviteLinkUrl(masterKey, password)
+        assertTrue(url.startsWith("https://signal.group/#"))
+        val parsed = SignalGroupHelper.parseInviteLink(url)
+        assertArrayEquals(masterKey, parsed!!.masterKeyBytes)
+        assertArrayEquals(password, parsed.password)
+    }
+
+    @Test
+    fun inviteLink_parsesFragmentOnlyAndLegacyHost() {
+        val masterKey = ByteArray(32) { 1 }
+        val password = ByteArray(16) { 2 }
+        val url = SignalGroupHelper.encodeInviteLinkUrl(masterKey, password)
+        val fragment = url.substringAfter('#')
+        assertArrayEquals(masterKey, SignalGroupHelper.parseInviteLink(fragment)!!.masterKeyBytes)
+        val legacy = "https://group.signal.org/#$fragment"
+        assertArrayEquals(password, SignalGroupHelper.parseInviteLink(legacy)!!.password)
+    }
+
+    @Test
+    fun inviteLink_rejectsForeignHost() {
+        val masterKey = ByteArray(32) { 1 }
+        val password = ByteArray(16) { 2 }
+        val fragment = SignalGroupHelper.encodeInviteLinkUrl(masterKey, password).substringAfter('#')
+        assertNull(SignalGroupHelper.parseInviteLink("https://evil.example/#$fragment"))
+    }
 }
