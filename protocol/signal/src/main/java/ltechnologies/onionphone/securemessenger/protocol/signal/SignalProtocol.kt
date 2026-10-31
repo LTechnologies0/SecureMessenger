@@ -152,8 +152,8 @@ class SignalProtocol @Inject constructor(
     }
 
     /**
-     * Sends a reaction to [messageId] (`${conversationId}_$sentTimestamp` for 1:1).
-     * Groups: not supported yet (needs GV2 reaction fan-out).
+     * Sends a reaction to [messageId] (`${conversationId}_$sentTimestamp`).
+     * DM uses [deliverMessage]; GV2 (`gv2:`) uses [deliverGroupMessage] fan-out.
      */
     suspend fun addReaction(
         conversationId: String,
@@ -165,17 +165,25 @@ class SignalProtocol @Inject constructor(
             val (accId, active) = resolveLiveAccount(accountId)
                 ?: error("Signal non connecté")
             val remoteId = conversationId.removePrefix("${accId}_")
-            if (remoteId == conversationId || remoteId.startsWith("gv2:")) {
-                error("Réactions Signal disponibles en DM uniquement pour l’instant")
+            if (remoteId == conversationId) {
+                error("Conversation Signal invalide")
             }
             val targetTs = messageId.substringAfterLast('_').toLongOrNull()
                 ?: error("Message Signal invalide")
             val targetMsg = repository.getMessage(messageId)
-            val address = resolveSignalAddress(remoteId)
+            val masterKey = SignalGroupHelper.parseMasterKey(remoteId)
             val targetAuthor = when (targetMsg?.direction) {
                 ltechnologies.onionphone.securemessenger.core.model.MessageDirection.OUTGOING ->
                     active.localAddress.serviceId
-                else -> address.serviceId
+                else -> {
+                    if (masterKey != null) {
+                        val sender = targetMsg?.senderDisplayName
+                            ?: error("ServiceId auteur introuvable pour la réaction")
+                        resolveSignalAddress(sender).serviceId
+                    } else {
+                        resolveSignalAddress(remoteId).serviceId
+                    }
+                }
             } ?: error("ServiceId auteur introuvable pour la réaction")
             val reaction = SignalServiceDataMessage.Reaction(
                 emoji = emoji,
@@ -183,14 +191,25 @@ class SignalProtocol @Inject constructor(
                 targetAuthor = targetAuthor,
                 targetSentTimestamp = targetTs,
             )
-            val send = deliverMessage(
-                active,
-                conversationId,
-                accId,
-                address,
-                SanitizedText(""),
-                configure = { it.withReaction(reaction).withBody(null) },
-            )
+            val send = if (masterKey != null) {
+                deliverGroupMessage(
+                    activeSession = active,
+                    conversationId = conversationId,
+                    accId = accId,
+                    masterKeyBytes = masterKey,
+                    body = SanitizedText(""),
+                    configure = { it.withReaction(reaction).withBody(null) },
+                )
+            } else {
+                deliverMessage(
+                    active,
+                    conversationId,
+                    accId,
+                    resolveSignalAddress(remoteId),
+                    SanitizedText(""),
+                    configure = { it.withReaction(reaction).withBody(null) },
+                )
+            }
             if (send !is SendResult.Success) {
                 error((send as? SendResult.Failure)?.reason ?: "Réaction Signal échouée")
             }
@@ -198,7 +217,7 @@ class SignalProtocol @Inject constructor(
         }
     }
 
-    /** Remote-delete for everyone (1:1). Removes local row on success. */
+    /** Remote-delete for everyone (DM + GV2). Removes local row on success. */
     suspend fun deleteMessage(
         conversationId: String,
         messageId: String,
@@ -208,22 +227,34 @@ class SignalProtocol @Inject constructor(
             val (accId, active) = resolveLiveAccount(accountId)
                 ?: error("Signal non connecté")
             val remoteId = conversationId.removePrefix("${accId}_")
-            if (remoteId == conversationId || remoteId.startsWith("gv2:")) {
-                error("Suppression Signal disponible en DM uniquement pour l’instant")
+            if (remoteId == conversationId) {
+                error("Conversation Signal invalide")
             }
             val targetTs = messageId.substringAfterLast('_').toLongOrNull()
                 ?: error("Message Signal invalide")
-            val address = resolveSignalAddress(remoteId)
-            val send = deliverMessage(
-                active,
-                conversationId,
-                accId,
-                address,
-                SanitizedText(""),
-                configure = {
-                    it.withRemoteDelete(SignalServiceDataMessage.RemoteDelete(targetTs)).withBody(null)
-                },
-            )
+            val masterKey = SignalGroupHelper.parseMasterKey(remoteId)
+            val configure: (SignalServiceDataMessage.Builder) -> Unit = {
+                it.withRemoteDelete(SignalServiceDataMessage.RemoteDelete(targetTs)).withBody(null)
+            }
+            val send = if (masterKey != null) {
+                deliverGroupMessage(
+                    activeSession = active,
+                    conversationId = conversationId,
+                    accId = accId,
+                    masterKeyBytes = masterKey,
+                    body = SanitizedText(""),
+                    configure = configure,
+                )
+            } else {
+                deliverMessage(
+                    active,
+                    conversationId,
+                    accId,
+                    resolveSignalAddress(remoteId),
+                    SanitizedText(""),
+                    configure = configure,
+                )
+            }
             if (send !is SendResult.Success) {
                 error((send as? SendResult.Failure)?.reason ?: "Suppression Signal échouée")
             }
@@ -1591,7 +1622,7 @@ class SignalProtocol @Inject constructor(
         accountId: String?,
     ): SendResult = withContext(signalDispatcher) {
         when (content) {
-            is OutgoingContent.Text -> sendMessage(conversationId, content.body, accountId)
+            is OutgoingContent.Text -> sendTextContent(conversationId, content, accountId)
             is OutgoingContent.Media -> sendMedia(conversationId, content.attachment, content.caption, accountId)
             is OutgoingContent.Location -> sendLocation(conversationId, content, accountId)
             is OutgoingContent.Ephemeral -> sendEphemeral(conversationId, content, accountId)
@@ -1602,6 +1633,84 @@ class SignalProtocol @Inject constructor(
             is OutgoingContent.CallAction -> sendCallAction(conversationId, content, accountId)
             is OutgoingContent.Story -> sendStory(conversationId, content, accountId)
         }
+    }
+
+    /**
+     * Text send with optional Signal quote ([OutgoingContent.Text.replyToMessageId]).
+     */
+    private suspend fun sendTextContent(
+        conversationId: String,
+        content: OutgoingContent.Text,
+        accountId: String?,
+    ): SendResult {
+        val replyId = content.replyToMessageId
+        if (replyId.isNullOrBlank()) {
+            return sendMessage(conversationId, content.body, accountId)
+        }
+        val (accId, activeSession) = resolveLiveAccount(accountId)
+            ?: return liveAccountFailure(accountId)
+        val remoteId = conversationId.removePrefix("${accId}_")
+        if (remoteId == conversationId) {
+            return SendResult.Failure("Conversation Signal invalide")
+        }
+        return try {
+            val quote = buildQuote(activeSession, remoteId, replyId)
+            val configure: (SignalServiceDataMessage.Builder) -> Unit = { builder ->
+                if (quote != null) builder.withQuote(quote)
+            }
+            val masterKey = SignalGroupHelper.parseMasterKey(remoteId)
+            if (masterKey != null) {
+                deliverGroupMessage(
+                    activeSession = activeSession,
+                    conversationId = conversationId,
+                    accId = accId,
+                    masterKeyBytes = masterKey,
+                    body = content.body,
+                    configure = configure,
+                )
+            } else {
+                deliverMessage(
+                    activeSession = activeSession,
+                    conversationId = conversationId,
+                    accId = accId,
+                    recipient = resolveSignalAddress(remoteId),
+                    body = content.body,
+                    configure = configure,
+                )
+            }
+        } catch (e: Exception) {
+            Timber.e(e, "Signal quoted send failed")
+            SendResult.Failure(e.message ?: "Envoi Signal échoué")
+        }
+    }
+
+    private suspend fun buildQuote(
+        activeSession: SignalSessionContext,
+        remoteId: String,
+        replyToMessageId: String,
+    ): SignalServiceDataMessage.Quote? {
+        val target = repository.getMessage(replyToMessageId) ?: return null
+        val author = when (target.direction) {
+            ltechnologies.onionphone.securemessenger.core.model.MessageDirection.OUTGOING ->
+                activeSession.localAddress.serviceId
+            else -> {
+                // Groups store ACI in senderDisplayName; DMs may store e164 — fall back to peer.
+                val fromSender = target.senderDisplayName?.let { name ->
+                    runCatching { org.signal.core.models.ServiceId.ACI.parseOrThrow(name) }.getOrNull()
+                }
+                fromSender
+                    ?: runCatching { resolveSignalAddress(remoteId).serviceId }.getOrNull()
+            }
+        } ?: return null
+        return SignalServiceDataMessage.Quote(
+            id = target.timestamp,
+            author = author,
+            text = target.body,
+            attachments = null,
+            mentions = null,
+            type = SignalServiceDataMessage.Quote.Type.NORMAL,
+            bodyRanges = null,
+        )
     }
 
     private suspend fun sendEphemeral(

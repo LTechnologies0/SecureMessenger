@@ -108,9 +108,9 @@ Capabilities (`baseSignalCapabilities`): DM/group/media/typing/receipts/E2EE/con
 | SIG-DM-01 | 1:1 text send/receive | `sendDataMessage` / decrypt | **done** | |
 | SIG-DM-02 | Attachments upload/download | `uploadAttachment` / `retrieveAttachment` | **done** | CDN v4 |
 | SIG-DM-03 | Voice notes | `voiceNote` flag | **done** | |
-| SIG-DM-04 | Quotes / reply outbound+inbound | DataMessage.quote | **partial** | Inbound OK; no `withQuote` outbound; cap `messageReply=true` |
-| SIG-DM-05 | Reactions | `withReaction` | **partial** | DM out+in; GV2 out missing |
-| SIG-DM-06 | Remote delete | `withRemoteDelete` | **partial** | DM out; GV2 out missing; inbound remote-delete missing |
+| SIG-DM-04 | Quotes / reply outbound+inbound | DataMessage.quote | **done** | Inbound + outbound `withQuote` via `OutgoingContent.Text.replyToMessageId` |
+| SIG-DM-05 | Reactions | `withReaction` | **done** | DM + GV2 out; inbound via classify |
+| SIG-DM-06 | Remote delete | `withRemoteDelete` / wire `delete` | **done** | DM + GV2 out; inbound deletes local target |
 | SIG-DM-07 | Message edit | `sendEditMessage` / inbound EditMessage | **done** | DM + GV2 fan-out outbound; inbound OK; cap `messageEdit=true` |
 | SIG-DM-08 | Forward | client re-compose | **missing** | Cap false |
 | SIG-TYP-01 | Typing indicators | `sendTyping` / `sendGroupTyping` | **done** | 1:1 + GV2 |
@@ -199,19 +199,17 @@ Capabilities (`baseSignalCapabilities`): DM/group/media/typing/receipts/E2EE/con
 Priority order for atomic commits on this branch (excludes blocked):
 
 1. **SIG-DM-04** — outbound quotes (`withQuote`)
-2. **SIG-DM-05/06** — GV2 reactions + remote-delete
-3. **SIG-DM-06 inbound** — apply remote-delete on receive
-4. **SIG-GV2-06** — leave group
-5. **SIG-GV2-04** — title/desc/add/remove members (minimal admin)
-6. **SIG-EPH-01** — conversation timer update message
-7. **SIG-SAFE-02** — mark verified + sync outbound
-8. **SIG-USER-01** — username set (API)
-9. **SIG-PROF-02** — profile avatar upload
-10. **SIG-SEAL-01** — fetch peer profile key for sealed sender
-11. **SIG-POLL-02** — poll vote
-12. **SIG-GV2-05** — invite links (if time)
-13. **SIG-STOR-02** — storage write-back (if time)
-15. **SIG-STICK-02** — sticker pack retrieve (if time)
+2. **SIG-GV2-06** — leave group
+3. **SIG-GV2-04** — title/desc/add/remove members (minimal admin)
+4. **SIG-EPH-01** — conversation timer update message
+5. **SIG-SAFE-02** — mark verified + sync outbound
+6. **SIG-USER-01** — username set (API)
+7. **SIG-PROF-02** — profile avatar upload
+8. **SIG-SEAL-01** — fetch peer profile key for sealed sender
+9. **SIG-POLL-02** — poll vote
+10. **SIG-GV2-05** — invite links (if time)
+11. **SIG-STOR-02** — storage write-back (if time)
+12. **SIG-STICK-02** — sticker pack retrieve (if time)
 
 **Explicitly not in backlog:** SIG-CALL-02/03, SIG-REG-03–05, SIG-PAY-01, SIG-DON-01.
 
