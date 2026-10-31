@@ -15,7 +15,6 @@ import java.net.UnknownHostException
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicReference
 import org.kitteh.irc.client.library.Client
-import org.kitteh.irc.client.library.defaults.feature.network.NettyConnection
 import org.kitteh.irc.client.library.feature.network.ClientConnection
 import org.kitteh.irc.client.library.feature.network.NetworkHandler
 import org.kitteh.irc.client.library.feature.network.ProxyType
@@ -35,8 +34,11 @@ internal object IrcTorBlockingResolver : Resolver {
 }
 
 /**
- * Kitteh's [NettyNetworkHandler] installs [Socks5ProxyHandler] without credentials.
- * This handler mirrors its connect path but authenticates to Tor for stream isolation.
+ * Kitteh's default [org.kitteh.irc.client.library.defaults.feature.network.NettyNetworkHandler]
+ * installs [Socks5ProxyHandler] without credentials. This handler authenticates to Tor for
+ * stream isolation and uses [IrcNettyConnection] so TLS is installed *after* SOCKS (Kitteh's
+ * stock [org.kitteh.irc.client.library.defaults.feature.network.NettyConnection] `addFirst`s
+ * SSL and sends the ClientHello past the proxy).
  */
 internal class IrcTorNetworkHandler(
     private val socksUser: String,
@@ -79,7 +81,7 @@ internal class IrcTorNetworkHandler(
         }
 
         val future = bootstrap.connect(remote, bindAddress)
-        return NettyConnection(client, future) { }
+        return IrcNettyConnection(client, future) { }
     }
 
     private class TorProxyInitializer(
@@ -98,15 +100,16 @@ internal class IrcTorNetworkHandler(
                 ProxyType.SOCKS_4 ->
                     Socks4ProxyHandler(proxyEndpoint, socksUser)
             }
-            pipeline.addLast(handler)
+            pipeline.addLast(SOCKS_HANDLER_NAME, handler)
         }
     }
 
     companion object {
+        const val SOCKS_HANDLER_NAME = "tor-socks"
+
         private val sharedEventLoop: EventLoopGroup = NioEventLoopGroup(1)
 
         init {
-            // Process-lifetime group (mirrors Kitteh default); shut down on JVM exit.
             Runtime.getRuntime().addShutdownHook(
                 Thread({
                     runCatching { sharedEventLoop.shutdownGracefully().syncUninterruptibly() }
