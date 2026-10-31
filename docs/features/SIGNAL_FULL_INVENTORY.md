@@ -124,7 +124,7 @@ Capabilities (`baseSignalCapabilities`): DM/group/media/typing/receipts/E2EE/con
 | SIG-POLL-02 | Poll vote / terminate | poll vote protos | **missing** | |
 | SIG-LOC-01 | Location | geo: body convention | **partial** | Not PlacePointer protobuf |
 | SIG-CONTACT-01 | Shared contact card | `SharedContact` | **done** | |
-| SIG-EPH-01 | Disappearing timer on send | `withExpiration` | **partial** | Protocol OK; conversation-level timer UX gap |
+| SIG-EPH-01 | Disappearing timer on send | `withExpiration` | **done** | Per-message OK; conversation timer via `setDisappearingTimer` / blank `OutgoingContent.Ephemeral` (`asExpirationUpdate`); composer UX still message-oriented |
 | SIG-EPH-02 | View-once | `withViewOnce` / ViewOnceOpen | **missing** | |
 | SIG-GIF-01 | Dedicated GIF path | — | **fail-closed** | Cap `gifs=false` |
 

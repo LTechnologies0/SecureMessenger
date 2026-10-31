@@ -1743,6 +1743,10 @@ class SignalProtocol @Inject constructor(
         content: OutgoingContent.Ephemeral,
         accountId: String?,
     ): SendResult {
+        // Blank body → conversation-level timer update (EXPIRATION_TIMER_UPDATE), not a chat bubble.
+        if (content.body.value.isBlank()) {
+            return setDisappearingTimerLocked(conversationId, content.expireSeconds, accountId)
+        }
         val (accId, activeSession) = resolveLiveAccount(accountId)
             ?: return liveAccountFailure(accountId)
         val remoteId = conversationId.removePrefix("${accId}_")
@@ -1763,6 +1767,73 @@ class SignalProtocol @Inject constructor(
         } catch (e: Exception) {
             Timber.e(e, "Signal ephemeral send failed")
             SendResult.Failure(e.message ?: "Envoi éphémère échoué")
+        }
+    }
+
+    /**
+     * Sends a DataMessage with [asExpirationUpdate] + [withExpiration] so peers update the
+     * conversation disappearing timer (0 disables). Used by blank [OutgoingContent.Ephemeral].
+     */
+    suspend fun setDisappearingTimer(
+        conversationId: String,
+        expireSeconds: Int,
+        accountId: String? = null,
+    ): SendResult = withContext(signalDispatcher) {
+        setDisappearingTimerLocked(conversationId, expireSeconds, accountId)
+    }
+
+    private suspend fun setDisappearingTimerLocked(
+        conversationId: String,
+        expireSeconds: Int,
+        accountId: String?,
+    ): SendResult {
+        val (accId, activeSession) = resolveLiveAccount(accountId)
+            ?: return liveAccountFailure(accountId)
+        val remoteId = conversationId.removePrefix("${accId}_")
+        if (remoteId == conversationId) {
+            return SendResult.Failure("Conversation Signal invalide")
+        }
+        val seconds = expireSeconds.coerceAtLeast(0)
+        val body = SanitizedText("")
+        val configure: (SignalServiceDataMessage.Builder) -> Unit = {
+            it.asExpirationUpdate()
+                .withExpiration(seconds)
+                .withBody(null)
+        }
+        val payload = JSONObject()
+            .put("expirationUpdate", true)
+            .put("expireTimer", seconds)
+            .toString()
+        return try {
+            val masterKey = SignalGroupHelper.parseMasterKey(remoteId)
+            if (masterKey != null) {
+                deliverGroupMessage(
+                    activeSession = activeSession,
+                    conversationId = conversationId,
+                    accId = accId,
+                    masterKeyBytes = masterKey,
+                    body = body,
+                    expireSeconds = seconds.takeIf { it > 0 },
+                    kind = MessageKind.SYSTEM,
+                    payloadJson = payload,
+                    configure = configure,
+                )
+            } else {
+                deliverMessage(
+                    activeSession = activeSession,
+                    conversationId = conversationId,
+                    accId = accId,
+                    recipient = resolveSignalAddress(remoteId),
+                    body = body,
+                    expireSeconds = seconds.takeIf { it > 0 },
+                    kind = MessageKind.SYSTEM,
+                    payloadJson = payload,
+                    configure = configure,
+                )
+            }
+        } catch (e: Exception) {
+            Timber.e(e, "Signal expiration timer update failed")
+            SendResult.Failure(e.message ?: "Mise à jour timer éphémère échouée")
         }
     }
 
