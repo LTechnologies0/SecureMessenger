@@ -121,7 +121,7 @@ Capabilities (`baseSignalCapabilities`): DM/group/media/typing/receipts/E2EE/con
 | SIG-STICK-01 | Stickers send | DataMessage.sticker / image | **done** | Cap true |
 | SIG-STICK-02 | Sticker pack CDN fetch/install | `retrieveSticker(Manifest)` | **missing** | No pack browser |
 | SIG-POLL-01 | Poll create | `PollCreate` | **done** | |
-| SIG-POLL-02 | Poll vote / terminate | poll vote protos | **missing** | |
+| SIG-POLL-02 | Poll vote / terminate | poll vote protos | **partial** | Outbound `votePoll` / `withPollVote`; terminate later |
 | SIG-LOC-01 | Location | geo: body convention | **partial** | Not PlacePointer protobuf |
 | SIG-CONTACT-01 | Shared contact card | `SharedContact` | **done** | |
 | SIG-EPH-01 | Disappearing timer on send | `withExpiration` | **done** | Per-message OK; conversation timer via `setDisappearingTimer` / blank `OutgoingContent.Ephemeral` (`asExpirationUpdate`); composer UX still message-oriented |

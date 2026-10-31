@@ -410,6 +410,100 @@ class SignalProtocol @Inject constructor(
         repository.upsertMessage(existing.copy(payloadJson = json.toString()))
     }
 
+    /**
+     * SIG-POLL-02: send a [SignalServiceDataMessage.PollVote] for [pollMessageId]
+     * (`${conversationId}_$sentTimestamp`). Updates local poll payload `votes` on success.
+     */
+    suspend fun votePoll(
+        conversationId: String,
+        pollMessageId: String,
+        optionIndexes: List<Int>,
+        accountId: String? = null,
+    ): Result<Unit> = withContext(signalDispatcher) {
+        runCatching {
+            val (accId, active) = resolveLiveAccount(accountId)
+                ?: error("Signal non connecté")
+            val remoteId = conversationId.removePrefix("${accId}_")
+            if (remoteId == conversationId) {
+                error("Conversation Signal invalide")
+            }
+            if (optionIndexes.isEmpty()) {
+                error("Au moins une option de sondage est requise")
+            }
+            val targetTs = pollMessageId.substringAfterLast('_').toLongOrNull()
+                ?: error("Message sondage Signal invalide")
+            val targetMsg = repository.getMessage(pollMessageId)
+            val masterKey = SignalGroupHelper.parseMasterKey(remoteId)
+            val targetAuthor = when (targetMsg?.direction) {
+                ltechnologies.onionphone.securemessenger.core.model.MessageDirection.OUTGOING ->
+                    active.localAddress.serviceId
+                else -> {
+                    if (masterKey != null) {
+                        val sender = targetMsg?.senderDisplayName
+                            ?: error("ServiceId auteur introuvable pour le vote")
+                        resolveSignalAddress(sender).serviceId
+                    } else {
+                        resolveSignalAddress(remoteId).serviceId
+                    }
+                }
+            } ?: error("ServiceId auteur introuvable pour le vote")
+            val existingVotes = runCatching {
+                org.json.JSONObject(targetMsg?.payloadJson ?: "{}").optInt("voteCount", 0)
+            }.getOrDefault(0)
+            val vote = SignalServiceDataMessage.PollVote(
+                targetAuthor = targetAuthor,
+                targetSentTimestamp = targetTs,
+                optionIndexes = optionIndexes,
+                voteCount = existingVotes + 1,
+            )
+            val configure: (SignalServiceDataMessage.Builder) -> Unit = {
+                it.withPollVote(vote).withBody(null)
+            }
+            val send = if (masterKey != null) {
+                deliverGroupMessage(
+                    activeSession = active,
+                    conversationId = conversationId,
+                    accId = accId,
+                    masterKeyBytes = masterKey,
+                    body = SanitizedText(""),
+                    configure = configure,
+                )
+            } else {
+                deliverMessage(
+                    active,
+                    conversationId,
+                    accId,
+                    resolveSignalAddress(remoteId),
+                    SanitizedText(""),
+                    configure = configure,
+                )
+            }
+            if (send !is SendResult.Success) {
+                error((send as? SendResult.Failure)?.reason ?: "Vote sondage Signal échoué")
+            }
+            mergePollVotePayload(pollMessageId, optionIndexes, vote.voteCount)
+        }
+    }
+
+    private suspend fun mergePollVotePayload(
+        pollMessageId: String,
+        optionIndexes: List<Int>,
+        voteCount: Int,
+    ) {
+        val existing = repository.getMessage(pollMessageId) ?: return
+        val json = runCatching {
+            org.json.JSONObject(existing.payloadJson ?: "{}")
+        }.getOrElse { org.json.JSONObject() }
+        val votes = json.optJSONArray("votes") ?: org.json.JSONArray()
+        val entry = org.json.JSONObject()
+            .put("optionIndexes", org.json.JSONArray(optionIndexes))
+            .put("voteCount", voteCount)
+        votes.put(entry)
+        json.put("votes", votes)
+        json.put("voteCount", voteCount)
+        repository.upsertMessage(existing.copy(payloadJson = json.toString()))
+    }
+
     private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val signalDispatcher = Dispatchers.IO.limitedParallelism(1)
 
