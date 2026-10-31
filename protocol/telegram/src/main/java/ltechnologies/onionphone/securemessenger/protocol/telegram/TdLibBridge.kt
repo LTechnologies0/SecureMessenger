@@ -76,6 +76,43 @@ sealed class TdSendResult {
     data class Err(val reason: String) : TdSendResult()
 }
 
+/** Optional [TdApi.SendMessage] flags (reply / silent / schedule / forum topic). */
+data class TelegramSendOptions(
+    val replyToMessageId: Long? = null,
+    val silent: Boolean = false,
+    val scheduleAtUnixSec: Int? = null,
+    val forumTopicId: Int? = null,
+    val protectContent: Boolean = false,
+)
+
+data class TelegramChatFolder(
+    val id: Int,
+    val title: String,
+)
+
+data class TelegramForumTopic(
+    val id: Int,
+    val name: String,
+    val isGeneral: Boolean,
+    val isClosed: Boolean,
+    val unreadCount: Int,
+)
+
+data class TelegramSearchHit(
+    val conversationId: String,
+    val messageId: String,
+    val chatId: Long,
+    val tdMessageId: Long,
+    val preview: String,
+    val timestampMs: Long,
+)
+
+data class TelegramCallbackAnswer(
+    val text: String,
+    val showAlert: Boolean,
+    val url: String?,
+)
+
 class TdLibFacade(private val client: TdLibClient) {
     private var authState: TdApi.AuthorizationState? = null
 
@@ -532,6 +569,423 @@ class TdLibFacade(private val client: TdLibClient) {
         )
     }
 
+    suspend fun removeMessageReaction(
+        chatId: Long,
+        messageId: Long,
+        emoji: String,
+    ): String? = awaitResult {
+        client.send(
+            TdApi.RemoveMessageReaction(chatId, messageId, TdApi.ReactionTypeEmoji(emoji)),
+            it,
+        )
+    }
+
+    suspend fun pinChatMessage(
+        chatId: Long,
+        messageId: Long,
+        disableNotification: Boolean = true,
+        onlyForSelf: Boolean = false,
+    ): String? = awaitResult {
+        client.send(TdApi.PinChatMessage(chatId, messageId, disableNotification, onlyForSelf), it)
+    }
+
+    suspend fun unpinChatMessage(chatId: Long, messageId: Long): String? = awaitResult {
+        client.send(TdApi.UnpinChatMessage(chatId, messageId), it)
+    }
+
+    suspend fun unpinAllChatMessages(chatId: Long): String? = awaitResult {
+        client.send(TdApi.UnpinAllChatMessages(chatId), it)
+    }
+
+    suspend fun stopPoll(chatId: Long, messageId: Long): String? = awaitResult {
+        client.send(TdApi.StopPoll(chatId, messageId, null), it)
+    }
+
+    suspend fun editMessageCaption(
+        chatId: Long,
+        messageId: Long,
+        caption: String,
+    ): String? = awaitResult {
+        client.send(
+            TdApi.EditMessageCaption(
+                chatId,
+                messageId,
+                null,
+                TdApi.FormattedText(caption, emptyArray()),
+                false,
+            ),
+            it,
+        )
+    }
+
+    suspend fun leaveChat(chatId: Long): String? = awaitResult {
+        client.send(TdApi.LeaveChat(chatId), it)
+    }
+
+    suspend fun joinChat(chatId: Long): TdApi.ChatJoinResult? =
+        suspendCancellableCoroutine { cont ->
+            client.send(TdApi.JoinChat(chatId)) { result ->
+                when (result) {
+                    is TdApi.ChatJoinResult -> if (cont.isActive) cont.resume(result)
+                    is TdApi.Error -> {
+                        Timber.w("JoinChat error ${result.code}: ${result.message}")
+                        if (cont.isActive) cont.resume(null)
+                    }
+                    else -> if (cont.isActive) cont.resume(null)
+                }
+            }
+        }
+
+    suspend fun joinChatByInviteLink(inviteLink: String): TdApi.ChatJoinResult? =
+        suspendCancellableCoroutine { cont ->
+            client.send(TdApi.JoinChatByInviteLink(inviteLink.trim())) { result ->
+                when (result) {
+                    is TdApi.ChatJoinResult -> if (cont.isActive) cont.resume(result)
+                    is TdApi.Error -> {
+                        Timber.w("JoinChatByInviteLink error ${result.code}: ${result.message}")
+                        if (cont.isActive) cont.resume(null)
+                    }
+                    else -> if (cont.isActive) cont.resume(null)
+                }
+            }
+        }
+
+    suspend fun setUserBlocked(userId: Long, blocked: Boolean): String? = awaitResult {
+        val list: TdApi.BlockList? = if (blocked) TdApi.BlockListMain() else null
+        client.send(
+            TdApi.SetMessageSenderBlockList(TdApi.MessageSenderUser(userId), list),
+            it,
+        )
+    }
+
+    suspend fun toggleChatMarkedAsUnread(chatId: Long, marked: Boolean): String? = awaitResult {
+        client.send(TdApi.ToggleChatIsMarkedAsUnread(chatId, marked), it)
+    }
+
+    suspend fun setChatDraft(chatId: Long, text: String, replyToMessageId: Long? = null): String? {
+        val draft = if (text.isBlank()) {
+            null
+        } else {
+            TdApi.DraftMessage(
+                replyToMessageId?.takeIf { it > 0 }?.let {
+                    TdApi.InputMessageReplyToMessage(it, null, 0, null)
+                },
+                (System.currentTimeMillis() / 1000L).toInt(),
+                TdApi.DraftMessageContentText(
+                    TdApi.FormattedText(text, emptyArray()),
+                    null,
+                ),
+                0L,
+                null,
+            )
+        }
+        return awaitResult {
+            client.send(TdApi.SetChatDraftMessage(chatId, null, draft), it)
+        }
+    }
+
+    suspend fun searchChatMessages(
+        chatId: Long,
+        query: String,
+        fromMessageId: Long = 0L,
+        limit: Int = 50,
+    ): TdApi.FoundChatMessages? = suspendCancellableCoroutine { cont ->
+        client.send(
+            TdApi.SearchChatMessages(
+                chatId,
+                null,
+                query,
+                null,
+                fromMessageId,
+                0,
+                limit,
+                null,
+            ),
+        ) { result ->
+            when (result) {
+                is TdApi.FoundChatMessages -> if (cont.isActive) cont.resume(result)
+                is TdApi.Error -> {
+                    Timber.w("SearchChatMessages error ${result.code}: ${result.message}")
+                    if (cont.isActive) cont.resume(null)
+                }
+                else -> if (cont.isActive) cont.resume(null)
+            }
+        }
+    }
+
+    suspend fun searchMessages(
+        query: String,
+        limit: Int = 50,
+        offset: String = "",
+    ): TdApi.FoundMessages? = suspendCancellableCoroutine { cont ->
+        client.send(
+            TdApi.SearchMessages(
+                TdApi.ChatListMain(),
+                query,
+                offset,
+                limit,
+                null,
+                null,
+                0,
+                0,
+            ),
+        ) { result ->
+            when (result) {
+                is TdApi.FoundMessages -> if (cont.isActive) cont.resume(result)
+                is TdApi.Error -> {
+                    Timber.w("SearchMessages error ${result.code}: ${result.message}")
+                    if (cont.isActive) cont.resume(null)
+                }
+                else -> if (cont.isActive) cont.resume(null)
+            }
+        }
+    }
+
+    suspend fun getChatScheduledMessages(chatId: Long): List<TdApi.Message> =
+        suspendCancellableCoroutine { cont ->
+            client.send(TdApi.GetChatScheduledMessages(chatId)) { result ->
+                when (result) {
+                    is TdApi.Messages -> {
+                        val list = result.messages?.toList() ?: emptyList()
+                        if (cont.isActive) cont.resume(list)
+                    }
+                    is TdApi.Error -> {
+                        Timber.w("GetChatScheduledMessages error ${result.code}: ${result.message}")
+                        if (cont.isActive) cont.resume(emptyList())
+                    }
+                    else -> if (cont.isActive) cont.resume(emptyList())
+                }
+            }
+        }
+
+    suspend fun getChatFolder(folderId: Int): TdApi.ChatFolder? =
+        suspendCancellableCoroutine { cont ->
+            client.send(TdApi.GetChatFolder(folderId)) { result ->
+                when (result) {
+                    is TdApi.ChatFolder -> if (cont.isActive) cont.resume(result)
+                    is TdApi.Error -> {
+                        Timber.w("GetChatFolder error ${result.code}: ${result.message}")
+                        if (cont.isActive) cont.resume(null)
+                    }
+                    else -> if (cont.isActive) cont.resume(null)
+                }
+            }
+        }
+
+    suspend fun getChatsInFolder(folderId: Int, limit: Int = 100): List<Long> =
+        suspendCancellableCoroutine { cont ->
+            client.send(TdApi.GetChats(TdApi.ChatListFolder(folderId), limit)) { result ->
+                when (result) {
+                    is TdApi.Chats -> {
+                        val ids = result.chatIds?.toList() ?: emptyList()
+                        if (cont.isActive) cont.resume(ids)
+                    }
+                    is TdApi.Error -> {
+                        Timber.w("GetChats folder error ${result.code}: ${result.message}")
+                        if (cont.isActive) cont.resume(emptyList())
+                    }
+                    else -> if (cont.isActive) cont.resume(emptyList())
+                }
+            }
+        }
+
+    suspend fun createChatFolder(
+        title: String,
+        includedChatIds: LongArray,
+        includeContacts: Boolean = true,
+        includeNonContacts: Boolean = true,
+        includeBots: Boolean = true,
+        includeGroups: Boolean = true,
+        includeChannels: Boolean = true,
+    ): TdApi.ChatFolderInfo? = suspendCancellableCoroutine { cont ->
+        val folder = TdApi.ChatFolder(
+            TdApi.ChatFolderName(TdApi.FormattedText(title, emptyArray()), false),
+            null,
+            -1,
+            false,
+            longArrayOf(),
+            includedChatIds,
+            longArrayOf(),
+            false,
+            false,
+            false,
+            includeContacts,
+            includeNonContacts,
+            includeBots,
+            includeGroups,
+            includeChannels,
+        )
+        client.send(TdApi.CreateChatFolder(folder)) { result ->
+            when (result) {
+                is TdApi.ChatFolderInfo -> if (cont.isActive) cont.resume(result)
+                is TdApi.Error -> {
+                    Timber.w("CreateChatFolder error ${result.code}: ${result.message}")
+                    if (cont.isActive) cont.resume(null)
+                }
+                else -> if (cont.isActive) cont.resume(null)
+            }
+        }
+    }
+
+    suspend fun deleteChatFolder(folderId: Int): String? = awaitResult {
+        client.send(TdApi.DeleteChatFolder(folderId, longArrayOf()), it)
+    }
+
+    suspend fun getForumTopics(
+        chatId: Long,
+        query: String = "",
+        limit: Int = 50,
+    ): List<TdApi.ForumTopic> = suspendCancellableCoroutine { cont ->
+        client.send(TdApi.GetForumTopics(chatId, query, 0, 0L, 0, limit)) { result ->
+            when (result) {
+                is TdApi.ForumTopics -> {
+                    val list = result.topics?.toList() ?: emptyList()
+                    if (cont.isActive) cont.resume(list)
+                }
+                is TdApi.Error -> {
+                    Timber.w("GetForumTopics error ${result.code}: ${result.message}")
+                    if (cont.isActive) cont.resume(emptyList())
+                }
+                else -> if (cont.isActive) cont.resume(emptyList())
+            }
+        }
+    }
+
+    suspend fun createForumTopic(chatId: Long, name: String): TdApi.ForumTopicInfo? =
+        suspendCancellableCoroutine { cont ->
+            client.send(
+                TdApi.CreateForumTopic(chatId, name, false, TdApi.ForumTopicIcon(0, 0L)),
+            ) { result ->
+                when (result) {
+                    is TdApi.ForumTopicInfo -> if (cont.isActive) cont.resume(result)
+                    is TdApi.Error -> {
+                        Timber.w("CreateForumTopic error ${result.code}: ${result.message}")
+                        if (cont.isActive) cont.resume(null)
+                    }
+                    else -> if (cont.isActive) cont.resume(null)
+                }
+            }
+        }
+
+    suspend fun sendBotStartMessage(
+        botUserId: Long,
+        chatId: Long,
+        parameter: String = "",
+    ): TdSendResult = suspendCancellableCoroutine { cont ->
+        client.send(TdApi.SendBotStartMessage(botUserId, chatId, parameter)) { result ->
+            when (result) {
+                is TdApi.Message -> if (cont.isActive) cont.resume(TdSendResult.Ok(result))
+                is TdApi.Error -> {
+                    Timber.w("SendBotStartMessage error ${result.code}: ${result.message}")
+                    if (cont.isActive) cont.resume(TdSendResult.Err(result.message))
+                }
+                null -> if (cont.isActive) cont.resume(TdSendResult.Err("TDLib unavailable"))
+                else -> if (cont.isActive) {
+                    cont.resume(TdSendResult.Err("Unexpected: ${result::class.simpleName}"))
+                }
+            }
+        }
+    }
+
+    suspend fun getCallbackQueryAnswer(
+        chatId: Long,
+        messageId: Long,
+        data: ByteArray,
+    ): TelegramCallbackAnswer? = suspendCancellableCoroutine { cont ->
+        client.send(
+            TdApi.GetCallbackQueryAnswer(
+                chatId,
+                messageId,
+                TdApi.CallbackQueryPayloadData(data),
+            ),
+        ) { result ->
+            when (result) {
+                is TdApi.CallbackQueryAnswer -> if (cont.isActive) {
+                    cont.resume(
+                        TelegramCallbackAnswer(
+                            text = result.text.orEmpty(),
+                            showAlert = result.showAlert,
+                            url = result.url?.takeIf { it.isNotBlank() },
+                        ),
+                    )
+                }
+                is TdApi.Error -> {
+                    Timber.w("GetCallbackQueryAnswer error ${result.code}: ${result.message}")
+                    if (cont.isActive) cont.resume(null)
+                }
+                else -> if (cont.isActive) cont.resume(null)
+            }
+        }
+    }
+
+    suspend fun createNewSupergroupChat(
+        title: String,
+        isChannel: Boolean,
+        description: String = "",
+        isForum: Boolean = false,
+    ): TdApi.Chat? = suspendCancellableCoroutine { cont ->
+        client.send(
+            TdApi.CreateNewSupergroupChat(
+                title,
+                isForum,
+                isChannel,
+                description,
+                null,
+                0,
+                false,
+            ),
+        ) { result ->
+            when (result) {
+                is TdApi.Chat -> if (cont.isActive) cont.resume(result)
+                is TdApi.Error -> {
+                    Timber.w("CreateNewSupergroupChat error ${result.code}: ${result.message}")
+                    if (cont.isActive) cont.resume(null)
+                }
+                else -> if (cont.isActive) cont.resume(null)
+            }
+        }
+    }
+
+    suspend fun sendVideoNote(
+        chatId: Long,
+        localPath: String,
+        durationSec: Int = 0,
+        length: Int = 240,
+        options: TelegramSendOptions = TelegramSendOptions(),
+    ): TdSendResult {
+        val content = TdApi.InputMessageVideoNote(
+            TdApi.InputVideoNote(TdApi.InputFileLocal(localPath), null, durationSec, length),
+            null,
+        )
+        return sendMessageContent(chatId, content, options)
+    }
+
+    suspend fun setChatTitle(chatId: Long, title: String): String? = awaitResult {
+        client.send(TdApi.SetChatTitle(chatId, title), it)
+    }
+
+    suspend fun setChatDescription(chatId: Long, description: String): String? = awaitResult {
+        client.send(TdApi.SetChatDescription(chatId, description), it)
+    }
+
+    suspend fun loadActiveStories(): String? = awaitResult {
+        client.send(TdApi.LoadActiveStories(TdApi.StoryListMain()), it)
+    }
+
+    suspend fun getChatActiveStories(chatId: Long): TdApi.ChatActiveStories? =
+        suspendCancellableCoroutine { cont ->
+            client.send(TdApi.GetChatActiveStories(chatId)) { result ->
+                when (result) {
+                    is TdApi.ChatActiveStories -> if (cont.isActive) cont.resume(result)
+                    is TdApi.Error -> {
+                        Timber.w("GetChatActiveStories error ${result.code}: ${result.message}")
+                        if (cont.isActive) cont.resume(null)
+                    }
+                    else -> if (cont.isActive) cont.resume(null)
+                }
+            }
+        }
+
     suspend fun editMessageText(chatId: Long, messageId: Long, text: String): String? = awaitResult {
         val content = TdApi.InputMessageText().apply {
             this.text = TdApi.FormattedText(text, emptyArray())
@@ -585,7 +1039,17 @@ class TdLibFacade(private val client: TdLibClient) {
         )
     }
 
-    suspend fun sendTextMessage(chatId: Long, text: String): TdSendResult {
+    suspend fun sendTextMessage(
+        chatId: Long,
+        text: String,
+        options: TelegramSendOptions = TelegramSendOptions(),
+        parseMarkdown: Boolean = false,
+    ): TdSendResult {
+        val formatted = if (parseMarkdown) {
+            parseMarkdownText(text) ?: TdApi.FormattedText(text, emptyArray())
+        } else {
+            TdApi.FormattedText(text, emptyArray())
+        }
         val linkPreview = TdApi.LinkPreviewOptions().apply {
             isDisabled = false
             url = ""
@@ -595,11 +1059,47 @@ class TdLibFacade(private val client: TdLibClient) {
         }
         return sendMessageContent(
             chatId,
-            TdApi.InputMessageText(
-                TdApi.FormattedText(text, emptyArray()),
-                linkPreview,
-                true,
-            ),
+            TdApi.InputMessageText(formatted, linkPreview, true),
+            options,
+        )
+    }
+
+    /** Parses Telegram Markdown v2 (incl. `||spoiler||`) via [TdApi.ParseTextEntities]. */
+    suspend fun parseMarkdownText(text: String): TdApi.FormattedText? =
+        suspendCancellableCoroutine { cont ->
+            client.send(TdApi.ParseTextEntities(text, TdApi.TextParseModeMarkdown(2))) { result ->
+                when (result) {
+                    is TdApi.FormattedText -> if (cont.isActive) cont.resume(result)
+                    else -> if (cont.isActive) cont.resume(null)
+                }
+            }
+        }
+
+    suspend fun sendTextWithSpoiler(
+        chatId: Long,
+        text: String,
+        spoilerStart: Int,
+        spoilerLength: Int,
+        options: TelegramSendOptions = TelegramSendOptions(),
+    ): TdSendResult {
+        val start = spoilerStart.coerceAtLeast(0)
+        val len = spoilerLength.coerceIn(0, (text.length - start).coerceAtLeast(0))
+        val entities = if (len > 0) {
+            arrayOf(TdApi.TextEntity(start, len, TdApi.TextEntityTypeSpoiler()))
+        } else {
+            emptyArray()
+        }
+        val linkPreview = TdApi.LinkPreviewOptions().apply {
+            isDisabled = false
+            url = ""
+            forceSmallMedia = false
+            forceLargeMedia = false
+            showAboveText = false
+        }
+        return sendMessageContent(
+            chatId,
+            TdApi.InputMessageText(TdApi.FormattedText(text, entities), linkPreview, true),
+            options,
         )
     }
 
@@ -733,16 +1233,34 @@ class TdLibFacade(private val client: TdLibClient) {
         )
     }
 
+    private fun buildSendOptions(options: TelegramSendOptions): TdApi.MessageSendOptions =
+        TdApi.MessageSendOptions().apply {
+            disableNotification = options.silent
+            protectContent = options.protectContent
+            options.scheduleAtUnixSec?.takeIf { it > 0 }?.let { at ->
+                schedulingState = TdApi.MessageSchedulingStateSendAtDate(at, 0)
+            }
+        }
+
+    private fun buildReplyTo(options: TelegramSendOptions): TdApi.InputMessageReplyTo? =
+        options.replyToMessageId?.takeIf { it > 0 }?.let {
+            TdApi.InputMessageReplyToMessage(it, null, 0, null)
+        }
+
+    private fun buildTopic(options: TelegramSendOptions): TdApi.MessageTopic? =
+        options.forumTopicId?.takeIf { it > 0 }?.let { TdApi.MessageTopicForum(it) }
+
     private suspend fun sendMessageContent(
         chatId: Long,
         content: TdApi.InputMessageContent,
+        options: TelegramSendOptions = TelegramSendOptions(),
     ): TdSendResult = suspendCancellableCoroutine { cont ->
         client.send(
             TdApi.SendMessage().apply {
                 this.chatId = chatId
-                topicId = null
-                replyTo = null
-                options = TdApi.MessageSendOptions()
+                topicId = buildTopic(options)
+                replyTo = buildReplyTo(options)
+                this.options = buildSendOptions(options)
                 replyMarkup = null
                 inputMessageContent = content
             },
