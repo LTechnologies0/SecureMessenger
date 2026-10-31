@@ -155,7 +155,8 @@ fun contactsEmptyHint(protocol: ProtocolId): String = when (protocol) {
     ProtocolId.XMPP -> "Le roster XMPP se remplit depuis le serveur et vos salles."
     ProtocolId.MATRIX -> "Contacts Matrix locaux et membres de rooms synchronisés."
     ProtocolId.EMAIL -> "Adresses tirées des fils récents — pas un carnet serveur complet."
-    ProtocolId.IRC -> "Nicks visibles dans vos canaux (LIST / JOIN). Tapez /me action pour un CTCP ACTION."
+    ProtocolId.IRC ->
+        "Nicks (NAMES). Slash: /me /topic /whois /mode /kick /banlist /join /part /react /caps /help. DCC bloqué."
 }
 
 /** Tab / screen title for the contacts surface (IRC is nicks, not an address book). */
