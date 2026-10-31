@@ -49,7 +49,7 @@ Status legend: `present` · `partial` · `missing` · `blocked`
 | TG-MSG-POLL | Polls send + vote | `InputMessagePoll, SetPollAnswer, MessagePoll` | **present** | votePoll |
 | TG-MSG-POLL-STOP | Stop poll | `StopPoll` | **present** |  |
 | TG-MSG-DICE | Dice / animated emoji | `MessageDice, MessageAnimatedEmoji` | **present** | Body fallback only |
-| TG-MSG-GAME | Games | `MessageGame, SendMessage(InputMessageGame)` | **missing** | Low priority |
+| TG-MSG-GAME | Games | `MessageGame, SendMessage(InputMessageGame)` | **present** | sendGame(InputMessageGame) |
 | TG-MSG-INVOICE | Invoices / payments content | `MessageInvoice, *Payment*` | **blocked** | Premium/payments fail-closed |
 | TG-MSG-ALBUM | Media albums | `SendMessageAlbum, mediaAlbumId` | **present** |  |
 | TG-MSG-SYSTEM | Service messages | `MessageChat*, MessagePinMessage, MessageCall, …` | **partial** | Subset mapped to SYSTEM |
@@ -101,9 +101,9 @@ Status legend: `present` · `partial` · `missing` · `blocked`
 | TG-PUSH | Push / device registration | `RegisterDevice, ProcessPushNotification` | **blocked** | Tor/foreground-only client — no FCM RegisterDevice by policy |
 
 ## Coverage summary
-- **present**: 65
+- **present**: 66
 - **partial**: 10
-- **missing**: 1
+- **missing**: 0
 - **blocked**: 6
 
 ## Implementation order (missing → present)

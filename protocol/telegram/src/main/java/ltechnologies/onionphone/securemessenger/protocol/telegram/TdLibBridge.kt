@@ -1220,6 +1220,17 @@ class TdLibFacade(private val client: TdLibClient) {
         }
     }
 
+    suspend fun sendGame(
+        chatId: Long,
+        botUserId: Long,
+        gameShortName: String,
+        options: TelegramSendOptions = TelegramSendOptions(),
+    ): TdSendResult = sendMessageContent(
+        chatId,
+        TdApi.InputMessageGame(botUserId, gameShortName),
+        options,
+    )
+
     suspend fun editMessageText(chatId: Long, messageId: Long, text: String): String? = awaitResult {
         val content = TdApi.InputMessageText().apply {
             this.text = TdApi.FormattedText(text, emptyArray())

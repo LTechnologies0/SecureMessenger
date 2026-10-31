@@ -2137,6 +2137,15 @@ class TelegramProtocol @Inject constructor(
         }
     }
 
+    suspend fun sendGame(
+        conversationId: String,
+        botUserId: Long,
+        gameShortName: String,
+        accountId: String? = null,
+    ): SendResult = sendViaFacade(conversationId, accountId) { facade, chatId ->
+        facade.sendGame(chatId, botUserId, gameShortName)
+    }
+
     private suspend fun tdMessageOp(
         conversationId: String,
         messageId: String,
