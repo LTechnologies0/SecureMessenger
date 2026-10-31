@@ -40,11 +40,14 @@ import net.folivo.trixnity.client.media.okio.createOkioMediaStoreModule
 import net.folivo.trixnity.client.room.GetTimelineEventsConfig
 import net.folivo.trixnity.client.room.RoomService
 import net.folivo.trixnity.client.room.message.audio
+import net.folivo.trixnity.client.room.message.emote
 import net.folivo.trixnity.client.room.message.file
 import net.folivo.trixnity.client.room.message.image
 import net.folivo.trixnity.client.room.message.react
 import net.folivo.trixnity.client.room.message.replace
+import net.folivo.trixnity.client.room.message.reply
 import net.folivo.trixnity.client.room.message.text
+import net.folivo.trixnity.client.room.message.thread
 import net.folivo.trixnity.client.room.message.video
 import net.folivo.trixnity.client.store.AccountStore
 import net.folivo.trixnity.client.store.TimelineEvent
@@ -54,6 +57,7 @@ import net.folivo.trixnity.client.store.repository.exposed.createExposedReposito
 import net.folivo.trixnity.client.store.roomId
 import net.folivo.trixnity.client.store.sender
 import net.folivo.trixnity.client.user.UserService
+import net.folivo.trixnity.clientserverapi.client.getAccountData
 import net.folivo.trixnity.clientserverapi.model.authentication.IdentifierType
 import net.folivo.trixnity.clientserverapi.model.media.FileTransferProgress
 import net.folivo.trixnity.clientserverapi.model.rooms.CreateRoom
@@ -63,15 +67,26 @@ import net.folivo.trixnity.core.model.RoomAliasId
 import net.folivo.trixnity.core.model.RoomId
 import net.folivo.trixnity.core.model.UserId
 import net.folivo.trixnity.core.model.events.InitialStateEvent
+import net.folivo.trixnity.core.model.events.MessageEventContent
+import net.folivo.trixnity.core.model.events.RedactedEventContent
+import net.folivo.trixnity.core.model.events.m.IgnoredUserListEventContent
+import net.folivo.trixnity.core.model.events.m.ReactionEventContent
 import net.folivo.trixnity.core.model.events.m.ReceiptType
+import net.folivo.trixnity.core.model.events.m.RelatesTo
+import net.folivo.trixnity.core.model.events.m.TagEventContent
+import net.folivo.trixnity.core.model.events.m.room.CreateEventContent
 import net.folivo.trixnity.core.model.events.m.room.EncryptedFile
 import net.folivo.trixnity.core.model.events.m.room.EncryptionEventContent
+import net.folivo.trixnity.core.model.events.m.room.NameEventContent
 import net.folivo.trixnity.core.model.events.m.room.RoomMessageEventContent
+import net.folivo.trixnity.core.model.events.m.room.TopicEventContent
 import okhttp3.OkHttpClient
 import okio.Path.Companion.toPath
 import org.jetbrains.exposed.sql.Database
+import org.json.JSONObject
 import org.koin.core.component.get
 import org.koin.core.module.Module
+import kotlinx.serialization.json.JsonObject
 import timber.log.Timber
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.time.Duration.Companion.seconds
@@ -594,9 +609,112 @@ class TrixnityMatrixEngine(
         event: TimelineEvent,
         downloadMedia: Boolean,
     ) {
+        val content = event.content?.getOrNull()
+        when (content) {
+            is ReactionEventContent -> {
+                val annotation = content.relatesTo ?: return
+                val emoji = annotation.key?.takeIf { it.isNotBlank() } ?: return
+                val targetId = annotation.eventId.full
+                val existing = repository.getMessage(targetId) ?: return
+                repository.upsertMessage(
+                    existing.copy(payloadJson = MatrixPayloadJson.mergeReaction(existing.payloadJson, emoji)),
+                )
+                return
+            }
+            is RedactedEventContent -> {
+                val convId = MatrixProtocol.conversationIdFor(accountId, event.roomId.full)
+                val existing = repository.getMessage(event.eventId.full)
+                val redactedPayload = MatrixPayloadJson.withFlag(existing?.payloadJson, "redacted")
+                val message = existing?.copy(
+                    body = REDACTED_BODY,
+                    kind = MessageKind.TEXT,
+                    payloadJson = redactedPayload,
+                ) ?: Message(
+                    id = event.eventId.full,
+                    conversationId = convId,
+                    protocol = ProtocolId.MATRIX,
+                    body = REDACTED_BODY,
+                    timestamp = event.originTimestamp,
+                    direction = if (event.sender == matrixClient.userId) {
+                        MessageDirection.OUTGOING
+                    } else {
+                        MessageDirection.INCOMING
+                    },
+                    deliveryState = DeliveryState.DELIVERED,
+                    senderDisplayName = event.sender.full,
+                    kind = MessageKind.TEXT,
+                    payloadJson = redactedPayload,
+                )
+                repository.upsertMessage(message)
+                repository.mergeIncomingConversation(
+                    Conversation(
+                        id = convId,
+                        protocol = ProtocolId.MATRIX,
+                        accountId = accountId,
+                        remoteId = event.roomId.full,
+                        title = event.roomId.full,
+                        lastMessagePreview = REDACTED_BODY,
+                        lastMessageAt = event.originTimestamp,
+                    ),
+                    incoming = message.direction == MessageDirection.INCOMING,
+                )
+                return
+            }
+            is RoomMessageEventContent -> {
+                val relates = content.relatesTo
+                if (relates is RelatesTo.Replace) {
+                    val targetId = relates.eventId.full
+                    val newBody = when (val nc = relates.newContent) {
+                        is RoomMessageEventContent -> nc.body
+                        else -> content.body
+                    }
+                    val existing = repository.getMessage(targetId)
+                    val editedPayload = MatrixPayloadJson.withFlag(existing?.payloadJson, "edited")
+                    if (existing != null) {
+                        repository.upsertMessage(
+                            existing.copy(body = newBody, payloadJson = editedPayload),
+                        )
+                    } else {
+                        repository.upsertMessage(
+                            Message(
+                                id = targetId,
+                                conversationId = MatrixProtocol.conversationIdFor(accountId, event.roomId.full),
+                                protocol = ProtocolId.MATRIX,
+                                body = newBody,
+                                timestamp = event.originTimestamp,
+                                direction = if (event.sender == matrixClient.userId) {
+                                    MessageDirection.OUTGOING
+                                } else {
+                                    MessageDirection.INCOMING
+                                },
+                                deliveryState = DeliveryState.DELIVERED,
+                                senderDisplayName = event.sender.full,
+                                kind = MessageKind.TEXT,
+                                payloadJson = editedPayload,
+                            ),
+                        )
+                    }
+                    repository.mergeIncomingConversation(
+                        Conversation(
+                            id = MatrixProtocol.conversationIdFor(accountId, event.roomId.full),
+                            protocol = ProtocolId.MATRIX,
+                            accountId = accountId,
+                            remoteId = event.roomId.full,
+                            title = event.roomId.full,
+                            lastMessagePreview = newBody.take(100),
+                            lastMessageAt = event.originTimestamp,
+                        ),
+                        incoming = event.sender != matrixClient.userId,
+                    )
+                    return
+                }
+            }
+            else -> Unit
+        }
+
         val message = toMessage(accountId, matrixClient, event, downloadMedia) ?: return
         repository.upsertMessage(message)
-        val parsed = parseRoomMessage(event.eventId.full, event.content?.getOrNull()) ?: return
+        val parsed = parseRoomMessage(event.eventId.full, content) ?: return
         repository.mergeIncomingConversation(
             Conversation(
                 id = message.conversationId,
@@ -665,6 +783,7 @@ class TrixnityMatrixEngine(
                 preview = content.body.ifBlank { content.fileName ?: "Image" },
                 kind = kind,
                 attachments = listOf(attachment),
+                payloadJson = relationPayloadJson(content),
             )
         }
         is RoomMessageEventContent.FileBased.Video -> {
@@ -681,6 +800,7 @@ class TrixnityMatrixEngine(
                 preview = content.body.ifBlank { content.fileName ?: "Video" },
                 kind = MessageKind.VIDEO,
                 attachments = listOf(attachment),
+                payloadJson = relationPayloadJson(content),
             )
         }
         is RoomMessageEventContent.FileBased.Audio -> {
@@ -697,6 +817,7 @@ class TrixnityMatrixEngine(
                 preview = content.body.ifBlank { content.fileName ?: "Audio" },
                 kind = MessageKind.VOICE,
                 attachments = listOf(attachment),
+                payloadJson = relationPayloadJson(content),
             )
         }
         is RoomMessageEventContent.FileBased.File -> {
@@ -713,6 +834,7 @@ class TrixnityMatrixEngine(
                 preview = content.body.ifBlank { content.fileName ?: "File" },
                 kind = MessageKind.FILE,
                 attachments = listOf(attachment),
+                payloadJson = relationPayloadJson(content),
             )
         }
         is RoomMessageEventContent.Location -> {
@@ -720,24 +842,21 @@ class TrixnityMatrixEngine(
             val coords = geo.removePrefix("geo:").substringBefore(';').split(',')
             val lat = coords.getOrNull(0)?.toDoubleOrNull()
             val lon = coords.getOrNull(1)?.toDoubleOrNull()
-            val payload = buildString {
-                append('{')
-                append("\"geoUri\":")
-                append('"').append(geo.replace("\"", "\\\"")).append('"')
+            val payload = JSONObject().apply {
+                put("geoUri", geo)
                 if (lat != null && lon != null) {
-                    append(",\"latitude\":").append(lat)
-                    append(",\"longitude\":").append(lon)
-                    append(",\"lat\":").append(lat)
-                    append(",\"lon\":").append(lon)
+                    put("latitude", lat)
+                    put("longitude", lon)
+                    put("lat", lat)
+                    put("lon", lon)
                 }
-                append('}')
             }
             ParsedRoomMessage(
                 body = content.body.ifBlank { geo },
                 preview = content.body.ifBlank { "Location" },
                 kind = MessageKind.LOCATION,
                 attachments = emptyList(),
-                payloadJson = payload,
+                payloadJson = relationPayloadJson(content, payload),
             )
         }
         is RoomMessageEventContent.TextBased -> {
@@ -746,6 +865,7 @@ class TrixnityMatrixEngine(
                 preview = content.body,
                 kind = MessageKind.TEXT,
                 attachments = emptyList(),
+                payloadJson = relationPayloadJson(content),
             )
         }
         is RoomMessageEventContent -> {
@@ -754,9 +874,29 @@ class TrixnityMatrixEngine(
                 preview = content.body,
                 kind = MessageKind.UNKNOWN,
                 attachments = emptyList(),
+                payloadJson = relationPayloadJson(content),
             )
         }
         else -> null
+    }
+
+    private fun relationPayloadJson(
+        content: MessageEventContent,
+        base: JSONObject? = null,
+    ): String? {
+        val relatesTo = content.relatesTo ?: return base?.takeIf { it.length() > 0 }?.toString()
+        val json = base ?: JSONObject()
+        when (relatesTo) {
+            is RelatesTo.Reply -> {
+                relatesTo.replyTo.eventId.full.let { json.put("replyTo", it) }
+            }
+            is RelatesTo.Thread -> {
+                json.put("threadRoot", relatesTo.eventId.full)
+                relatesTo.replyTo?.eventId?.full?.let { json.put("replyTo", it) }
+            }
+            else -> Unit
+        }
+        return json.takeIf { it.length() > 0 }?.toString()
     }
 
     private data class AttachmentSeed(
@@ -833,13 +973,259 @@ class TrixnityMatrixEngine(
         val payloadJson: String? = null,
     )
 
-    suspend fun sendText(roomId: String, body: String): Result<String> = withContext(Dispatchers.IO) {
+    suspend fun sendText(
+        roomId: String,
+        body: String,
+        replyToEventId: String? = null,
+        threadRootEventId: String? = null,
+    ): Result<String> = withContext(Dispatchers.IO) {
         val matrixClient = client
             ?: return@withContext Result.failure(IllegalStateException("Not connected"))
         val roomService = matrixClient.di.get<RoomService>()
         runCatching {
             roomService.sendMessage(RoomId(roomId)) {
+                when {
+                    threadRootEventId != null -> {
+                        val replyTo = replyToEventId?.let { RelatesTo.ReplyTo(EventId(it)) }
+                        thread(
+                            EventId(threadRootEventId),
+                            RelatesTo.Thread(
+                                eventId = EventId(threadRootEventId),
+                                replyTo = replyTo,
+                                isFallingBack = replyToEventId == null,
+                            ),
+                            replyToEventId == null,
+                        )
+                    }
+                    replyToEventId != null -> {
+                        reply(
+                            EventId(replyToEventId),
+                            RelatesTo.Reply(RelatesTo.ReplyTo(EventId(replyToEventId))),
+                        )
+                    }
+                }
                 text(body)
+            }
+        }
+    }
+
+    suspend fun sendEmote(roomId: String, body: String): Result<Unit> = withContext(Dispatchers.IO) {
+        val matrixClient = client
+            ?: return@withContext Result.failure(IllegalStateException("Not connected"))
+        val roomService = matrixClient.di.get<RoomService>()
+        runCatching {
+            roomService.sendMessage(RoomId(roomId)) {
+                emote(body)
+            }
+            Unit
+        }
+    }
+
+    suspend fun leaveRoom(roomId: String, reason: String? = null): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            val matrixClient = client
+                ?: return@withContext Result.failure(IllegalStateException("Not connected"))
+            runCatching {
+                matrixClient.api.room.leaveRoom(RoomId(roomId), reason = reason).getOrThrow()
+            }
+        }
+
+    suspend fun forgetRoom(roomId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        val matrixClient = client
+            ?: return@withContext Result.failure(IllegalStateException("Not connected"))
+        runCatching {
+            matrixClient.api.room.forgetRoom(RoomId(roomId)).getOrThrow()
+        }
+    }
+
+    suspend fun inviteUser(roomId: String, userId: String, reason: String? = null): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            val matrixClient = client
+                ?: return@withContext Result.failure(IllegalStateException("Not connected"))
+            runCatching {
+                matrixClient.api.room.inviteUser(
+                    RoomId(roomId),
+                    UserId(userId),
+                    reason = reason,
+                ).getOrThrow()
+            }
+        }
+
+    suspend fun kickUser(roomId: String, userId: String, reason: String? = null): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            val matrixClient = client
+                ?: return@withContext Result.failure(IllegalStateException("Not connected"))
+            runCatching {
+                matrixClient.api.room.kickUser(
+                    RoomId(roomId),
+                    UserId(userId),
+                    reason = reason,
+                ).getOrThrow()
+            }
+        }
+
+    suspend fun banUser(roomId: String, userId: String, reason: String? = null): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            val matrixClient = client
+                ?: return@withContext Result.failure(IllegalStateException("Not connected"))
+            runCatching {
+                matrixClient.api.room.banUser(
+                    RoomId(roomId),
+                    UserId(userId),
+                    reason = reason,
+                ).getOrThrow()
+            }
+        }
+
+    suspend fun unbanUser(roomId: String, userId: String, reason: String? = null): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            val matrixClient = client
+                ?: return@withContext Result.failure(IllegalStateException("Not connected"))
+            runCatching {
+                matrixClient.api.room.unbanUser(
+                    RoomId(roomId),
+                    UserId(userId),
+                    reason = reason,
+                ).getOrThrow()
+            }
+        }
+
+    suspend fun knockRoom(roomIdOrAlias: String, reason: String? = null): Result<String> =
+        withContext(Dispatchers.IO) {
+            val matrixClient = client
+                ?: return@withContext Result.failure(IllegalStateException("Not connected"))
+            runCatching {
+                val roomId = if (roomIdOrAlias.startsWith("#")) {
+                    matrixClient.api.room.knockRoom(
+                        RoomAliasId(roomIdOrAlias),
+                        reason = reason,
+                    ).getOrThrow()
+                } else {
+                    matrixClient.api.room.knockRoom(
+                        RoomId(roomIdOrAlias),
+                        reason = reason,
+                    ).getOrThrow()
+                }
+                roomId.full
+            }
+        }
+
+    suspend fun setRoomName(roomId: String, name: String): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            val matrixClient = client
+                ?: return@withContext Result.failure(IllegalStateException("Not connected"))
+            runCatching {
+                matrixClient.api.room.sendStateEvent(
+                    RoomId(roomId),
+                    NameEventContent(name),
+                ).getOrThrow()
+                Unit
+            }
+        }
+
+    suspend fun setRoomTopic(roomId: String, topic: String): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            val matrixClient = client
+                ?: return@withContext Result.failure(IllegalStateException("Not connected"))
+            runCatching {
+                matrixClient.api.room.sendStateEvent(
+                    RoomId(roomId),
+                    TopicEventContent(topic),
+                ).getOrThrow()
+                Unit
+            }
+        }
+
+    suspend fun setFavourite(roomId: String, favourite: Boolean): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            val matrixClient = client
+                ?: return@withContext Result.failure(IllegalStateException("Not connected"))
+            runCatching {
+                if (favourite) {
+                    matrixClient.api.room.setTag(
+                        matrixClient.userId,
+                        RoomId(roomId),
+                        "m.favourite",
+                        TagEventContent.Tag(),
+                    ).getOrThrow()
+                } else {
+                    matrixClient.api.room.deleteTag(
+                        matrixClient.userId,
+                        RoomId(roomId),
+                        "m.favourite",
+                    ).getOrThrow()
+                }
+            }
+        }
+
+    suspend fun ignoreUser(userId: String, ignore: Boolean): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            val matrixClient = client
+                ?: return@withContext Result.failure(IllegalStateException("Not connected"))
+            runCatching {
+                val current = runCatching {
+                    matrixClient.api.user.getAccountData<IgnoredUserListEventContent>(
+                        matrixClient.userId,
+                    ).getOrThrow()
+                }.getOrNull() ?: IgnoredUserListEventContent(emptyMap())
+                val map = current.ignoredUsers.toMutableMap()
+                val mxid = UserId(userId)
+                if (ignore) {
+                    map[mxid] = JsonObject(emptyMap())
+                } else {
+                    map.remove(mxid)
+                }
+                matrixClient.api.user.setAccountData(
+                    IgnoredUserListEventContent(map),
+                    matrixClient.userId,
+                ).getOrThrow()
+            }
+        }
+
+    suspend fun listPublicRooms(
+        limit: Long = 20,
+        since: String? = null,
+    ): Result<List<MatrixPublicRoom>> = withContext(Dispatchers.IO) {
+        val matrixClient = client
+            ?: return@withContext Result.failure(IllegalStateException("Not connected"))
+        runCatching {
+            val response = matrixClient.api.room.getPublicRooms(
+                limit = limit,
+                since = since,
+            ).getOrThrow()
+            response.chunk.map { chunk ->
+                MatrixPublicRoom(
+                    roomId = chunk.roomId.full,
+                    name = chunk.name,
+                    topic = chunk.topic,
+                    alias = chunk.canonicalAlias?.full,
+                    joinedMembersCount = chunk.joinedMembersCount,
+                    isSpace = chunk.roomType is CreateEventContent.RoomType.Space,
+                )
+            }
+        }
+    }
+
+    suspend fun getSpaceHierarchy(
+        spaceRoomId: String,
+        limit: Long = 20,
+    ): Result<List<MatrixHierarchyRoom>> = withContext(Dispatchers.IO) {
+        val matrixClient = client
+            ?: return@withContext Result.failure(IllegalStateException("Not connected"))
+        runCatching {
+            val response = matrixClient.api.room.getHierarchy(
+                RoomId(spaceRoomId),
+                limit = limit,
+                suggestedOnly = false,
+            ).getOrThrow()
+            response.rooms.map { chunk ->
+                MatrixHierarchyRoom(
+                    roomId = chunk.roomId.full,
+                    name = chunk.name,
+                    topic = chunk.topic,
+                    roomType = chunk.roomType?.name,
+                    childrenStateCount = chunk.childrenState.size,
+                )
             }
         }
     }
@@ -1058,6 +1444,7 @@ class TrixnityMatrixEngine(
     companion object {
         private const val MAX_MEDIA_BYTES = 100L * 1024L * 1024L
         private const val MEDIA_CHUNK_BYTES = 64 * 1024
+        private const val REDACTED_BODY = "[Message supprimé]"
 
         fun wipeAccountStore(filesDir: File, accountId: String) {
             runCatching {

@@ -228,6 +228,10 @@ sealed class OutgoingContent {
         val cc: String? = null,
         /** Optional comma-separated Bcc recipients (email only). */
         val bcc: String? = null,
+        /** Matrix m.in_reply_to event id (ignored by other protocols). */
+        val replyToEventId: String? = null,
+        /** Matrix thread root event id (ignored by other protocols). */
+        val threadRootEventId: String? = null,
     ) : OutgoingContent()
 
     data class Media(

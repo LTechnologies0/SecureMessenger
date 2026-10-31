@@ -124,6 +124,7 @@ fun ChatScreen(
     }.collectAsState()
     // Key composer state by conversation — ChatScreen stays mounted across inbox switches.
     var draft by remember(conversationId) { mutableStateOf("") }
+    var replyToEventId by remember(conversationId) { mutableStateOf<String?>(null) }
     var emailSubject by remember(conversationId) { mutableStateOf("") }
     var emailCc by remember(conversationId) { mutableStateOf("") }
     var emailBcc by remember(conversationId) { mutableStateOf("") }
@@ -525,6 +526,7 @@ fun ChatScreen(
                     FilledIconButton(
                         onClick = {
                             if (draft.isNotBlank()) {
+                                val replyTarget = replyToEventId
                                 viewModel.sendContent(
                                     conversationId,
                                     protocol,
@@ -533,10 +535,12 @@ fun ChatScreen(
                                         subject = emailSubject.trim().takeIf { it.isNotEmpty() },
                                         cc = emailCc.trim().takeIf { it.isNotEmpty() },
                                         bcc = emailBcc.trim().takeIf { it.isNotEmpty() },
+                                        replyToEventId = replyTarget,
                                     ),
                                 ) { ok, reason, remapped ->
                                     if (ok) {
                                         draft = ""
+                                        replyToEventId = null
                                         sendError = null
                                         remapped?.let(onConversationRemapped)
                                     } else {
@@ -759,6 +763,7 @@ fun ChatScreen(
                             if (capabilities.messageReply) {
                                 TextButton(
                                     onClick = {
+                                        replyToEventId = msg.id
                                         draft = buildString {
                                             if (msg.body.isNotBlank()) {
                                                 append("> ")

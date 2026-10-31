@@ -739,51 +739,86 @@ class MatrixProtocol @Inject constructor(
     }
 
     override suspend fun sendMessage(conversationId: String, body: SanitizedText, accountId: String?): SendResult =
-        withContext(Dispatchers.IO) {
-            try {
-                networkGuard.assertNetworkAllowed()
-                val accId = accountId
-                    ?: (ConversationIds.accountId(conversationId) ?: conversationId)
-                val session = sessions[accId] ?: return@withContext SendResult.Failure("Account not connected")
-                val roomId = (ConversationIds.remoteId(conversationId) ?: conversationId)
-                session.trixnityEngine?.let { engine ->
-                    val sent = engine.sendText(roomId, body.value)
-                    if (sent.isFailure) {
-                        return@withContext SendResult.Failure(
-                            sent.exceptionOrNull()?.message ?: "Send failed",
-                        )
-                    }
-                    val txnId = sent.getOrThrow()
-                    val outboxId = txnId.ifBlank { "${conversationId}_${System.currentTimeMillis()}" }
-                    val msg = Message(
-                        id = outboxId,
-                        conversationId = conversationId,
-                        protocol = ProtocolId.MATRIX,
-                        body = body.value,
-                        timestamp = System.currentTimeMillis(),
-                        direction = MessageDirection.OUTGOING,
-                        deliveryState = DeliveryState.PENDING,
-                    )
-                    repository.upsertMessage(msg)
-                    return@withContext SendResult.Success(msg.id)
-                }
-                SendResult.Failure("E2EE Matrix indisponible — reconnectez le compte")
-            } catch (e: Exception) {
-                val failedId = "${conversationId}_${System.currentTimeMillis()}"
-                repository.upsertMessage(
-                    Message(
-                        id = failedId,
-                        conversationId = conversationId,
-                        protocol = ProtocolId.MATRIX,
-                        body = body.value,
-                        timestamp = System.currentTimeMillis(),
-                        direction = MessageDirection.OUTGOING,
-                        deliveryState = DeliveryState.FAILED,
-                    ),
+        sendTextInternal(
+            conversationId = conversationId,
+            body = body,
+            accountId = accountId,
+            replyToEventId = null,
+            threadRootEventId = null,
+        )
+
+    private suspend fun sendTextInternal(
+        conversationId: String,
+        body: SanitizedText,
+        accountId: String?,
+        replyToEventId: String?,
+        threadRootEventId: String?,
+    ): SendResult = withContext(Dispatchers.IO) {
+        try {
+            networkGuard.assertNetworkAllowed()
+            val accId = accountId
+                ?: (ConversationIds.accountId(conversationId) ?: conversationId)
+            val session = sessions[accId] ?: return@withContext SendResult.Failure("Account not connected")
+            val roomId = (ConversationIds.remoteId(conversationId) ?: conversationId)
+            session.trixnityEngine?.let { engine ->
+                val sent = engine.sendText(
+                    roomId = roomId,
+                    body = body.value,
+                    replyToEventId = replyToEventId,
+                    threadRootEventId = threadRootEventId,
                 )
-                SendResult.Failure(e.message ?: "Send failed")
+                if (sent.isFailure) {
+                    return@withContext SendResult.Failure(
+                        sent.exceptionOrNull()?.message ?: "Send failed",
+                    )
+                }
+                val txnId = sent.getOrThrow()
+                val outboxId = txnId.ifBlank { "${conversationId}_${System.currentTimeMillis()}" }
+                val payload = buildString {
+                    if (replyToEventId != null || threadRootEventId != null) {
+                        append('{')
+                        var first = true
+                        if (replyToEventId != null) {
+                            append("\"replyTo\":\"").append(replyToEventId).append('"')
+                            first = false
+                        }
+                        if (threadRootEventId != null) {
+                            if (!first) append(',')
+                            append("\"threadRoot\":\"").append(threadRootEventId).append('"')
+                        }
+                        append('}')
+                    }
+                }.ifBlank { null }
+                val msg = Message(
+                    id = outboxId,
+                    conversationId = conversationId,
+                    protocol = ProtocolId.MATRIX,
+                    body = body.value,
+                    timestamp = System.currentTimeMillis(),
+                    direction = MessageDirection.OUTGOING,
+                    deliveryState = DeliveryState.PENDING,
+                    payloadJson = payload,
+                )
+                repository.upsertMessage(msg)
+                return@withContext SendResult.Success(msg.id)
             }
+            SendResult.Failure("E2EE Matrix indisponible — reconnectez le compte")
+        } catch (e: Exception) {
+            val failedId = "${conversationId}_${System.currentTimeMillis()}"
+            repository.upsertMessage(
+                Message(
+                    id = failedId,
+                    conversationId = conversationId,
+                    protocol = ProtocolId.MATRIX,
+                    body = body.value,
+                    timestamp = System.currentTimeMillis(),
+                    direction = MessageDirection.OUTGOING,
+                    deliveryState = DeliveryState.FAILED,
+                ),
+            )
+            SendResult.Failure(e.message ?: "Send failed")
         }
+    }
 
     override suspend fun sendMedia(
         conversationId: String,
@@ -804,7 +839,13 @@ class MatrixProtocol @Inject constructor(
         accountId: String?,
     ): SendResult = withContext(Dispatchers.IO) {
         when (content) {
-            is OutgoingContent.Text -> sendMessage(conversationId, content.body, accountId)
+            is OutgoingContent.Text -> sendTextInternal(
+                conversationId = conversationId,
+                body = content.body,
+                accountId = accountId,
+                replyToEventId = content.replyToEventId,
+                threadRootEventId = content.threadRootEventId,
+            )
             is OutgoingContent.Media -> sendMediaInternal(
                 conversationId = conversationId,
                 attachment = content.attachment,
@@ -1102,6 +1143,120 @@ class MatrixProtocol @Inject constructor(
             val roomId = ConversationIds.remoteId(conversationId) ?: error("Room invalide")
             engine.redactMessage(roomId, messageId).getOrThrow()
         }
+    }
+
+    private suspend fun <T> withMatrixEngine(
+        conversationId: String?,
+        accountId: String?,
+        block: suspend (engine: TrixnityMatrixEngine, roomId: String?) -> T,
+    ): Result<T> = withContext(Dispatchers.IO) {
+        runCatching {
+            networkGuard.assertNetworkAllowed()
+            val accId = accountId
+                ?: conversationId?.let { ConversationIds.accountId(it) }
+                ?: error("Compte Matrix introuvable")
+            val engine = sessions[accId]?.trixnityEngine ?: error("Matrix non connecté")
+            val roomId = conversationId?.let { ConversationIds.remoteId(it) }
+            block(engine, roomId)
+        }
+    }
+
+    suspend fun leaveConversation(
+        conversationId: String,
+        reason: String? = null,
+        accountId: String? = null,
+    ): Result<Unit> = withMatrixEngine(conversationId, accountId) { engine, roomId ->
+        engine.leaveRoom(roomId ?: error("Room invalide"), reason).getOrThrow()
+    }
+
+    suspend fun forgetRoom(
+        conversationId: String,
+        accountId: String? = null,
+    ): Result<Unit> = withMatrixEngine(conversationId, accountId) { engine, roomId ->
+        engine.forgetRoom(roomId ?: error("Room invalide")).getOrThrow()
+    }
+
+    suspend fun inviteToRoom(
+        conversationId: String,
+        userId: String,
+        reason: String? = null,
+        accountId: String? = null,
+    ): Result<Unit> = withMatrixEngine(conversationId, accountId) { engine, roomId ->
+        engine.inviteUser(roomId ?: error("Room invalide"), userId, reason).getOrThrow()
+    }
+
+    suspend fun kickUser(
+        conversationId: String,
+        userId: String,
+        reason: String? = null,
+        accountId: String? = null,
+    ): Result<Unit> = withMatrixEngine(conversationId, accountId) { engine, roomId ->
+        engine.kickUser(roomId ?: error("Room invalide"), userId, reason).getOrThrow()
+    }
+
+    suspend fun banUser(
+        conversationId: String,
+        userId: String,
+        reason: String? = null,
+        accountId: String? = null,
+    ): Result<Unit> = withMatrixEngine(conversationId, accountId) { engine, roomId ->
+        engine.banUser(roomId ?: error("Room invalide"), userId, reason).getOrThrow()
+    }
+
+    suspend fun setRoomName(
+        conversationId: String,
+        name: String,
+        accountId: String? = null,
+    ): Result<Unit> = withMatrixEngine(conversationId, accountId) { engine, roomId ->
+        engine.setRoomName(roomId ?: error("Room invalide"), name).getOrThrow()
+    }
+
+    suspend fun setRoomTopic(
+        conversationId: String,
+        topic: String,
+        accountId: String? = null,
+    ): Result<Unit> = withMatrixEngine(conversationId, accountId) { engine, roomId ->
+        engine.setRoomTopic(roomId ?: error("Room invalide"), topic).getOrThrow()
+    }
+
+    suspend fun setRoomFavourite(
+        conversationId: String,
+        favourite: Boolean,
+        accountId: String? = null,
+    ): Result<Unit> = withMatrixEngine(conversationId, accountId) { engine, roomId ->
+        engine.setFavourite(roomId ?: error("Room invalide"), favourite).getOrThrow()
+    }
+
+    suspend fun ignoreUser(
+        userId: String,
+        ignore: Boolean,
+        accountId: String,
+    ): Result<Unit> = withMatrixEngine(conversationId = null, accountId = accountId) { engine, _ ->
+        engine.ignoreUser(userId, ignore).getOrThrow()
+    }
+
+    suspend fun listPublicRooms(
+        accountId: String,
+        limit: Long = 20,
+        since: String? = null,
+    ): Result<List<MatrixPublicRoom>> = withMatrixEngine(null, accountId) { engine, _ ->
+        engine.listPublicRooms(limit, since).getOrThrow()
+    }
+
+    suspend fun getSpaceHierarchy(
+        spaceRoomId: String,
+        accountId: String,
+        limit: Long = 20,
+    ): Result<List<MatrixHierarchyRoom>> = withMatrixEngine(null, accountId) { engine, _ ->
+        engine.getSpaceHierarchy(spaceRoomId, limit).getOrThrow()
+    }
+
+    suspend fun knockRoom(
+        roomIdOrAlias: String,
+        accountId: String,
+        reason: String? = null,
+    ): Result<String> = withMatrixEngine(null, accountId) { engine, _ ->
+        engine.knockRoom(roomIdOrAlias, reason).getOrThrow()
     }
 
     override suspend fun wipeLocalData(accountId: String) {
