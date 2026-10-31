@@ -78,10 +78,15 @@
 ### IRC
 | ID | Prio | État | Note |
 |----|------|------|------|
-| IRC-04 | P2 | **Fait** `/me` | |
-| IRC-07 | P1 | **Fait** label Nicks | |
-| IRC-01–03/06/08/09 | P2 | Absent | Topic edit UI, WHOIS, IRCv3 honesty, modes, +k |
-| IRC-05 | P3 | Volontaire | DCC |
+| IRC-01 | P2 | **Fait** | `/topic` (+ inventaire `docs/features/IRC_FULL_INVENTORY.md`) |
+| IRC-02 | P2 | **Fait** | `/whois` + `WhoisEvent` |
+| IRC-03 | P2 | **Fait** | Caps honesty + `/caps` + server-time / echo / chathistory / react |
+| IRC-04 | P2 | **Fait** | `/me` CTCP ACTION inbound+outbound |
+| IRC-05 | P3 | **Blocked** | DCC (Tor-unsafe) |
+| IRC-06 | P2 | **Fait** | MODE observe + `/mode` `/op` `/kick` `/ban`… |
+| IRC-07 | P1 | **Fait** | label Nicks |
+| IRC-08 | P2 | **Fait** | `/banlist` + `ChannelModeInfoListEvent` |
+| IRC-09 | P2 | **Fait** | `+k` via `#chan=key` / `/join` / `/key` |
 
 ### App transversal
 | ID | Prio | État | Note |

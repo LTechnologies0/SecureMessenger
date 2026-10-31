@@ -54,10 +54,59 @@ object IrcTargets {
         ConversationIds.remoteId(conversationId) ?: conversationId
 
     fun parseChannels(raw: String?): List<String> =
+        parseChannelJoins(raw).map { it.name }
+
+    /**
+     * Auto-join entries. Supports `#chan`, `#chan=key`, `#chan:key`
+     * (comma / semicolon / whitespace separated).
+     */
+    data class ChannelJoin(val name: String, val key: String? = null)
+
+    fun parseChannelJoins(raw: String?): List<ChannelJoin> =
         raw.orEmpty()
-            .split(',', ' ', ';')
+            .split(',', ';')
+            .asSequence()
             .map { it.trim() }
             .filter { it.isNotEmpty() }
-            .map { canonicalChannel(it) }
-            .distinctBy { foldChannel(it) }
+            .flatMap { token ->
+                // Allow space-separated bare channels inside a comma field: "#a #b"
+                if (('=' !in token && ':' !in token) && ' ' in token) {
+                    token.split(Regex("\\s+")).filter { it.isNotEmpty() }
+                } else {
+                    listOf(token)
+                }
+            }
+            .map { token ->
+                val sep = when {
+                    '=' in token -> '='
+                    // `#chan:key` — only split on first ':' after the channel name
+                    token.indexOf(':') > 0 -> ':'
+                    else -> null
+                }
+                if (sep == null) {
+                    ChannelJoin(canonicalChannel(token), null)
+                } else {
+                    val idx = token.indexOf(sep)
+                    val name = token.substring(0, idx).trim()
+                    val key = token.substring(idx + 1).trim().takeIf { it.isNotEmpty() }
+                    ChannelJoin(canonicalChannel(name), key)
+                }
+            }
+            .distinctBy { foldChannel(it.name) }
+            .toList()
+
+    /** Merge `channels` + optional `channelKeys` (`#a=k1,#b=k2`) maps. */
+    fun mergeChannelKeys(
+        channelsRaw: String?,
+        keysRaw: String?,
+    ): List<ChannelJoin> {
+        val base = parseChannelJoins(channelsRaw).toMutableList()
+        val byName = base.associateBy { foldChannel(it.name) }.toMutableMap()
+        parseChannelJoins(keysRaw).forEach { keyed ->
+            if (keyed.key != null) {
+                byName[foldChannel(keyed.name)] = keyed
+            }
+        }
+        return byName.values.toList()
+    }
 }

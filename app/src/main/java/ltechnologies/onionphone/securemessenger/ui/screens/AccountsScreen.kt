@@ -289,7 +289,7 @@ fun AccountsScreen(
                     OutlinedTextField(
                         field5,
                         { field5 = it },
-                        label = { Text("Canaux auto-join (#chan1,#chan2)") },
+                        label = { Text("Canaux auto-join (#chan,#chan=key)") },
                         modifier = Modifier.fillMaxWidth(),
                     )
                     TextButton(onClick = {
