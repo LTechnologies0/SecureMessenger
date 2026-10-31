@@ -20,7 +20,7 @@
 | Vendor API | `vendor/signal/libsignal-service/.../org/whispersystems/signalservice/api/**` |
 | Crypto client | Maven `org.signal:libsignal-client` / `libsignal-android` |
 
-Capabilities (`baseSignalCapabilities`): DM/group/media/typing/receipts/E2EE/contacts/profile/voice/stickers/location/polls/contactShare/ephemeral/reactions/delete/reply/`localChatListControls` = **true**; gifs/calls/stories/edit/forward = **false**; `messageHistory` after link-and-sync import.
+Capabilities (`baseSignalCapabilities`): DM/group/media/typing/receipts/E2EE/contacts/profile/voice/stickers/location/polls/contactShare/ephemeral/reactions/delete/edit/reply/`localChatListControls` = **true**; gifs/calls/stories/forward = **false**; `messageHistory` after link-and-sync import.
 
 ---
 
@@ -111,7 +111,7 @@ Capabilities (`baseSignalCapabilities`): DM/group/media/typing/receipts/E2EE/con
 | SIG-DM-04 | Quotes / reply outbound+inbound | DataMessage.quote | **partial** | Inbound OK; no `withQuote` outbound; cap `messageReply=true` |
 | SIG-DM-05 | Reactions | `withReaction` | **partial** | DM out+in; GV2 out missing |
 | SIG-DM-06 | Remote delete | `withRemoteDelete` | **partial** | DM out; GV2 out missing; inbound remote-delete missing |
-| SIG-DM-07 | Message edit | `sendEditMessage` / inbound EditMessage | **partial** | Inbound OK; outbound missing; cap `messageEdit=false` |
+| SIG-DM-07 | Message edit | `sendEditMessage` / inbound EditMessage | **done** | DM + GV2 fan-out outbound; inbound OK; cap `messageEdit=true` |
 | SIG-DM-08 | Forward | client re-compose | **missing** | Cap false |
 | SIG-TYP-01 | Typing indicators | `sendTyping` / `sendGroupTyping` | **done** | 1:1 + GV2 |
 | SIG-RCPT-01 | Read receipts outbound | `sendReceipt` | **partial** | 1:1; groups local-only |
@@ -198,20 +198,19 @@ Capabilities (`baseSignalCapabilities`): DM/group/media/typing/receipts/E2EE/con
 
 Priority order for atomic commits on this branch (excludes blocked):
 
-1. **SIG-DM-07** — outbound edit + `messageEdit=true`
-2. **SIG-DM-04** — outbound quotes (`withQuote`)
-3. **SIG-DM-05/06** — GV2 reactions + remote-delete
-4. **SIG-DM-06 inbound** — apply remote-delete on receive
-5. **SIG-GV2-06** — leave group
-6. **SIG-GV2-04** — title/desc/add/remove members (minimal admin)
-7. **SIG-EPH-01** — conversation timer update message
-8. **SIG-SAFE-02** — mark verified + sync outbound
-9. **SIG-USER-01** — username set (API)
-10. **SIG-PROF-02** — profile avatar upload
-11. **SIG-SEAL-01** — fetch peer profile key for sealed sender
-12. **SIG-POLL-02** — poll vote
-13. **SIG-GV2-05** — invite links (if time)
-14. **SIG-STOR-02** — storage write-back (if time)
+1. **SIG-DM-04** — outbound quotes (`withQuote`)
+2. **SIG-DM-05/06** — GV2 reactions + remote-delete
+3. **SIG-DM-06 inbound** — apply remote-delete on receive
+4. **SIG-GV2-06** — leave group
+5. **SIG-GV2-04** — title/desc/add/remove members (minimal admin)
+6. **SIG-EPH-01** — conversation timer update message
+7. **SIG-SAFE-02** — mark verified + sync outbound
+8. **SIG-USER-01** — username set (API)
+9. **SIG-PROF-02** — profile avatar upload
+10. **SIG-SEAL-01** — fetch peer profile key for sealed sender
+11. **SIG-POLL-02** — poll vote
+12. **SIG-GV2-05** — invite links (if time)
+13. **SIG-STOR-02** — storage write-back (if time)
 15. **SIG-STICK-02** — sticker pack retrieve (if time)
 
 **Explicitly not in backlog:** SIG-CALL-02/03, SIG-REG-03–05, SIG-PAY-01, SIG-DON-01.

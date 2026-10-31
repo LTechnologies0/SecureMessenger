@@ -42,6 +42,7 @@ import ltechnologies.onionphone.securemessenger.core.model.ProxyConfig
 import ltechnologies.onionphone.securemessenger.core.model.SanitizedText
 import ltechnologies.onionphone.securemessenger.core.model.SendResult
 import ltechnologies.onionphone.securemessenger.core.security.EncryptedCredentialStore
+import ltechnologies.onionphone.securemessenger.core.security.MessageSanitizer
 import ltechnologies.onionphone.securemessenger.data.MessengerRepository
 import ltechnologies.onionphone.securemessenger.protocol.api.MessengerProtocol
 import ltechnologies.onionphone.securemessenger.protocol.api.ProtocolNotEnabledException
@@ -103,7 +104,7 @@ class SignalProtocol @Inject constructor(
         // sendStory exists but has no UI — keep false until a story surface ships.
         stories = false,
         reactions = true,
-        messageEdit = false, // inbound edit handled; outbound EditMessage not wired yet
+        messageEdit = true,
         messageDelete = true,
         messageForward = false,
         messageReply = true,
@@ -227,6 +228,143 @@ class SignalProtocol @Inject constructor(
                 error((send as? SendResult.Failure)?.reason ?: "Suppression Signal échouée")
             }
             repository.deleteMessages(listOf(messageId))
+        }
+    }
+
+    /**
+     * Outbound message edit (SIG-DM-07). DM uses [SignalServiceMessageSender.sendEditMessage];
+     * GV2 uses multi-recipient fan-out edit. Keeps the original local [messageId] on success
+     * (same as inbound [SignalMessageHandler] edit handling).
+     */
+    suspend fun editMessage(
+        conversationId: String,
+        messageId: String,
+        newBody: String,
+        accountId: String? = null,
+    ): Result<Unit> = withContext(signalDispatcher) {
+        runCatching {
+            val (accId, active) = resolveLiveAccount(accountId)
+                ?: error("Signal non connecté")
+            val remoteId = conversationId.removePrefix("${accId}_")
+            if (remoteId == conversationId) {
+                error("Conversation Signal invalide")
+            }
+            val targetTs = if (messageId.startsWith("${conversationId}_")) {
+                messageId.removePrefix("${conversationId}_").toLongOrNull()
+            } else {
+                messageId.substringAfterLast('_').toLongOrNull()
+            } ?: error("Message Signal invalide")
+            val body = MessageSanitizer.sanitize(newBody).value
+            val editTimestamp = System.currentTimeMillis()
+            val masterKey = SignalGroupHelper.parseMasterKey(remoteId)
+            if (masterKey != null) {
+                sendGroupEditMessage(active, accId, masterKey, body, editTimestamp, targetTs)
+            } else {
+                sendDmEditMessage(active, remoteId, body, editTimestamp, targetTs)
+            }
+            applyLocalEdit(conversationId, messageId, targetTs, body, editTimestamp)
+        }
+    }
+
+    private fun sendDmEditMessage(
+        active: SignalSessionContext,
+        remoteId: String,
+        body: String,
+        editTimestamp: Long,
+        targetSentTimestamp: Long,
+    ) {
+        val address = resolveSignalAddress(remoteId)
+        val dataMessage = SignalServiceDataMessage.newBuilder()
+            .withTimestamp(editTimestamp)
+            .withBody(body)
+            .build()
+        val sealed = resolveSealedSenderAccess(active, address)
+        val result = active.messageSender.sendEditMessage(
+            address,
+            sealed,
+            ContentHint.DEFAULT,
+            dataMessage,
+            SignalServiceMessageSender.IndividualSendEvents.EMPTY,
+            true,
+            targetSentTimestamp,
+        )
+        if (!result.isSuccess) {
+            error("Édition Signal échouée")
+        }
+    }
+
+    private fun sendGroupEditMessage(
+        active: SignalSessionContext,
+        accId: String,
+        masterKeyBytes: ByteArray,
+        body: String,
+        editTimestamp: Long,
+        targetSentTimestamp: Long,
+    ) {
+        val helper = groupHelper ?: SignalGroupHelper(context, accId, credentialStore).also { groupHelper = it }
+        val plan = helper.resolveSendTargets(active, masterKeyBytes)
+            ?: error("Membres du groupe Signal inconnus — attendez un message entrant")
+        val dataMessage = SignalServiceDataMessage.newBuilder()
+            .withTimestamp(editTimestamp)
+            .withBody(body)
+            .asGroupMessage(plan.groupContext)
+            .build()
+        val endorsements = plan.groupSendEndorsements
+        val sealed = if (endorsements != null && plan.unidentifiedAccess.size == plan.recipients.size) {
+            SealedSenderAccess.forFanOutGroupSend(
+                endorsements.forIndividuals(plan.recipients),
+                endorsements.sealedSenderCertificate,
+                plan.unidentifiedAccess,
+            )
+        } else {
+            plan.recipients.map { resolveSealedSenderAccess(active, it) }
+        }
+        val results = active.messageSender.sendEditMessage(
+            plan.recipients,
+            sealed,
+            false,
+            ContentHint.DEFAULT,
+            dataMessage,
+            SignalServiceMessageSender.LegacyGroupEvents.EMPTY,
+            null,
+            null,
+            true,
+            targetSentTimestamp,
+        )
+        val delivered = results.filter { it.isSuccess }.map { it.address.serviceId.toString() }.toSet()
+        if (plan.recipients.any { it.serviceId.toString() !in delivered }) {
+            error("Édition Signal groupe échouée")
+        }
+    }
+
+    private suspend fun applyLocalEdit(
+        conversationId: String,
+        messageId: String,
+        targetTs: Long,
+        newBody: String,
+        editTimestamp: Long,
+    ) {
+        val existing = repository.getMessage(messageId)
+            ?: repository.listMessagesByTimestamp(conversationId, targetTs).firstOrNull()
+        if (existing != null) {
+            val editPayload = JSONObject(existing.payloadJson ?: "{}")
+                .put("edited", true)
+                .put("targetSentTimestamp", targetTs)
+                .toString()
+            repository.upsertMessage(
+                existing.copy(
+                    body = newBody,
+                    payloadJson = editPayload,
+                ),
+            )
+        }
+        repository.getConversation(conversationId)?.let { conv ->
+            repository.upsertConversation(
+                conv.copy(
+                    lastMessagePreview = newBody,
+                    lastMessageAt = editTimestamp,
+                ),
+            )
         }
     }
 
