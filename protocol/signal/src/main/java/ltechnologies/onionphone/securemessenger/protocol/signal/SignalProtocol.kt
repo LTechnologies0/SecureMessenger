@@ -905,10 +905,14 @@ class SignalProtocol @Inject constructor(
     /** Routes Signal OkHttp/WebSocket (including [PushServiceSocket] registration) through Tor SOCKS. */
     private fun applySignalSocks(proxy: ProxyConfig) {
         val host = SocksEndpointResolver.resolveReachableHost(proxy.host, proxy.port)
+        // Non-empty SOCKS user for Tor IsolateSOCKSAuth / Arti IsolationToken (never blank).
+        val socksUser = proxy.username?.takeIf { it.isNotBlank() }
+            ?: "signal-${java.util.UUID.randomUUID()}"
+        val socksPass = proxy.password?.takeIf { it.isNotBlank() } ?: "x"
         SignalSocksHolder.set(
             Proxy(Proxy.Type.SOCKS, InetSocketAddress(host, proxy.port)),
-            proxy.username,
-            proxy.password,
+            socksUser,
+            socksPass,
         )
         Timber.i("Signal SOCKS enabled %s:%d", host, proxy.port)
         session?.applyNetworkProxyFromSocksHolder()

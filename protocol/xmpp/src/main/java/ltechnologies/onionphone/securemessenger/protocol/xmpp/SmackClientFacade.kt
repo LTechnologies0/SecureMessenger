@@ -203,7 +203,10 @@ class SmackClientFacade(
                 e,
             )
         }
-        builder.setSocketFactory(SocksUnresolvedSocketFactory(socksHost, proxy.port))
+        // Smack ProxyInfo speaks SOCKS5 on a *plain* Socket, then STARTTLS wraps that socket
+        // (TLS inside the tunnel). Do NOT also set SocksUnresolvedSocketFactory — that returns
+        // Socket(Proxy.SOCKS), so ProxySocketConnection would SOCKS-dial the SOCKS bridge
+        // (ClientHello / XMPP stream never reaches the XMPP host).
         org.jivesoftware.smack.util.DNSUtil.setDNSResolver(DummyTorDnsResolver())
         builder.setProxyInfo(
             smackSocksProxyInfo(socksHost, proxy.port, proxy.username, proxy.password),

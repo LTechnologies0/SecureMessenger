@@ -181,6 +181,22 @@ class ConnectionManager @Inject constructor(
             }
             is ConnectionResult.Failure -> ConnectionState.ERROR
         }
+        if (result is ConnectionResult.Success && state == ConnectionState.CONNECTED) {
+            credentialStore.put(credentials.accountId, ACCOUNT_ESTABLISHED_KEY, "true")
+        }
+        if (result is ConnectionResult.Failure &&
+            !isAccountEstablished(credentials.accountId) &&
+            protocol.pendingAuthStep()?.accountId != credentials.accountId
+        ) {
+            // Failed first-time add must not leave secrets that restore() will redial forever
+            // (seen as phantom IRC/XMPP/… connections on every app launch).
+            Timber.i(
+                "Dropping never-established account ${credentials.accountId} after connect failure",
+            )
+            credentialStore.removeAccount(credentials.accountId)
+            runCatching { repository.get().deleteAccount(credentials.accountId) }
+            return result
+        }
         repository.get().upsertAccount(
             ltechnologies.onionphone.securemessenger.core.model.Account(
                 id = credentials.accountId,
@@ -348,6 +364,25 @@ class ConnectionManager @Inject constructor(
                 }
                 if (!proxyManager.isNetworkAllowed()) {
                     Timber.i("Skip restore for $accountId ($protocolId): Tor required but SOCKS down")
+                    return
+                }
+                // Migrate pre-marker installs that last left the row CONNECTED.
+                if (existing?.connectionState == ConnectionState.CONNECTED &&
+                    !isAccountEstablished(accountId)
+                ) {
+                    credentialStore.put(accountId, ACCOUNT_ESTABLISHED_KEY, "true")
+                }
+                // Ghost cleanup: secrets persisted on a failed first connect (pre-fix) or a
+                // half-written row — never successfully CONNECTED. Do not redial them.
+                if (!isAccountEstablished(accountId) &&
+                    existing?.connectionState != ConnectionState.CONNECTED &&
+                    existing?.connectionState != ConnectionState.CONNECTING &&
+                    !(protocolId == ProtocolId.SIGNAL && isSignalProvisioned(accountId)) &&
+                    !(protocolId == ProtocolId.TELEGRAM && hasTelegramProvisionedSecrets(accountId))
+                ) {
+                    Timber.i("Removing never-established account $accountId ($protocolId)")
+                    credentialStore.removeAccount(accountId)
+                    runCatching { repository.get().deleteAccount(accountId) }
                     return
                 }
                 if (protocolId == ProtocolId.TELEGRAM && existing?.connectionState != ConnectionState.CONNECTED) {
@@ -590,5 +625,13 @@ class ConnectionManager @Inject constructor(
         if (secrets.isEmpty()) return false
         // Any non-meta secret (api / phone / db key material) means we should restore, not wipe.
         return secrets.keys.any { it != "displayName" }
+    }
+
+    /** True after at least one fully CONNECTED session (survives later ERROR flaps). */
+    private fun isAccountEstablished(accountId: String): Boolean =
+        credentialStore.get(accountId, ACCOUNT_ESTABLISHED_KEY) == "true"
+
+    companion object {
+        private const val ACCOUNT_ESTABLISHED_KEY = "__established"
     }
 }
