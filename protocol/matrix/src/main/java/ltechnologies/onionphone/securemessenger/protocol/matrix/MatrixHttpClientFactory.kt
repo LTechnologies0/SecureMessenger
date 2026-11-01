@@ -5,10 +5,10 @@ import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.serialization.kotlinx.json.json
 import java.net.InetSocketAddress
-import java.net.Proxy
 import java.net.Socket
 import kotlinx.serialization.json.Json
 import ltechnologies.onionphone.securemessenger.core.model.ProxyConfig
+import ltechnologies.onionphone.securemessenger.core.network.TorSocksOkHttp
 import ltechnologies.onionphone.securemessenger.core.proxy.SocksEndpointResolver
 import okhttp3.OkHttpClient
 
@@ -29,9 +29,9 @@ internal object MatrixHttpClientFactory {
     fun buildOkHttp(proxy: ProxyConfig): OkHttpClient {
         val socksHost = SocksEndpointResolver.resolveReachableHost(proxy.host, proxy.port)
         requireSocksReachable(socksHost, proxy.port)
-        return OkHttpClient.Builder()
-            .proxy(Proxy(Proxy.Type.SOCKS, InetSocketAddress(socksHost, proxy.port)))
-            .build()
+        // TorSocksOkHttp: SOCKS + remote DNS so TLS ClientHello stays inside the tunnel
+        // and on-device resolvers never see Matrix homeserver names.
+        return TorSocksOkHttp.client(proxy)
     }
 
     private fun requireSocksReachable(host: String, port: Int) {

@@ -7,14 +7,11 @@ import io.ktor.client.engine.okhttp.OkHttpConfig
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.plugins.websocket.WebSockets
 import io.ktor.serialization.kotlinx.json.json
-import java.net.InetSocketAddress
-import java.net.Proxy
 import java.net.Socket
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.serialization.json.Json
 import ltechnologies.onionphone.securemessenger.core.proxy.ProxyManager
-import ltechnologies.onionphone.securemessenger.core.proxy.SocksEndpointResolver
 import okhttp3.OkHttpClient
 
 /**
@@ -74,15 +71,6 @@ class ProxiedHttpClientFactory @Inject constructor(
 
     fun okhttpClient(): OkHttpClient {
         networkGuard.assertNetworkAllowed()
-        val config = proxyManager.currentConfig()
-        val socksHost = SocksEndpointResolver.resolveReachableHost(config.host, config.port)
-        return OkHttpClient.Builder()
-            .proxy(
-                Proxy(
-                    Proxy.Type.SOCKS,
-                    InetSocketAddress(socksHost, config.port),
-                ),
-            )
-            .build()
+        return TorSocksOkHttp.client(proxyManager.currentConfig())
     }
 }

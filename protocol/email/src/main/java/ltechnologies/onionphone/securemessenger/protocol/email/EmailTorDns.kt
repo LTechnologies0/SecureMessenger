@@ -13,6 +13,7 @@ import javax.net.ssl.SSLSocketFactory
 import javax.net.ssl.SNIHostName
 import ltechnologies.onionphone.securemessenger.core.model.ProxyConfig
 import ltechnologies.onionphone.securemessenger.core.network.ProxiedHttpClientFactory
+import ltechnologies.onionphone.securemessenger.core.network.TorSocksOkHttp
 import ltechnologies.onionphone.securemessenger.core.proxy.SocksEndpointResolver
 import okhttp3.Request
 import timber.log.Timber
@@ -23,17 +24,8 @@ import timber.log.Timber
  * and set SNI / hostname verification to the original hostname.
  */
 object EmailTorDns {
-    /**
-     * OkHttp [Dns] that never hits system resolvers: literal IPv4 only, else SOCKS remote-DNS
-     * (same idea as [ltechnologies.onionphone.securemessenger.core.proxy.SocksConnectivityChecker]).
-     */
-    val socksRemoteDns: Dns = Dns { hostname ->
-        if (looksLikeIpv4(hostname)) {
-            listOf(InetAddress.getByAddress(hostname, parseIpv4(hostname)))
-        } else {
-            listOf(InetAddress.getByAddress(hostname, byteArrayOf(0, 0, 0, 1)))
-        }
-    }
+    /** Delegates to shared [TorSocksOkHttp.socksRemoteDns] (no on-device resolver). */
+    val socksRemoteDns: Dns get() = TorSocksOkHttp.socksRemoteDns
 
     fun resolveIpv4(
         hostname: String,
@@ -74,11 +66,6 @@ object EmailTorDns {
 
     fun looksLikeIpv4(value: String): Boolean =
         value.matches(Regex("""^\d{1,3}(\.\d{1,3}){3}$"""))
-
-    private fun parseIpv4(value: String): ByteArray {
-        val parts = value.split('.')
-        return ByteArray(4) { i -> parts[i].toInt().coerceIn(0, 255).toByte() }
-    }
 
     fun plainSocksFactory(proxy: ProxyConfig): SocketFactory {
         val socksHost = SocksEndpointResolver.resolveReachableHost(proxy.host, proxy.port)
@@ -130,25 +117,29 @@ object EmailTorDns {
             override fun createSocket(s: Socket, host: String, port: Int, autoClose: Boolean): Socket =
                 tune(delegate.createSocket(s, serverName, port, autoClose) as SSLSocket)
 
+            // Angus must wrap a SOCKS-connected plain socket (createSocket(Socket,…)).
+            // Direct host/port constructors would TLS-dial clearnet — refuse them.
             override fun createSocket(host: String, port: Int): Socket =
-                tune(delegate.createSocket(host, port) as SSLSocket)
+                throw UnsupportedOperationException(
+                    "Email TLS must wrap a Tor SOCKS socket (refusing clearnet SSLSocket)",
+                )
 
             override fun createSocket(
                 host: String,
                 port: Int,
                 localHost: java.net.InetAddress,
                 localPort: Int,
-            ): Socket = tune(delegate.createSocket(host, port, localHost, localPort) as SSLSocket)
+            ): Socket = createSocket(host, port)
 
             override fun createSocket(host: java.net.InetAddress, port: Int): Socket =
-                tune(delegate.createSocket(host, port) as SSLSocket)
+                createSocket(host.hostAddress ?: host.hostName, port)
 
             override fun createSocket(
                 address: java.net.InetAddress,
                 port: Int,
                 localAddress: java.net.InetAddress,
                 localPort: Int,
-            ): Socket = tune(delegate.createSocket(address, port, localAddress, localPort) as SSLSocket)
+            ): Socket = createSocket(address, port)
         }
     }
 

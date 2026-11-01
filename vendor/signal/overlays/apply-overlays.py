@@ -67,9 +67,20 @@ def patch_push_socket() -> None:
         """      java.net.Proxy socksProxy = SignalSocksHolder.get();
       if (socksProxy != null) {
         builder.proxy(socksProxy);
+        // No on-device DNS: keep hostname for SNI; Tor resolves via SOCKS5 DOMAIN.
+        builder.dns(hostname -> {
+          try {
+            return java.util.Collections.singletonList(
+                java.net.InetAddress.getByAddress(hostname, new byte[] {0, 0, 0, 1}));
+          } catch (java.net.UnknownHostException e) {
+            throw new java.net.UnknownHostException(hostname);
+          }
+        });
         String socksUser = SignalSocksHolder.getUsername();
         if (socksUser != null && !socksUser.isEmpty()) {
           String socksPass = SignalSocksHolder.getPassword() != null ? SignalSocksHolder.getPassword() : "";
+          // HTTP CONNECT only; SOCKS5 USERNAME/PASSWORD is handled by the Java SOCKS stack /
+          // libsignal Network.setProxy — not by Proxy-Authorization.
           builder.proxyAuthenticator((route, response) ->
               response.request().newBuilder()
                   .header("Proxy-Authorization", okhttp3.Credentials.basic(socksUser, socksPass))
@@ -146,6 +157,14 @@ def patch_websocket() -> None:
         """      java.net.Proxy socksProxy = SignalSocksHolder.get();
       if (socksProxy != null) {
         clientBuilder.proxy(socksProxy);
+        clientBuilder.dns(hostname -> {
+          try {
+            return java.util.Collections.singletonList(
+                java.net.InetAddress.getByAddress(hostname, new byte[] {0, 0, 0, 1}));
+          } catch (java.net.UnknownHostException e) {
+            throw new java.net.UnknownHostException(hostname);
+          }
+        });
         String socksUser = SignalSocksHolder.getUsername();
         if (socksUser != null && !socksUser.isEmpty()) {
           String socksPass = SignalSocksHolder.getPassword() != null ? SignalSocksHolder.getPassword() : "";
@@ -183,6 +202,9 @@ def patch_url_extensions() -> None:
         """  val socksProxy = SignalSocksHolder.get()
   if (socksProxy != null) {
     builder.proxy(socksProxy)
+    builder.dns { hostname ->
+      listOf(java.net.InetAddress.getByAddress(hostname, byteArrayOf(0, 0, 0, 1)))
+    }
     val socksUser = SignalSocksHolder.getUsername()
     if (!socksUser.isNullOrEmpty()) {
       val socksPass = SignalSocksHolder.getPassword().orEmpty()

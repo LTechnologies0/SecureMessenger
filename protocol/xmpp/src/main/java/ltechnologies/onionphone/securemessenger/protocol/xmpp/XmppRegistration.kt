@@ -115,7 +115,7 @@ internal class XmppRegistration(private val context: Context) {
                 e,
             )
         }
-        builder.setSocketFactory(SocksUnresolvedSocketFactory(socksHost, proxy.port))
+        // Plain socket + ProxyInfo only — see SmackClientFacade (no double SOCKS).
         org.jivesoftware.smack.util.DNSUtil.setDNSResolver(DummyTorDnsResolver())
         builder.setProxyInfo(
             smackSocksProxyInfo(socksHost, proxy.port, proxy.username, proxy.password),
